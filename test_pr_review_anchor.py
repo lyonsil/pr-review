@@ -794,5 +794,123 @@ class TestPayloadCli(unittest.TestCase):
         self.assertIn("alpha", payload["comments"][0]["body"])
 
 
+class TestRenderPreview(unittest.TestCase):
+    def _payload(self, comments=None, body="Review intro", event="COMMENT"):
+        return {"body": body, "event": event,
+                "comments": comments if comments is not None else []}
+
+    def test_renders_all_three_comments_with_full_bodies(self):
+        comments = [
+            {"path": "a.ts", "line": 10, "side": "RIGHT", "body": "first comment body"},
+            {"path": "b.ts", "line": 22, "side": "RIGHT", "body": "second comment body"},
+            {"path": "c.ts", "line": 5, "side": "RIGHT", "body": "third comment body"},
+        ]
+        out = anchor.render_preview(self._payload(comments=comments))
+        for c in comments:
+            self.assertIn(f"{c['path']}:{c['line']}", out)
+            self.assertIn(c["body"], out)
+        self.assertIn("comments: 3", out)
+
+    def test_multiline_markdown_body_reproduced_byte_for_byte(self):
+        body = "Line one.\n\n**bold** and `code`\n\n- item 1\n- item 2\n\n> quote\n\nEnd."
+        payload = self._payload(comments=[{"path": "x.ts", "line": 1, "side": "RIGHT", "body": body}])
+        out = anchor.render_preview(payload)
+        # Not a prefix check - the exact multi-line string must appear verbatim.
+        self.assertIn(body, out)
+
+    def test_review_body_appears_in_full(self):
+        long_body = "Intro paragraph.\n\n" + "\n".join(f"Detail line {n}." for n in range(50))
+        out = anchor.render_preview(self._payload(body=long_body))
+        self.assertIn(long_body, out)
+
+    def test_header_reports_event_and_comment_count(self):
+        out = anchor.render_preview(self._payload(comments=[
+            {"path": "a.ts", "line": 1, "side": "RIGHT", "body": "x"},
+            {"path": "b.ts", "line": 2, "side": "RIGHT", "body": "y"},
+        ], event="COMMENT"))
+        self.assertIn("COMMENT", out)
+        self.assertIn("comments: 2", out)
+
+    def test_no_html_tags_in_output(self):
+        out = anchor.render_preview(self._payload(comments=[
+            {"path": "a.ts", "line": 1, "side": "RIGHT", "body": "plain body"},
+        ]))
+        for tag in ("<details>", "<summary>", "<br>"):
+            self.assertNotIn(tag, out)
+
+
+class TestPreviewCli(unittest.TestCase):
+    def _run(self, payload_path):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_preview(SimpleNamespace(payload=payload_path))
+        return code, out.getvalue(), err.getvalue()
+
+    def _assert_single_curated_error(self, code, out, err):
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        lines = [line for line in err.splitlines() if line]
+        self.assertEqual(len(lines), 1, err)
+        self.assertTrue(lines[0].startswith("error: "), err)
+        self.assertNotIn("Traceback", err)
+
+    def _write_json(self, obj):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(obj, fh)
+            return fh.name
+
+    def _write_text(self, text):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            fh.write(text)
+            return fh.name
+
+    def test_missing_file_emits_single_curated_error(self):
+        code, out, err = self._run("/no/such/payload.json")
+        self._assert_single_curated_error(code, out, err)
+
+    def test_malformed_json_emits_single_curated_error(self):
+        path = self._write_text("{not valid json")
+        try:
+            code, out, err = self._run(path)
+        finally:
+            os.remove(path)
+        self._assert_single_curated_error(code, out, err)
+
+    def test_non_dict_root_emits_single_curated_error(self):
+        path = self._write_json([1, 2, 3])
+        try:
+            code, out, err = self._run(path)
+        finally:
+            os.remove(path)
+        self._assert_single_curated_error(code, out, err)
+
+    def test_missing_comments_key_emits_single_curated_error(self):
+        path = self._write_json({"body": "intro", "event": "COMMENT"})
+        try:
+            code, out, err = self._run(path)
+        finally:
+            os.remove(path)
+        self._assert_single_curated_error(code, out, err)
+
+    def test_end_to_end_renders_full_payload_byte_for_byte(self):
+        payload = {"body": "Review body text " + "x" * 500, "event": "COMMENT",
+                   "comments": [
+                       {"path": "a.ts", "line": 10, "side": "RIGHT", "body": "comment one body"},
+                       {"path": "b.ts", "line": 5, "side": "RIGHT",
+                        "body": "comment two body " + "y" * 500},
+                   ]}
+        path = self._write_json(payload)
+        try:
+            code, out, err = self._run(path)
+        finally:
+            os.remove(path)
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        self.assertIn(payload["body"], out)
+        for c in payload["comments"]:
+            self.assertIn(c["body"], out)
+            self.assertIn(f"{c['path']}:{c['line']}", out)
+
+
 if __name__ == "__main__":
     unittest.main()

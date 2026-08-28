@@ -436,6 +436,55 @@ def cmd_payload(args):
     return 0
 
 
+def render_preview(payload):
+    """Render a complete, non-truncated human-readable rendering of a GitHub
+    review payload dict (the JSON `payload` writes) - a header with the event
+    and comment count, the review body in full, then every comment in full
+    with its path:line and entire body text. Every text field is emitted
+    verbatim (no strip/elide/cap) so the rendering is byte-for-byte what
+    `preview`'s caller is about to POST. Plain text and GitHub-flavoured
+    markdown only - no raw HTML - since this is printed straight to a
+    terminal."""
+    comments = payload.get("comments", [])
+    rule = "=" * 72
+    lines = [rule, "PR REVIEW PAYLOAD PREVIEW",
+             f"event: {payload.get('event', '')}",
+             f"comments: {len(comments)}", rule, "",
+             "REVIEW BODY", "-" * 72, payload.get("body", ""), ""]
+    for n, c in enumerate(comments, start=1):
+        lines.append("-" * 72)
+        lines.append(f"COMMENT {n}/{len(comments)} - {c.get('path', '')}:{c.get('line', '')} "
+                      f"({c.get('side', '')})")
+        lines.append("-" * 72)
+        lines.append(c.get("body", ""))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def cmd_preview(args):
+    try:
+        payload = load(args.payload)
+    except FileNotFoundError:
+        print(f"error: payload file not found: {args.payload}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"error: could not read payload file {args.payload}: {exc}", file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as exc:
+        print(f"error: payload file {args.payload} is not valid JSON: {exc}", file=sys.stderr)
+        return 1
+    if not isinstance(payload, dict):
+        print(f"error: payload root must be a JSON object, got {type(payload).__name__}",
+              file=sys.stderr)
+        return 1
+    if "comments" not in payload:
+        print(f"error: payload file {args.payload} is missing required field 'comments'",
+              file=sys.stderr)
+        return 1
+    print(render_preview(payload))
+    return 0
+
+
 def main():
     p = argparse.ArgumentParser(prog="pr-review-anchor.py")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -449,6 +498,8 @@ def main():
                     help="Re-admit specific REFUTED item ids past the default exclusion "
                          "(per id only - never a blanket override)")
     y.add_argument("--body-file", required=True); y.set_defaults(fn=cmd_payload)
+    w = sub.add_parser("preview")
+    w.add_argument("payload"); w.set_defaults(fn=cmd_preview)
     args = p.parse_args()
     sys.exit(args.fn(args))
 
