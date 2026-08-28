@@ -11,6 +11,10 @@ class SelectionError(ValueError):
     """A --select token names neither a real item id nor a real cluster id."""
 
 
+class PayloadError(ValueError):
+    """A selected item can't be safely anchored into a GitHub review comment."""
+
+
 def validate(ledger):
     if not isinstance(ledger, dict):
         return [f"ledger root must be a JSON object, got {type(ledger).__name__}"]
@@ -198,7 +202,15 @@ def resolve_selection(ledger, tokens):
     for raw in tokens:
         for tok in str(raw).replace(",", " ").split():
             if tok.upper() in by_cluster:
-                ids.update(by_cluster[tok.upper()])
+                # Same known-id check as the digit branch below - a cluster
+                # referencing an id absent from this ledger must fail the
+                # selection, not silently expand to fewer items than the
+                # cluster actually has.
+                for cid in by_cluster[tok.upper()]:
+                    if cid in known_ids:
+                        ids.add(cid)
+                    else:
+                        unknown.append(str(cid))
             elif tok.isdigit():
                 requested = int(tok)
                 if requested in known_ids:
@@ -248,6 +260,16 @@ def build_payload(ledger, tokens, body_intro):
         print(f"warning: {len(dropped)} selected item(s) excluded from payload - {detail}",
               file=sys.stderr)
 
+    # A missing or null file/line means the item was never anchored (or lost
+    # its anchor and wasn't caught upstream - validate() doesn't check line,
+    # and a finding that skipped reanchor never got one at all). Posting it
+    # anyway would put `"line": null` in the payload, which GitHub rejects
+    # for the whole review, not just that comment - fail loudly here instead.
+    unanchored = sorted(it.get("id") for it in items if not it.get("file") or it.get("line") is None)
+    if unanchored:
+        raise PayloadError("item id(s) missing file/line, cannot be anchored to a comment: "
+                            + ", ".join(f"#{i}" for i in unanchored))
+
     sites = {}
     for it in items:
         sites.setdefault((it["file"], it["line"]), []).append(it)
@@ -275,8 +297,15 @@ def build_payload(ledger, tokens, body_intro):
         comments.append({"path": path, "line": line, "side": "RIGHT",
                          "body": "\n\n---\n\n".join(blocks)})
 
-    return {"body": (body_intro.strip() + "\n\n" + ATTRIBUTION).strip(),
-            "event": "COMMENT", "comments": comments}
+    # The attribution footer must appear exactly once. A body file the author
+    # already wrote to their own standing convention may well end with it
+    # already - append only when it isn't already present, rather than
+    # trusting every caller to never include it.
+    body = body_intro.strip()
+    if ATTRIBUTION not in body:
+        body = (body + "\n\n" + ATTRIBUTION).strip()
+
+    return {"body": body, "event": "COMMENT", "comments": comments}
 
 
 def cmd_payload(args):
@@ -307,7 +336,7 @@ def cmd_payload(args):
 
     try:
         payload = build_payload(led, args.select or ["all"], intro)
-    except SelectionError as exc:
+    except (SelectionError, PayloadError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

@@ -485,6 +485,35 @@ class TestPayload(unittest.TestCase):
         self.assertIn("Same fix as #1, #3.", bodies["b.ts"])
         self.assertIn("Same fix as #1, #2.", bodies["c.ts"])
 
+    # --- Fix round 1 ---
+
+    def test_body_already_ending_with_attribution_is_not_double_appended(self):
+        intro = f"Round 2 review.\n\n{anchor.ATTRIBUTION}"
+        p = anchor.build_payload(self.led(), ["all"], intro)
+        self.assertEqual(p["body"].count(anchor.ATTRIBUTION), 1)
+
+    def test_item_with_null_line_raises_payload_error_naming_the_id(self):
+        led = {"items": [item(1, line=None)], "clusters": []}
+        with self.assertRaises(anchor.PayloadError) as ctx:
+            anchor.build_payload(led, ["all"], "intro")
+        self.assertIn("#1", str(ctx.exception))
+
+    def test_item_missing_file_raises_payload_error_naming_the_id(self):
+        led = {"items": [item(1)], "clusters": []}
+        del led["items"][0]["file"]
+        with self.assertRaises(anchor.PayloadError) as ctx:
+            anchor.build_payload(led, ["all"], "intro")
+        self.assertIn("#1", str(ctx.exception))
+
+    def test_cluster_referencing_an_unknown_item_is_a_selection_error(self):
+        # Mirrors the direct-digit case: --select 99 already errors when 99
+        # isn't in the ledger, so a cluster whose item_ids include a
+        # nonexistent id must error the same way, not silently expand short.
+        led = {"items": [item(1, cluster="C1")],
+               "clusters": [{"id": "C1", "item_ids": [1, 99]}]}
+        with self.assertRaises(anchor.SelectionError):
+            anchor.resolve_selection(led, ["C1"])
+
 
 class TestPayloadCli(unittest.TestCase):
     def _run(self, ledger, select, body_file):
@@ -526,6 +555,17 @@ class TestPayloadCli(unittest.TestCase):
                     self._assert_single_curated_error(code, out, err)
         finally:
             os.remove(good_ledger); os.remove(bad_ledger); os.remove(body_file)
+
+    def test_unanchored_item_via_cli_emits_curated_error_not_a_traceback(self):
+        led = {"items": [item(1, line=None)], "clusters": []}
+        del led["items"][0]["anchor_excerpt"]  # not relevant to payload; keep item minimal
+        ledger_path = self._write_json(led)
+        body_file = self._write_text("intro")
+        try:
+            code, out, err = self._run(ledger_path, None, body_file)
+        finally:
+            os.remove(ledger_path); os.remove(body_file)
+        self._assert_single_curated_error(code, out, err)
 
     def test_unrecognized_select_token_via_cli_emits_curated_error(self):
         ledger_path = self._write_json({"items": [item(1)], "clusters": []})
