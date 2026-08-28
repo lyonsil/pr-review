@@ -95,7 +95,29 @@ cmd_reap() {
   return 0
 }
 
+cmd_create() {
+  local path="$1" committish="$2"
+  mkdir -p "$(dirname "$path")"
+  git worktree add -q --detach "$path" "$committish"
+  git worktree lock --reason "pr-review session ${CLAUDE_SESSION_ID:-local} (pid $$)" "$path"
+  (cd "$path" && pwd)
+}
+
+cmd_remove() {
+  local path="$1"
+  if git worktree list --porcelain | grep -qxF "worktree $path" \
+  || git worktree list --porcelain | grep -qxF "worktree $(cd "$path" 2>/dev/null && pwd)"; then
+    git worktree unlock "$path" >/dev/null 2>&1
+    git worktree remove --force "$path" >/dev/null 2>&1
+  fi
+  rm -rf "$path"
+  git worktree prune >/dev/null 2>&1
+  return 0
+}
+
 case "${1:-}" in
-  reap) shift; cmd_reap "$@" ;;
-  *) echo "usage: pr-review-wt.sh reap" >&2; exit 2 ;;
+  reap)   shift; cmd_reap "$@" ;;
+  create) shift; cmd_create "$@" ;;
+  remove) shift; cmd_remove "$@" ;;
+  *) echo "usage: pr-review-wt.sh {reap|create <path> <committish>|remove <path>}" >&2; exit 2 ;;
 esac

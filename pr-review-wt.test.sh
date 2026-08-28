@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test harness for pr-review-wt.sh. Creates throwaway git repos under $TMPDIR.
-# Expected: passed=16 failed=0
+# Expected: passed=25 failed=0
 set -uo pipefail
 # Resolve to an absolute path before any test cd's into a throwaway repo dir.
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/pr-review-wt.sh"
@@ -92,5 +92,28 @@ age_dir .claude/worktrees/verify-777 48
 OUT=$("$SCRIPT" reap 2>&1)
 check "reports it reaped verify-" "$(echo "$OUT" | grep -c '^reaped .*verify-777$')" "1"
 check "verify worktree is gone" "$(git worktree list | grep -c verify-777)" "0"
+
+echo "== create: makes a detached, locked worktree =="
+setup_repo
+P=$("$SCRIPT" create "$R/scratch/wt-pr7" "$SHA")
+check "path echoed"    "$(basename "$P")" "wt-pr7"
+check "exists"         "$([ -d "$R/scratch/wt-pr7" ] && echo yes || echo no)" "yes"
+check "is detached"    "$(git -C "$R/scratch/wt-pr7" symbolic-ref -q HEAD >/dev/null && echo branch || echo detached)" "detached"
+check "is locked"      "$(git worktree list --porcelain | grep -c '^locked')" "1"
+check "no new branch"  "$(git branch --list | wc -l)" "1"
+
+echo "== create: its own lock protects it from reap =="
+age_dir "$R/scratch/wt-pr7" 999
+OUT=$("$SCRIPT" reap 2>&1)
+check "survives reap" "$(git worktree list | grep -c wt-pr7)" "1"
+
+echo "== remove: tears down cleanly =="
+"$SCRIPT" remove "$R/scratch/wt-pr7"
+check "worktree gone" "$(git worktree list | grep -c wt-pr7)" "0"
+check "dir gone"      "$([ -d "$R/scratch/wt-pr7" ] && echo yes || echo no)" "no"
+
+echo "== remove: is idempotent =="
+"$SCRIPT" remove "$R/scratch/wt-pr7"
+check "second remove exits 0" "$?" "0"
 
 echo; echo "passed=$PASS failed=$FAIL"; [ "$FAIL" -eq 0 ]
