@@ -17,7 +17,8 @@ Post the selected findings: $ARGUMENTS
    There is **no `$CLAUDE_SCRATCHPAD` environment variable** in this harness - do not reference
    one. The subcommand honours it if it is ever set, and otherwise derives the path from
    `$CLAUDE_CODE_SESSION_ID`; it is the same resolution `reap` uses for its current-session
-   exclusion. It prints `error: ...` and exits 1 when neither is available - stop there.
+   exclusion. It prints `error: ...` and exits non-zero whenever it cannot produce a valid
+   absolute path - never exits 0 with empty stdout - so stop there.
 
    `$SCRATCH` does not survive between tool calls (each runs in a fresh shell), and the derivation
    depends on the **current directory** - so either re-run the subcommand from the same repo root

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test harness for pr-review-wt.sh. Creates throwaway git repos under $TMPDIR.
-# Expected: passed=39 failed=0
+# Expected: passed=54 failed=0
 set -uo pipefail
 # Resolve to an absolute path before any test cd's into a throwaway repo dir.
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/pr-review-wt.sh"
@@ -135,7 +135,7 @@ check "strips a trailing slash" "$OUT" "/some/where/scratchpad"
 
 echo "== scratchpad: derives the path from \$CLAUDE_CODE_SESSION_ID =="
 setup_repo
-CWD=$(pwd)
+CWD=$(pwd -P)
 WANT="/tmp/claude-$(id -u)/$(printf '%s' "$CWD" | tr / -)/sess-abc/scratchpad"
 OUT=$(env -u CLAUDE_SCRATCHPAD CLAUDE_CODE_SESSION_ID=sess-abc "$SCRIPT" scratchpad)
 check "derived path"    "$OUT" "$WANT"
@@ -146,7 +146,7 @@ check "unresolvable exits nonzero"  "$([ $? -ne 0 ] && echo yes || echo no)" "ye
 
 echo "== reap: keeps an aged worktree inside the DERIVED scratchpad =="
 setup_repo
-SP="/tmp/claude-$(id -u)/$(pwd | tr / -)/sess-derive/scratchpad"
+SP="/tmp/claude-$(id -u)/$(pwd -P | tr / -)/sess-derive/scratchpad"
 mkdir -p "$SP"
 git worktree add -q --detach "$SP/wt-pr88" "$SHA"
 age_dir "$SP/wt-pr88" 999
@@ -158,7 +158,7 @@ check "directory survives"       "$([ -d "$SP/wt-pr88" ] && echo yes || echo no)
 # must NOT degrade into "keep everything" - the age floor takes over and reaps.
 OUT=$(env -u CLAUDE_SCRATCHPAD -u CLAUDE_CODE_SESSION_ID "$SCRIPT" reap 2>&1)
 check "unresolvable does not keep" "$(git worktree list | grep -c wt-pr88)" "0"
-rm -rf "/tmp/claude-$(id -u)/$(pwd | tr / -)"
+rm -rf "/tmp/claude-$(id -u)/$(pwd -P | tr / -)"
 
 echo "== reap: suppresses not-a-review-worktree noise unless -v =="
 setup_repo
@@ -170,5 +170,39 @@ OUT=$("$SCRIPT" reap -v 2>&1)
 # which `git worktree list` always reports and which is never a review path.
 check "shown with -v"    "$(echo "$OUT" | grep -c 'feature-quiet not-a-review-worktree')" "1"
 check "-v also names the main worktree" "$(echo "$OUT" | grep -c 'not-a-review-worktree')" "2"
+
+echo "== scratchpad: rejects a value that is not an absolute path =="
+setup_repo
+# Each of these would otherwise hand a caller "" and expand "$SCRATCH/wt-prN"
+# to "/wt-prN" - the very failure the subcommand exists to prevent.
+for BAD in "/" "//" "relative/path" ""; do
+  OUT=$(env -u CLAUDE_CODE_SESSION_ID CLAUDE_SCRATCHPAD="$BAD" "$SCRIPT" scratchpad 2>/dev/null)
+  RC=$?
+  check "rejects '$BAD' (stdout empty)" "$OUT" ""
+  check "rejects '$BAD' (nonzero exit)" "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
+done
+ERR=$(env -u CLAUDE_CODE_SESSION_ID CLAUDE_SCRATCHPAD=/ "$SCRIPT" scratchpad 2>&1 >/dev/null)
+check "bare / gets a curated error" "$(printf '%s' "$ERR" | grep -c '^error: ')" "1"
+# An explicit but invalid value must not silently fall through to derivation.
+OUT=$(env CLAUDE_CODE_SESSION_ID=sess-x CLAUDE_SCRATCHPAD=/ "$SCRIPT" scratchpad 2>/dev/null)
+check "bad explicit value does not fall back to derivation" "$OUT" ""
+
+echo "== scratchpad: derives from the REAL cwd through a symlink =="
+setup_repo
+mkdir -p "$R/real"; ln -s "$R/real" "$R/link"
+OUT=$(cd "$R/link" && env -u CLAUDE_SCRATCHPAD CLAUDE_CODE_SESSION_ID=sess-sym "$SCRIPT" scratchpad)
+WANT="/tmp/claude-$(id -u)/$(cd "$R/real" && pwd -P | tr / -)/sess-sym/scratchpad"
+check "uses pwd -P not pwd" "$OUT" "$WANT"
+
+echo "== reap: rejects an unrecognized argument =="
+setup_repo
+git worktree add -q --detach .claude/worktrees/review-666 "$SHA"
+age_dir .claude/worktrees/review-666 48
+ERR=$("$SCRIPT" reap --verbos 2>&1 >/dev/null); RC=$?
+check "mistyped flag exits nonzero" "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
+check "prints the usage line"       "$(printf '%s' "$ERR" | grep -c '^usage: ')" "1"
+check "reaped nothing"              "$(git worktree list | grep -c review-666)" "1"
+ERR=$("$SCRIPT" reap -v extra 2>&1 >/dev/null); RC=$?
+check "extra argument exits nonzero" "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
 
 echo; echo "passed=$PASS failed=$FAIL"; [ "$FAIL" -eq 0 ]

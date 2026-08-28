@@ -21,8 +21,11 @@ triage table.
    `$CLAUDE_CODE_SESSION_ID` (`pr-review-wt.sh`'s `scratchpad_path`). Use the subcommand rather
    than deriving the path yourself: `reap`'s current-session exclusion calls the same function, so
    a worktree placed under `$SCRATCH` is exactly the set the reaper protects. It prints an
-   `error: ...` line and exits 1 when neither variable is available - stop there rather than
-   creating a worktree at a path the reaper does not protect.
+   `error: ...` line and exits non-zero whenever it cannot produce a valid absolute path (neither
+   variable set, or `$CLAUDE_SCRATCHPAD` holding something like `/` or a relative path) - it never
+   exits 0 with empty stdout, so `SCRATCH=$(...)` fails loudly instead of silently yielding `""`
+   and expanding every path below to `/wt-pr<n>`. Stop there rather than creating a worktree at a
+   path the reaper does not protect.
 
    `$SCRATCH` does not survive between tool calls (each runs in a fresh shell), and the derivation
    depends on the **current directory** - so either re-run the subcommand from the same repo root
@@ -35,7 +38,8 @@ triage table.
    exactly what they say and need no action. `kept ... not-a-review-worktree` lines are suppressed
    by default (there is one per worktree the reaper is not responsible for, the repo's own main
    worktree included, and in a real repo they bury the lines that matter); pass `reap -v` if you
-   need to see them.
+   need to see them; `reap` rejects any other argument with a usage line and a non-zero exit, so a
+   mistyped flag fails rather than silently running non-verbose.
 3. Resolve the target from the arguments:
    - A PR URL or bare number: run
      `gh pr view <n> --json number,headRefOid,state,title,url,baseRefName`.

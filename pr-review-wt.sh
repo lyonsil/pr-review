@@ -15,13 +15,28 @@ VERBOSE="${REVIEW_WT_VERBOSE:-0}"
 # exist; what exists is $CLAUDE_CODE_SESSION_ID, from which Claude Code's
 # scratchpad path is derivable:
 #   /tmp/claude-<uid>/<cwd with every / replaced by ->/<session id>/scratchpad
-# Returns 1 and prints nothing when neither is available. Callers must treat
-# that as "unknown", never as a prefix - an empty string would prefix-match
-# every path and make the reaper keep everything.
+# Returns 1 and prints nothing when neither is available, or when the value
+# resolves to anything other than an absolute path with at least one component.
+# Callers must treat a failure as "unknown", never as a prefix: an empty string
+# would prefix-match every path (reap keeps everything) and would expand a
+# caller's "$SCRATCH/wt-prN" to "/wt-prN" (git worktree add at the filesystem
+# root). A bare "/" strips to empty and is rejected for that reason.
+#
+# pwd -P, not pwd: the derived path must key on the real directory, since a
+# symlinked cwd would derive a prefix that never matches the worktree's own
+# registered path. Same canonicalization cmd_remove does.
 scratchpad_path() {
-  if [ -n "${CLAUDE_SCRATCHPAD:-}" ]; then printf '%s\n' "${CLAUDE_SCRATCHPAD%/}"; return 0; fi
-  [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] || return 1
-  printf '/tmp/claude-%s/%s/%s/scratchpad\n' "$(id -u)" "$(pwd | tr / -)" "$CLAUDE_CODE_SESSION_ID"
+  local sp
+  if [ -n "${CLAUDE_SCRATCHPAD:-}" ]; then
+    sp="$CLAUDE_SCRATCHPAD"
+  elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    sp="/tmp/claude-$(id -u)/$(pwd -P | tr / -)/$CLAUDE_CODE_SESSION_ID/scratchpad"
+  else
+    return 1
+  fi
+  while [ "${sp%/}" != "$sp" ]; do sp="${sp%/}"; done
+  case "$sp" in /?*) ;; *) return 1 ;; esac
+  printf '%s\n' "$sp"
 }
 
 is_review_path() {
@@ -106,7 +121,13 @@ consider() {
 }
 
 cmd_reap() {
-  case "${1:-}" in -v|--verbose) VERBOSE=1 ;; esac
+  # Reject anything that isn't the verbose flag rather than ignoring it: a
+  # mistyped `--verbos` must not look like it was honoured.
+  if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "-v" ] && [ "$1" != "--verbose" ]; }; then
+    echo "usage: pr-review-wt.sh reap [-v|--verbose]" >&2
+    return 2
+  fi
+  [ "$#" -eq 0 ] || VERBOSE=1
   local wt="" locked="" branch="" line
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -152,7 +173,7 @@ cmd_remove() {
 cmd_scratchpad() {
   local sp
   if sp=$(scratchpad_path); then printf '%s\n' "$sp"; return 0; fi
-  echo "error: cannot resolve the scratchpad directory - neither \$CLAUDE_SCRATCHPAD nor \$CLAUDE_CODE_SESSION_ID is set" >&2
+  echo "error: cannot resolve the scratchpad directory - \$CLAUDE_SCRATCHPAD is unset or not an absolute path, and \$CLAUDE_CODE_SESSION_ID is unset" >&2
   return 1
 }
 
