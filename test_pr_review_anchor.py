@@ -45,6 +45,12 @@ class TestValidate(unittest.TestCase):
         led = {"items": [item(1, cluster="C9")], "clusters": []}
         self.assertTrue(any("unknown cluster" in e for e in anchor.validate(led)))
 
+    def test_bool_id_is_rejected_and_not_treated_as_duplicate_of_int_1(self):
+        led = {"items": [item(1), item(True, sev="low")], "clusters": []}
+        errs = anchor.validate(led)
+        self.assertTrue(any("not an integer" in e for e in errs), errs)
+        self.assertFalse(any("duplicate" in e for e in errs), errs)
+
 
 if __name__ == "__main__":
     unittest.main()
