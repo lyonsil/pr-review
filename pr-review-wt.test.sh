@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Test harness for pr-review-wt.sh. Creates throwaway git repos under $TMPDIR.
+# Expected: passed=16 failed=0
 set -uo pipefail
 # Resolve to an absolute path before any test cd's into a throwaway repo dir.
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/pr-review-wt.sh"
@@ -71,5 +72,25 @@ age_dir .claude/worktrees/review-444 48
 OUT=$("$SCRIPT" reap 2>&1)
 check "reported stranded" "$(echo "$OUT" | grep -c '^stranded-branch strandme')" "1"
 check "branch still exists" "$(git branch --list strandme | wc -l)" "1"
+
+echo "== reap: keeps a DIRTY worktree (modified tracked + untracked file) =="
+setup_repo
+git worktree add -q --detach .claude/worktrees/review-555 "$SHA"
+age_dir .claude/worktrees/review-555 48
+echo modified > .claude/worktrees/review-555/f.txt
+echo untracked > .claude/worktrees/review-555/new.txt
+OUT=$("$SCRIPT" reap 2>&1)
+check "reports dirty" "$(echo "$OUT" | grep -c '^kept .*review-555 dirty-')" "1"
+check "worktree still registered" "$(git worktree list | grep -c review-555)" "1"
+check "modified file survives" "$(cat .claude/worktrees/review-555/f.txt)" "modified"
+check "untracked file survives" "$(cat .claude/worktrees/review-555/new.txt)" "untracked"
+
+echo "== reap: reaps an aged, unlocked verify- worktree =="
+setup_repo
+git worktree add -q --detach .claude/worktrees/verify-777 "$SHA"
+age_dir .claude/worktrees/verify-777 48
+OUT=$("$SCRIPT" reap 2>&1)
+check "reports it reaped verify-" "$(echo "$OUT" | grep -c '^reaped .*verify-777$')" "1"
+check "verify worktree is gone" "$(git worktree list | grep -c verify-777)" "0"
 
 echo; echo "passed=$PASS failed=$FAIL"; [ "$FAIL" -eq 0 ]

@@ -21,6 +21,14 @@ age_hours() {
   echo $(( ( $(date +%s) - $(stat -c %Y "$1") ) / 3600 ))
 }
 
+# Count of dirty lines (modified tracked + untracked) in a worktree. 0 when
+# the directory is missing (git -C on a missing dir fails silently), which is
+# intentional: a registration with no directory behind it has nothing to lose
+# and must still fall through to the registration-only cleanup path below.
+dirty_count() {
+  git -C "$1" status --porcelain 2>/dev/null | wc -l | tr -d ' '
+}
+
 consider() {
   local wt="$1" locked="$2" branch="$3"
   [ -n "$wt" ] || return 0
@@ -35,14 +43,27 @@ consider() {
     if pid_alive "$p"; then echo "kept $wt locked-by-live-pid-$p"; return 0; fi
   fi
 
+  # A single `git worktree remove --force` deletes a dirty worktree outright
+  # (confirmed on git 2.52.0) - it does not refuse the way an unclean removal
+  # without --force does. This guard must run before the age check, and
+  # before any removal call, or a dirty-but-aged worktree is destroyed.
+  local d; d=$(dirty_count "$wt")
+  if [ "$d" -gt 0 ]; then echo "kept $wt dirty-${d}-changes"; return 0; fi
+
   local a; a=$(age_hours "$wt")
   if [ "$a" -lt "$MAX_AGE_HOURS" ]; then echo "kept $wt age-${a}h"; return 0; fi
 
   [ -n "$locked" ] && git worktree unlock "$wt" >/dev/null 2>&1
-  if git worktree remove --force "$wt" >/dev/null 2>&1; then
+  if [ ! -d "$wt" ]; then
+    # Directory already gone; this is registration cleanup only, not a
+    # removal decision, so its outcome doesn't gate the message below.
+    git worktree remove --force "$wt" >/dev/null 2>&1
+    echo "pruned $wt registration-only"
+  elif git worktree remove --force "$wt" >/dev/null 2>&1; then
     echo "reaped $wt"
   else
-    echo "reaped $wt (registration only)"
+    echo "error $wt remove-failed"
+    return 0
   fi
   if [ -n "$branch" ]; then
     echo "stranded-branch ${branch#refs/heads/} $wt"
