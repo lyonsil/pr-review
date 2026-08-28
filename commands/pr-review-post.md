@@ -109,8 +109,15 @@ when the fetch and the checkout target different checkouts).
 a ledger **write** failure after re-anchoring (e.g. a read-only ledger file) - check that and stop
 before trusting anything downstream. Otherwise it exits 0 regardless of per-item results, so from
 there judge outcomes by the printed `ok`/`moved`/`dead` summary, not the exit code. Report the
-counts. For each dead anchor, ask whether to demote it to the review body or drop it. Do not
-proceed with a dead anchor in the selection.
+counts.
+
+**Dead anchors need no decision from the user - never ask.** A finding whose anchor is dead is
+still a real, verified, selected finding; it simply cannot attach to a line, and one off-diff
+anchor would fail the entire review POST. `payload` therefore moves every dead or off-diff item
+into the review body automatically, under its own heading, and keeps it out of `comments[]`.
+Report which ids were demoted and why, then carry on. Refuted items are the opposite case and are
+never demoted: they were judged not real, so they appear nowhere unless re-admitted per-id with
+`--include-refuted`.
 
 Also scan the per-item output (or each item's `anchor_note`) for `ambiguous:` - it means the anchor
 excerpt matched more than one location and the nearest-to-old-line match was chosen automatically.
