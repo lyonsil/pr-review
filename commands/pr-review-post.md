@@ -172,8 +172,20 @@ HTML.** No `<details>`, `<summary>`, or `<br>` - the terminal prints those liter
 only to what you print for the user; the review body and comment bodies you are quoting are bound
 for GitHub and keep whatever markdown they carry.
 
-Present the plan and **stop for approval**: the body verbatim, any relayed warnings, and per thread
-the `file:line`, the item ids it carries, and its exact text.
+Present the plan and **stop for approval**. Do NOT retype or summarize the payload - render it
+from the file that will actually be sent, so what the user approves is byte-for-byte what posts:
+
+```bash
+python3 ~/.claude/pr-review/pr-review-anchor.py preview "$SCRATCH/pr-review/pr$NUMBER/payload.json"
+```
+
+Show that output **in full, every time**, however long it runs. Never abbreviate it, never show
+only the first few comments, never replace a comment body with a description of it. A user
+approving a summary is approving text they have not read, which then posts under their own GitHub
+account. If the output is long, that is the correct amount of output.
+
+Alongside it, relay any warnings `payload` wrote to stderr (excluded refuted ids, dead anchors,
+re-admitted ids), and state the head SHA the anchors were resolved against.
 
 Honor any constraints in $ARGUMENTS - for example "do not say whether anything is blocking".
 
