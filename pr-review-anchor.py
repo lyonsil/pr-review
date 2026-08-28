@@ -8,6 +8,8 @@ ATTRIBUTION = "_(AI-assisted, with my guidance)_"
 
 
 def validate(ledger):
+    if not isinstance(ledger, dict):
+        return [f"ledger root must be a JSON object, got {type(ledger).__name__}"]
     errs = []
     items = ledger.get("items", [])
     clusters = ledger.get("clusters", [])
@@ -53,7 +55,17 @@ def load(path):
 
 
 def cmd_validate(args):
-    led = load(args.ledger)
+    try:
+        led = load(args.ledger)
+    except FileNotFoundError:
+        print(f"error: ledger file not found: {args.ledger}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"error: could not read ledger file {args.ledger}: {exc}", file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as exc:
+        print(f"error: ledger file {args.ledger} is not valid JSON: {exc}", file=sys.stderr)
+        return 1
     errs = validate(led)
     if errs:
         for e in errs:
