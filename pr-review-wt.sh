@@ -3,6 +3,26 @@
 set -uo pipefail
 
 MAX_AGE_HOURS="${REVIEW_WT_MAX_AGE_HOURS:-24}"
+# `kept <path> not-a-review-worktree` is emitted once per worktree the reaper is
+# not responsible for, which in a real repo buries the lines that need action.
+# It is suppressed unless asked for; every other kept/reaped/pruned/orphaned/
+# error/stranded-branch line always prints.
+VERBOSE="${REVIEW_WT_VERBOSE:-0}"
+
+# This session's scratchpad directory, or nothing.
+#
+# $CLAUDE_SCRATCHPAD wins if the harness ever sets it, but today it does not
+# exist; what exists is $CLAUDE_CODE_SESSION_ID, from which Claude Code's
+# scratchpad path is derivable:
+#   /tmp/claude-<uid>/<cwd with every / replaced by ->/<session id>/scratchpad
+# Returns 1 and prints nothing when neither is available. Callers must treat
+# that as "unknown", never as a prefix - an empty string would prefix-match
+# every path and make the reaper keep everything.
+scratchpad_path() {
+  if [ -n "${CLAUDE_SCRATCHPAD:-}" ]; then printf '%s\n' "${CLAUDE_SCRATCHPAD%/}"; return 0; fi
+  [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] || return 1
+  printf '/tmp/claude-%s/%s/%s/scratchpad\n' "$(id -u)" "$(pwd | tr / -)" "$CLAUDE_CODE_SESSION_ID"
+}
 
 is_review_path() {
   case "$1" in
@@ -32,10 +52,14 @@ dirty_count() {
 consider() {
   local wt="$1" locked="$2" branch="$3"
   [ -n "$wt" ] || return 0
-  is_review_path "$wt" || { echo "kept $wt not-a-review-worktree"; return 0; }
+  if ! is_review_path "$wt"; then
+    [ "$VERBOSE" = 0 ] || echo "kept $wt not-a-review-worktree"
+    return 0
+  fi
 
-  if [ -n "${CLAUDE_SCRATCHPAD:-}" ]; then
-    case "$wt" in "$CLAUDE_SCRATCHPAD"/*|"$CLAUDE_SCRATCHPAD") echo "kept $wt current-session"; return 0 ;; esac
+  local sp; sp=$(scratchpad_path) || sp=""
+  if [ -n "$sp" ]; then
+    case "$wt" in "$sp"/*|"$sp") echo "kept $wt current-session"; return 0 ;; esac
   fi
 
   if [ -n "$locked" ]; then
@@ -82,6 +106,7 @@ consider() {
 }
 
 cmd_reap() {
+  case "${1:-}" in -v|--verbose) VERBOSE=1 ;; esac
   local wt="" locked="" branch="" line
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -104,9 +129,9 @@ cmd_create() {
   # reap checks it. $PPID is the invoking shell's pid - still not a live
   # guard in practice (that shell is itself short-lived across separate tool
   # invocations), so treat this lock as provenance only. What actually
-  # protects a live worktree is reap's $CLAUDE_SCRATCHPAD path exclusion,
-  # plus the 24h age floor as a fallback - see consider() above.
-  git worktree lock --reason "pr-review session ${CLAUDE_SESSION_ID:-local} (pid $PPID)" "$path"
+  # protects a live worktree is reap's scratchpad path exclusion (see
+  # scratchpad_path/consider() above), plus the 24h age floor as a fallback.
+  git worktree lock --reason "pr-review session ${CLAUDE_CODE_SESSION_ID:-local} (pid $PPID)" "$path"
   (cd "$path" && pwd)
 }
 
@@ -124,9 +149,17 @@ cmd_remove() {
   return 0
 }
 
+cmd_scratchpad() {
+  local sp
+  if sp=$(scratchpad_path); then printf '%s\n' "$sp"; return 0; fi
+  echo "error: cannot resolve the scratchpad directory - neither \$CLAUDE_SCRATCHPAD nor \$CLAUDE_CODE_SESSION_ID is set" >&2
+  return 1
+}
+
 case "${1:-}" in
-  reap)   shift; cmd_reap "$@" ;;
-  create) shift; cmd_create "$@" ;;
-  remove) shift; cmd_remove "$@" ;;
-  *) echo "usage: pr-review-wt.sh {reap|create <path> <committish>|remove <path>}" >&2; exit 2 ;;
+  reap)       shift; cmd_reap "$@" ;;
+  create)     shift; cmd_create "$@" ;;
+  remove)     shift; cmd_remove "$@" ;;
+  scratchpad) shift; cmd_scratchpad "$@" ;;
+  *) echo "usage: pr-review-wt.sh {reap [-v]|create <path> <committish>|remove <path>|scratchpad}" >&2; exit 2 ;;
 esac

@@ -469,7 +469,9 @@ class TestPayload(unittest.TestCase):
         led["items"][0]["verdict"] = "REFUTED"
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            anchor.build_payload(led, ["1"], "intro")
+            # #4 keeps the payload non-empty; an all-excluded selection is a
+            # PayloadError, covered separately below.
+            anchor.build_payload(led, ["1", "4"], "intro")
         self.assertIn("#1", err.getvalue())
         self.assertIn("REFUTED", err.getvalue())
 
@@ -551,11 +553,13 @@ class TestIncludeRefuted(unittest.TestCase):
         self.assertEqual([c["path"] for c in p["comments"]], ["c.ts"])
 
     def test_include_refuted_does_not_resurrect_a_dead_anchor(self):
-        led = {"items": [item(1, cluster=None)], "clusters": []}
+        # #2 is postable and only keeps the payload non-empty, so the dead #1
+        # is proven absent rather than the whole build failing for being empty.
+        led = {"items": [item(1, f="a.ts"), item(2, f="b.ts", claim="live")], "clusters": []}
         led["items"][0]["verdict"] = "REFUTED"
         led["items"][0]["anchor_status"] = "dead"
         p = anchor.build_payload(led, ["all"], "intro", include_refuted=["1"])
-        self.assertEqual(p["comments"], [])
+        self.assertEqual([c["path"] for c in p["comments"]], ["b.ts"])
 
     def test_warning_distinguishes_excluded_from_readmitted(self):
         err = io.StringIO()
@@ -575,6 +579,101 @@ class TestIncludeRefuted(unittest.TestCase):
         ids_posted = {int(m) for c in p["comments"] for m in re.findall(r"#(\d+)", c["body"])}
         self.assertIn(1, ids_posted)
         self.assertNotIn(3, ids_posted)
+
+
+class TestOnChangedLineExclusion(unittest.TestCase):
+    """`on_changed_line: false` means GitHub cannot accept the comment inline,
+    and it rejects the WHOLE review over one such anchor - so payload must
+    exclude it itself rather than trusting reanchor to have run first."""
+
+    def led(self):
+        return {"items": [
+            item(1, f="a.ts", line=10, claim="offline", on_changed_line=False),
+            item(2, f="b.ts", line=20, claim="online", on_changed_line=True),
+        ], "clusters": []}
+
+    def test_item_not_on_a_changed_line_is_excluded(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            p = anchor.build_payload(self.led(), ["all"], "intro")
+        self.assertEqual([c["path"] for c in p["comments"]], ["b.ts"])
+
+    def test_exclusion_is_warned_on_stderr(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            anchor.build_payload(self.led(), ["all"], "intro")
+        self.assertIn("#1 (excluded, not on a changed line)", err.getvalue())
+
+    def test_missing_or_none_on_changed_line_is_not_excluded(self):
+        # A ledger that never went through S5/reanchor has no such field; it
+        # must stay postable, not silently lose every item.
+        led = {"items": [item(1, f="a.ts"), item(2, f="b.ts", on_changed_line=None)],
+               "clusters": []}
+        p = anchor.build_payload(led, ["all"], "intro")
+        self.assertEqual(sorted(c["path"] for c in p["comments"]), ["a.ts", "b.ts"])
+
+    def test_include_refuted_does_not_lift_the_on_changed_line_exclusion(self):
+        led = self.led()
+        led["items"][0]["verdict"] = "REFUTED"
+        with contextlib.redirect_stderr(io.StringIO()):
+            p = anchor.build_payload(led, ["all"], "intro", include_refuted=["1"])
+        self.assertEqual([c["path"] for c in p["comments"]], ["b.ts"])
+
+
+class TestIncludeRefutedNotSelected(unittest.TestCase):
+    def led(self):
+        return {"items": [
+            item(1, f="a.ts", claim="alpha", verdict="REFUTED"),
+            item(2, f="b.ts", claim="beta"),
+        ], "clusters": []}
+
+    def test_warns_when_an_included_id_is_outside_the_selection(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            anchor.build_payload(self.led(), ["2"], "intro", include_refuted=["1"])
+        out = err.getvalue()
+        self.assertIn("not in --select", out)
+        self.assertIn("#1", out)
+
+    def test_it_is_a_warning_not_an_error_a_superset_still_builds(self):
+        p = anchor.build_payload(self.led(), ["2"], "intro", include_refuted=["1"])
+        self.assertEqual([c["path"] for c in p["comments"]], ["b.ts"])
+
+    def test_no_warning_when_the_included_id_is_selected(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            anchor.build_payload(self.led(), ["all"], "intro", include_refuted=["1"])
+        self.assertNotIn("not in --select", err.getvalue())
+
+
+class TestEmptyPayloadIsFatal(unittest.TestCase):
+    """A review with zero comments would POST bare framing plus the
+    attribution footer, which is never what the caller asked for."""
+
+    def test_selecting_only_a_refuted_id_raises_instead_of_building_empty(self):
+        led = {"items": [item(1, verdict="REFUTED")], "clusters": []}
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(anchor.PayloadError) as ctx:
+                anchor.build_payload(led, ["1"], "intro")
+        self.assertIn("REFUTED", str(ctx.exception))
+        self.assertIn("#1", str(ctx.exception))
+
+    def test_selecting_only_a_dead_anchor_raises(self):
+        led = {"items": [item(1, anchor_status="dead")], "clusters": []}
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(anchor.PayloadError) as ctx:
+                anchor.build_payload(led, ["1"], "intro")
+        self.assertIn("dead anchor", str(ctx.exception))
+
+    def test_a_cluster_with_no_working_item_ids_raises(self):
+        # The `items:`-instead-of-`item_ids:` typo validate() cannot catch.
+        led = {"items": [item(1)], "clusters": [{"id": "C1", "items": [1]}]}
+        with self.assertRaises(anchor.PayloadError) as ctx:
+            anchor.build_payload(led, ["C1"], "intro")
+        self.assertIn("no items", str(ctx.exception))
+
+    def test_an_empty_ledger_raises(self):
+        with self.assertRaises(anchor.PayloadError):
+            anchor.build_payload({"items": [], "clusters": []}, ["all"], "intro")
 
 
 class TestPayloadCli(unittest.TestCase):
@@ -629,6 +728,22 @@ class TestPayloadCli(unittest.TestCase):
         finally:
             os.remove(ledger_path); os.remove(body_file)
         self._assert_single_curated_error(code, out, err)
+
+    def test_empty_payload_via_cli_exits_1_with_a_curated_error(self):
+        # Not _assert_single_curated_error: the REFUTED exclusion warning is a
+        # second, legitimate stderr line alongside the fatal error.
+        led = {"items": [item(1, verdict="REFUTED")], "clusters": []}
+        ledger_path = self._write_json(led)
+        body_file = self._write_text("intro")
+        try:
+            code, out, err = self._run(ledger_path, ["1"], body_file)
+        finally:
+            os.remove(ledger_path); os.remove(body_file)
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertNotIn("Traceback", err)
+        self.assertTrue(any(line.startswith("error: selection produced no comments")
+                            for line in err.splitlines()), err)
 
     def test_unrecognized_select_token_via_cli_emits_curated_error(self):
         ledger_path = self._write_json({"items": [item(1)], "clusters": []})

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test harness for pr-review-wt.sh. Creates throwaway git repos under $TMPDIR.
-# Expected: passed=27 failed=0
+# Expected: passed=39 failed=0
 set -uo pipefail
 # Resolve to an absolute path before any test cd's into a throwaway repo dir.
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/pr-review-wt.sh"
@@ -125,5 +125,50 @@ ln -s "$R/scratchpad/wt-real" "$R/scratchpad/wt-link"
 "$SCRIPT" remove "$R/scratchpad/wt-link"
 check "worktree deregistered" "$(git worktree list | grep -c wt-real)" "0"
 check "real dir gone" "$([ -d "$R/scratchpad/wt-real" ] && echo yes || echo no)" "no"
+
+echo "== scratchpad: honours an explicit \$CLAUDE_SCRATCHPAD =="
+setup_repo
+OUT=$(CLAUDE_SCRATCHPAD=/some/where/scratchpad "$SCRIPT" scratchpad)
+check "echoes it verbatim" "$OUT" "/some/where/scratchpad"
+OUT=$(CLAUDE_SCRATCHPAD=/some/where/scratchpad/ "$SCRIPT" scratchpad)
+check "strips a trailing slash" "$OUT" "/some/where/scratchpad"
+
+echo "== scratchpad: derives the path from \$CLAUDE_CODE_SESSION_ID =="
+setup_repo
+CWD=$(pwd)
+WANT="/tmp/claude-$(id -u)/$(printf '%s' "$CWD" | tr / -)/sess-abc/scratchpad"
+OUT=$(env -u CLAUDE_SCRATCHPAD CLAUDE_CODE_SESSION_ID=sess-abc "$SCRIPT" scratchpad)
+check "derived path"    "$OUT" "$WANT"
+OUT=$(env -u CLAUDE_SCRATCHPAD -u CLAUDE_CODE_SESSION_ID "$SCRIPT" scratchpad 2>/dev/null)
+check "unresolvable prints nothing" "$OUT" ""
+env -u CLAUDE_SCRATCHPAD -u CLAUDE_CODE_SESSION_ID "$SCRIPT" scratchpad >/dev/null 2>&1
+check "unresolvable exits nonzero"  "$([ $? -ne 0 ] && echo yes || echo no)" "yes"
+
+echo "== reap: keeps an aged worktree inside the DERIVED scratchpad =="
+setup_repo
+SP="/tmp/claude-$(id -u)/$(pwd | tr / -)/sess-derive/scratchpad"
+mkdir -p "$SP"
+git worktree add -q --detach "$SP/wt-pr88" "$SHA"
+age_dir "$SP/wt-pr88" 999
+OUT=$(env -u CLAUDE_SCRATCHPAD CLAUDE_CODE_SESSION_ID=sess-derive "$SCRIPT" reap 2>&1)
+check "reports current-session"  "$(echo "$OUT" | grep -c "^kept $SP/wt-pr88 current-session$")" "1"
+check "still registered"         "$(git worktree list | grep -c wt-pr88)" "1"
+check "directory survives"       "$([ -d "$SP/wt-pr88" ] && echo yes || echo no)" "yes"
+# Same worktree, no session id to derive from: the exclusion cannot resolve and
+# must NOT degrade into "keep everything" - the age floor takes over and reaps.
+OUT=$(env -u CLAUDE_SCRATCHPAD -u CLAUDE_CODE_SESSION_ID "$SCRIPT" reap 2>&1)
+check "unresolvable does not keep" "$(git worktree list | grep -c wt-pr88)" "0"
+rm -rf "/tmp/claude-$(id -u)/$(pwd | tr / -)"
+
+echo "== reap: suppresses not-a-review-worktree noise unless -v =="
+setup_repo
+git worktree add -q --detach feature-quiet "$SHA"
+OUT=$("$SCRIPT" reap 2>&1)
+check "quiet by default" "$(echo "$OUT" | grep -c 'not-a-review-worktree')" "0"
+OUT=$("$SCRIPT" reap -v 2>&1)
+# Two lines under -v: the feature worktree AND the repo's own main worktree,
+# which `git worktree list` always reports and which is never a review path.
+check "shown with -v"    "$(echo "$OUT" | grep -c 'feature-quiet not-a-review-worktree')" "1"
+check "-v also names the main worktree" "$(echo "$OUT" | grep -c 'not-a-review-worktree')" "2"
 
 echo; echo "passed=$PASS failed=$FAIL"; [ "$FAIL" -eq 0 ]

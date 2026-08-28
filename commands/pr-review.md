@@ -10,25 +10,57 @@ triage table.
 
 ## S0. Setup
 
-1. Run `~/.claude/pr-review/pr-review-wt.sh reap` and report any `reaped`, `orphaned`, or
+1. Resolve this session's scratchpad directory. Every path below hangs off it:
+
+   ```bash
+   SCRATCH=$(~/.claude/pr-review/pr-review-wt.sh scratchpad)
+   ```
+
+   There is **no `$CLAUDE_SCRATCHPAD` environment variable** in this harness - do not reference
+   one. The subcommand honours it if it is ever set, and otherwise derives the path from
+   `$CLAUDE_CODE_SESSION_ID` (`pr-review-wt.sh`'s `scratchpad_path`). Use the subcommand rather
+   than deriving the path yourself: `reap`'s current-session exclusion calls the same function, so
+   a worktree placed under `$SCRATCH` is exactly the set the reaper protects. It prints an
+   `error: ...` line and exits 1 when neither variable is available - stop there rather than
+   creating a worktree at a path the reaper does not protect.
+
+   `$SCRATCH` does not survive between tool calls (each runs in a fresh shell), and the derivation
+   depends on the **current directory** - so either re-run the subcommand from the same repo root
+   in every later shell, or resolve it once here and substitute the literal path into the commands
+   below. Do not resolve it from inside `$WT` or any other directory.
+2. Run `~/.claude/pr-review/pr-review-wt.sh reap` and report any `reaped`, `orphaned`, or
    `stranded-branch` lines. A `kept ... dirty-N-changes` line is normal, not an error: the reaper
    never removes a worktree with uncommitted or untracked changes, and never deletes branches -
    it only reports them. `kept ... current-session` / `kept ... locked-by-live-pid-N` lines mean
-   exactly what they say and need no action.
-2. Resolve the target from the arguments:
-   - A PR URL or bare number: run `gh pr view <n> --json number,headRefOid,state,title,url`.
-     **If `state` is not `OPEN`, stop and say so.** Record `NUMBER` = `<n>` and `REPO` = the
-     `owner/repo` string, e.g. `gh repo view --json nameWithOwner --jq .nameWithOwner` (or parse it
-     from the PR URL). These become the ledger's `target.number` / `target.repo`.
-   - `.`: the current branch versus its merge-base with `main`, committed work only. HEAD_SHA is
-     `git rev-parse HEAD`. There is no PR, so S3 is skipped and posting is unavailable. Use the
-     literal id `local` wherever `<n>` appears in paths below (worktree `wt-prlocal`, ledger dir
-     `pr-review/prlocal/`) - the reaper's coverage pattern is `*/scratchpad/wt-*`
-     (`pr-review-wt.sh:9`'s `is_review_path`), so it's the full `.../scratchpad/wt-` path that
-     matters, not just the `wt-` prefix; relocating the worktree out from under `$CLAUDE_SCRATCHPAD`
-     drops reaper coverage even if the basename still starts with `wt-`. The ledger's `target` is
-     `{"kind": "local"}`.
-3. For a PR, fetch the head and resolve it to a concrete SHA before anything downstream depends on
+   exactly what they say and need no action. `kept ... not-a-review-worktree` lines are suppressed
+   by default (there is one per worktree the reaper is not responsible for, the repo's own main
+   worktree included, and in a real repo they bury the lines that matter); pass `reap -v` if you
+   need to see them.
+3. Resolve the target from the arguments:
+   - A PR URL or bare number: run
+     `gh pr view <n> --json number,headRefOid,state,title,url,baseRefName`.
+     **If `state` is not `OPEN`, stop and say so.** Record `NUMBER` = `<n>`, `REPO` = the
+     `owner/repo` string (e.g. `gh repo view --json nameWithOwner --jq .nameWithOwner`, or parse it
+     from the PR URL), and `BASE_REF` = `baseRefName` - the branch this PR actually targets, which
+     is **not** always `main`: it is `master` in some repos, and another PR's branch in a stacked
+     PR. `NUMBER`/`REPO` become the ledger's `target.number` / `target.repo`.
+   - `.`: the current branch versus its merge-base with the repo's default branch, committed work
+     only. HEAD_SHA is `git rev-parse HEAD`. Detect the default branch rather than assuming `main`:
+
+     ```bash
+     BASE_REF=$(git symbolic-ref -q --short refs/remotes/origin/HEAD | sed 's#^origin/##')
+     ```
+
+     If that prints nothing, `origin/HEAD` was never set locally; run `git remote set-head origin -a`
+     once and retry, or fall back to the first of `main`/`master` that
+     `git rev-parse --verify -q refs/remotes/origin/<b>` resolves. There is no PR, so S3 is skipped
+     and posting is unavailable. Use the literal id `local` wherever `<n>` appears in paths below
+     (worktree `wt-prlocal`, ledger dir `pr-review/prlocal/`) - the reaper's coverage pattern is
+     `*/scratchpad/wt-*` (`pr-review-wt.sh`'s `is_review_path`), so it's the full
+     `.../scratchpad/wt-` path that matters, not just the `wt-` prefix; relocating the worktree out
+     from under `$SCRATCH` drops reaper coverage even if the basename still starts with `wt-`. The
+     ledger's `target` is `{"kind": "local"}`.
+4. For a PR, fetch the head and resolve it to a concrete SHA before anything downstream depends on
    it:
 
    ```bash
@@ -36,20 +68,27 @@ triage table.
    HEAD_SHA=$(git rev-parse FETCH_HEAD)
    ```
 
-   For `.`, `HEAD_SHA` is already `git rev-parse HEAD` from step 2.
-4. Now that HEAD_SHA's commit is fetched and locally resolvable, compute the merge-base:
+   For `.`, `HEAD_SHA` is already `git rev-parse HEAD` from step 3.
+5. Now that HEAD_SHA's commit is fetched and locally resolvable, compute the merge-base against
+   `BASE_REF` - never a hardcoded `origin/main`:
 
    ```bash
-   MERGE_BASE=$(git merge-base "$HEAD_SHA" origin/main)
+   git fetch origin "$BASE_REF"
+   MERGE_BASE=$(git merge-base "$HEAD_SHA" "$(git rev-parse FETCH_HEAD)")
    ```
 
-   Store it in the ledger as `merge_base` (S6), and pass it to every refuter in S5 - "pre-existing
-   on the merge-base" is one of their standing refute triggers and they need the SHA to check it.
-5. Create the worktree and capture the path with a **direct command substitution** - never through
+   Capture `HEAD_SHA` (step 4) **before** this fetch: `FETCH_HEAD` is a single per-checkout ref and
+   this second fetch overwrites it. For `.`, `BASE_REF` is already a local remote-tracking branch,
+   so `MERGE_BASE=$(git merge-base HEAD "origin/$BASE_REF")` is enough.
+
+   Store `MERGE_BASE` in the ledger as `merge_base` (S6), and pass it to every refuter in S5 -
+   "pre-existing on the merge-base" is one of their standing refute triggers and they need the SHA
+   to check it.
+6. Create the worktree and capture the path with a **direct command substitution** - never through
    a pipe, and never wrapped in `bash -c`:
 
    ```bash
-   WT=$(~/.claude/pr-review/pr-review-wt.sh create "$CLAUDE_SCRATCHPAD/wt-pr<n>" "$HEAD_SHA")
+   WT=$(~/.claude/pr-review/pr-review-wt.sh create "$SCRATCH/wt-pr<n>" "$HEAD_SHA")
    ```
 
    Still use this direct-substitution form - it's the reliable way to capture `$WT` cleanly - but
@@ -59,19 +98,38 @@ triage table.
    inert here regardless of which form `create` was called with. The lock is provenance only (which
    session/pid created the worktree, for a human reading `git worktree list`), not a live guard.
    What actually protects the worktree mid-review, in `pr-review-wt.sh`'s `consider()`: first the
-   `$CLAUDE_SCRATCHPAD` path exclusion (`pr-review-wt.sh:37-38` - `kept ... current-session`), then
-   the live-lock check itself (which only ever keeps, given the pid is dead by the next call); only
-   after that, and after the dirty-worktree guard, does the 24h age floor run
-   (`pr-review-wt.sh:53-54` - `kept ... age-Nh`) - a fallback for when `$CLAUDE_SCRATCHPAD` isn't
-   set for the `reap` call, not something checked ahead of the lock.
+   scratchpad path exclusion (the `scratchpad_path` resolution from step 1 - `kept ...
+   current-session`), then the live-lock check itself (which only ever keeps, given the pid is dead
+   by the next call); only after that, and after the dirty-worktree guard, does the 24h age floor
+   run (`kept ... age-Nh`) - a fallback for when the scratchpad cannot be resolved for the `reap`
+   call, not something checked ahead of the lock.
 
 ## S1. Generate
+
+Snapshot the worktree registry **before** invoking the skill:
+
+```bash
+mkdir -p "$SCRATCH"
+git worktree list --porcelain > "$SCRATCH/worktrees.before"
+```
 
 Invoke the `code-review` skill at level `max` against the worktree. Tell it explicitly:
 
 - Analyze the changes in the existing worktree at `$WT`. **Do not create a worktree of your own.**
 - Raise the per-subagent issue cap to 16 (from 8) and the final-report cap to 30 (from 15).
 - Present the final report as a numbered list.
+
+Then snapshot again and report any delta to the user:
+
+```bash
+git worktree list --porcelain > "$SCRATCH/worktrees.after"
+diff "$SCRATCH/worktrees.before" "$SCRATCH/worktrees.after"
+```
+
+That the skill honours "do not create a worktree of your own" is an assumption, not a guarantee.
+Any added worktree is one this pipeline does not own and will not tear down in S5 of
+`/pr-review-post`; if the diff is non-empty, **say so explicitly** and name the added path so the
+user can decide whether to remove it, rather than letting an unowned worktree leak silently.
 
 Any extra instructions in $ARGUMENTS ride along verbatim - for example seeding extra findings
 from a file and placing them above the cap.
@@ -133,7 +191,7 @@ reasoning stays intact.
 
 ## S6. Report
 
-1. Write `$CLAUDE_SCRATCHPAD/pr-review/pr<n>/ledger.json` with every field named below - `validate`
+1. Write `$SCRATCH/pr-review/pr<n>/ledger.json` with every field named below - `validate`
    and `payload` only check a subset of these keys, so a wrong or missing key elsewhere fails
    silently rather than loudly. In particular: a cluster **must** use `item_ids` - not `items`,
    not `ids`. `validate` does not catch a wrong key name (an absent `item_ids` defaults to empty,
@@ -157,7 +215,11 @@ reasoning stays intact.
          "line": 142,
          "line_end": 148,
          "anchor_excerpt": "verbatim source lines this finding sits on - survives head drift",
-         "on_changed_line": true,              // from the S5 refuter; false = body-only, can't post inline
+         "on_changed_line": true,              // from the S5 refuter; false = body-only, can't post inline.
+                                               // `payload` excludes false items itself, with a
+                                               // stderr warning - GitHub rejects the WHOLE review
+                                               // over one off-diff anchor. Missing/null is treated
+                                               // as "not excluded", so fill it in for every item.
          "claim": "one sentence",
          "detail": "full text for the author",
          "evidence": ["src/bar.ts:88"],

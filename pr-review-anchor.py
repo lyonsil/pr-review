@@ -294,6 +294,16 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
         # also REFUTED and named in --include-refuted.
         if it.get("anchor_status") == "dead":
             dropped.append((iid, "dead anchor"))
+        # The S5 refuter records on_changed_line; false means the finding does
+        # not sit on a line this PR touched, and GitHub rejects the ENTIRE
+        # review when any one comment anchors off a changed line. Excluded
+        # unconditionally, like a dead anchor and for the same reason -
+        # --include-refuted does not lift it. Only an explicit False excludes:
+        # a missing or null value means the field was never filled in (a
+        # ledger that has not been through S5 or reanchor), which must stay
+        # postable rather than silently dropping every item.
+        elif it.get("on_changed_line") is False:
+            dropped.append((iid, "not on a changed line"))
         elif it.get("verdict") == "REFUTED" and iid not in admitted:
             dropped.append((iid, "REFUTED"))
         else:
@@ -309,6 +319,15 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
         # Stdout stays pure JSON.
         detail = ", ".join(f"#{iid} (excluded, {reason})" for iid, reason in sorted(dropped))
         print(f"warning: {len(dropped)} selected item(s) not posted - {detail}", file=sys.stderr)
+    unselected = sorted(admitted - selected)
+    if unselected:
+        # --include-refuted only lifts the REFUTED exclusion; it never selects.
+        # An id named here but absent from --select posts nothing, and an
+        # explicit overrule vanishing without a word is the worst exclusion to
+        # lose. Not an error: passing a superset of --select is reasonable.
+        detail = ", ".join(f"#{iid}" for iid in unselected)
+        print(f"warning: {len(unselected)} item(s) named by --include-refuted are not in "
+              f"--select, so nothing was re-admitted for them - {detail}", file=sys.stderr)
     if readmitted:
         # Distinct from the exclusion warning above: these items WERE posted,
         # but only because --include-refuted named them - the operator should
@@ -317,6 +336,20 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
         detail = ", ".join(f"#{iid}" for iid in sorted(readmitted))
         print(f"warning: {len(readmitted)} item(s) re-admitted by --include-refuted "
               f"despite being REFUTED - {detail}", file=sys.stderr)
+
+    if not items:
+        # A review with zero comments is never what the caller asked for: it
+        # would POST bare framing plus the attribution footer and nothing
+        # else. Fail here rather than exit 0 on an empty payload, and name
+        # why the selection came out empty.
+        if dropped:
+            why = ("every selected item was excluded - "
+                   + ", ".join(f"#{iid} ({reason})" for iid, reason in sorted(dropped)))
+        elif not selected:
+            why = "the selection resolved to no items"
+        else:
+            why = "the selected id(s) are not present in the ledger's items"
+        raise PayloadError(f"selection produced no comments to post - {why}")
 
     # A missing or null file/line means the item was never anchored (or lost
     # its anchor and wasn't caught upstream - validate() doesn't check line,

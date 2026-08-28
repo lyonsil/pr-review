@@ -7,16 +7,33 @@ Post the selected findings: $ARGUMENTS
 
 ## 1. Load
 
-1. Run `~/.claude/pr-review/pr-review-wt.sh reap`.
-2. Find the newest `ledger.json` under `$CLAUDE_SCRATCHPAD/pr-review/`. If none exists, stop: the
+1. Resolve this session's scratchpad directory - the ledger and every file written below live
+   under it:
+
+   ```bash
+   SCRATCH=$(~/.claude/pr-review/pr-review-wt.sh scratchpad)
+   ```
+
+   There is **no `$CLAUDE_SCRATCHPAD` environment variable** in this harness - do not reference
+   one. The subcommand honours it if it is ever set, and otherwise derives the path from
+   `$CLAUDE_CODE_SESSION_ID`; it is the same resolution `reap` uses for its current-session
+   exclusion. It prints `error: ...` and exits 1 when neither is available - stop there.
+
+   `$SCRATCH` does not survive between tool calls (each runs in a fresh shell), and the derivation
+   depends on the **current directory** - so either re-run the subcommand from the same repo root
+   in every later shell, or resolve it once here and substitute the literal path into the commands
+   below. Do not resolve it from inside `$WT` or any other directory.
+2. Run `~/.claude/pr-review/pr-review-wt.sh reap`. `kept ... not-a-review-worktree` lines are
+   suppressed by default; pass `reap -v` if you want them.
+3. Find the newest `ledger.json` under `$SCRATCH/pr-review/`. If none exists, stop: the
    review did not run in this session, and the ledger is session-scoped by design.
-3. `python3 ~/.claude/pr-review/pr-review-anchor.py validate <ledger>` - stop on any `error: ...`
+4. `python3 ~/.claude/pr-review/pr-review-anchor.py validate <ledger>` - stop on any `error: ...`
    line (exit 1). Do not proceed on a failing validate; if the ledger is malformed, that is a bug
    in how `/pr-review` wrote it, not something to work around here.
-4. If the ledger's `target.kind` is not `pr` (a `.` local-diff review has `target.kind` `local`),
+5. If the ledger's `target.kind` is not `pr` (a `.` local-diff review has `target.kind` `local`),
    stop: say posting is unavailable for a local-diff review and print the selected findings for
    manual use instead.
-5. Read `WT`, `NUMBER`, and `REPO` from the ledger - not shell variables - since `/pr-review` and
+6. Read `WT`, `NUMBER`, and `REPO` from the ledger - not shell variables - since `/pr-review` and
    `/pr-review-post` are separate invocations and nothing set in the earlier session's shell
    survives into this one. Handle a ledger that predates or omits `worktree` rather than letting a
    raw `KeyError` surface:
@@ -55,7 +72,7 @@ print(r)
    to, not necessarily this one. Every `gh` command below must not depend on this invocation's cwd
    matching the target repo - prefix each with `GH_REPO="$REPO"` so `gh`'s own `{owner}/{repo}`
    placeholder resolves correctly regardless of where the command happens to run.
-6. Resolve the selection. **Refuse any REFUTED id** unless the user explicitly overrides it. To
+7. Resolve the selection. **Refuse any REFUTED id** unless the user explicitly overrides it. To
    post an overruled item, use `payload`'s `--include-refuted <ids>` (see step 3) - a per-id, not
    blanket, override: the id must ALSO be in `--select`, and `--include-refuted` errors (exit 1)
    on an id that's unknown in the ledger or that isn't actually `REFUTED`. This preserves the
@@ -76,9 +93,9 @@ if [ "$NOW" != "<ledger head_sha>" ]; then
 fi
 git -C "$WT" fetch origin "pull/$NUMBER/head"
 git -C "$WT" checkout --detach FETCH_HEAD
-GH_REPO="$REPO" gh pr diff "$NUMBER" > "$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/head.diff"
+GH_REPO="$REPO" gh pr diff "$NUMBER" > "$SCRATCH/pr-review/pr$NUMBER/head.diff"
 python3 ~/.claude/pr-review/pr-review-anchor.py reanchor <ledger> \
-  --worktree "$WT" --diff "$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/head.diff"
+  --worktree "$WT" --diff "$SCRATCH/pr-review/pr$NUMBER/head.diff"
 ```
 
 Fetch and check out **inside the worktree** (`git -C "$WT" fetch ...` / `git -C "$WT" checkout
@@ -107,7 +124,7 @@ Anchoring is **per distinct code site**, not per cluster and not per item. A clu
 landing on one of the two sites that needed it. The payload builder already merges items that
 share a `(file, line)` and cross-references cluster siblings at other sites.
 
-Write the review body to `$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/body.md`. The body is **bare
+Write the review body to `$SCRATCH/pr-review/pr$NUMBER/body.md`. The body is **bare
 framing plus the authorized items only**. No side observations, no verification summary, no
 findings the user did not select - those go back to chat, never to the PR. **Do not append the
 attribution string yourself** - `payload` adds `_(AI-assisted, with my guidance)_` to the body
@@ -118,9 +135,9 @@ it at all.
 python3 ~/.claude/pr-review/pr-review-anchor.py payload <ledger> \
   --select <tokens> \
   --include-refuted <overruled-ids> \
-  --body-file "$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/body.md" \
-  > "$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/payload.json" \
-  2> "$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/payload.stderr"
+  --body-file "$SCRATCH/pr-review/pr$NUMBER/body.md" \
+  > "$SCRATCH/pr-review/pr$NUMBER/payload.json" \
+  2> "$SCRATCH/pr-review/pr$NUMBER/payload.stderr"
 STATUS=$?
 ```
 
@@ -129,19 +146,23 @@ Omit `--include-refuted` entirely when nothing is being overruled. Always read
 stdout:
 
 ```bash
-cat "$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/payload.stderr"
+cat "$SCRATCH/pr-review/pr$NUMBER/payload.stderr"
 ```
 
 If `$STATUS` is nonzero, that file holds the fatal `error: ...` line. `payload` exits 1 on: an
 unrecognized selection token, a selected id (or cluster-referenced id) absent from the ledger, an
-`--include-refuted` id that's unknown or that isn't actually `REFUTED`, or a selected item whose
-`file`/`line` is missing or null. Treat any of these as fatal: report the error and stop rather
-than posting a partial or empty review.
+`--include-refuted` id that's unknown or that isn't actually `REFUTED`, a selected item whose
+`file`/`line` is missing or null, or a selection that leaves **no comments at all** (every selected
+item excluded, an empty ledger, or a cluster with no working `item_ids`) - a review with zero
+comments would POST bare framing plus the attribution footer and is never intended. Treat any of
+these as fatal: report the error and stop rather than posting a partial or empty review.
 
-If `$STATUS` is 0, that same file may still hold `warning: ...` lines - naming ids silently
-excluded from the JSON (`REFUTED` without a matching `--include-refuted`, or dead-anchored), or ids
-re-admitted **because** of `--include-refuted`. **Relay every line to the user before presenting
-the plan.** They must see exactly what was dropped or overridden, or they will believe they posted
+If `$STATUS` is 0, that same file may still hold `warning: ...` lines - naming ids excluded from
+the JSON (`REFUTED` without a matching `--include-refuted`, a dead anchor, or `on_changed_line:
+false`, which `payload` excludes unconditionally because GitHub rejects the whole review over one
+off-diff anchor), ids named by `--include-refuted` that were **not** in `--select` and so
+re-admitted nothing, or ids re-admitted **because** of `--include-refuted`. **Relay every line to
+the user before presenting the plan.** They must see exactly what was dropped or overridden, or they will believe they posted
 findings that never made it into the payload, or that a refuted finding they never asked to
 override went out anyway.
 
@@ -155,7 +176,7 @@ Honor any constraints in $ARGUMENTS - for example "do not say whether anything i
 Only after approval. One atomic review:
 
 ```bash
-cat "$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/payload.json" \
+cat "$SCRATCH/pr-review/pr$NUMBER/payload.json" \
   | GH_REPO="$REPO" gh api "repos/{owner}/{repo}/pulls/$NUMBER/reviews" --input -
 ```
 
