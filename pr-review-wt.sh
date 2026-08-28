@@ -99,14 +99,20 @@ cmd_create() {
   local path="$1" committish="$2"
   mkdir -p "$(dirname "$path")"
   git worktree add -q --detach "$path" "$committish"
-  git worktree lock --reason "pr-review session ${CLAUDE_SESSION_ID:-local} (pid $$)" "$path"
+  # $PPID, not $$: this subcommand's own process exits the instant create()
+  # returns, so a pid recorded from $$ is already dead by the time any later
+  # reap checks it. $PPID is the invoking shell's pid, which persists for as
+  # long as the caller (and its use of the worktree) does.
+  git worktree lock --reason "pr-review session ${CLAUDE_SESSION_ID:-local} (pid $PPID)" "$path"
   (cd "$path" && pwd)
 }
 
 cmd_remove() {
   local path="$1"
+  # pwd -P (not pwd): a symlinked path won't string-match the registered
+  # worktree's real path unless symlink components are resolved.
   if git worktree list --porcelain | grep -qxF "worktree $path" \
-  || git worktree list --porcelain | grep -qxF "worktree $(cd "$path" 2>/dev/null && pwd)"; then
+  || git worktree list --porcelain | grep -qxF "worktree $(cd "$path" 2>/dev/null && pwd -P)"; then
     git worktree unlock "$path" >/dev/null 2>&1
     git worktree remove --force "$path" >/dev/null 2>&1
   fi
