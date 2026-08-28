@@ -273,12 +273,33 @@ reasoning stays intact.
    of `item_ids` is NOT, since it just reads as an empty cluster). Fix the ledger and re-run
    validate; never report a ledger as ready while validate is failing.
 3. Write `report.md` alongside it.
-4. Print, in this order:
+4. Print, in this order. **This goes to a terminal, not to GitHub. Emit plain text and
+   GitHub-flavoured markdown only - never raw HTML.** No `<details>`, `<summary>`, `<br>`, or entities:
+   the terminal prints those literally as tags instead of rendering them. Use a plain heading and
+   an indented or bulleted list wherever you want a section to read as secondary.
+
    - the triage table: id, severity, cluster, `file:line`, one-line claim
-   - collapsed: REFUTED items with their reasons, so they can be overruled
-   - collapsed: previously-reported items with links
+   - a `Refuted (not posted unless you name them)` section: each id, its claim, and the refuter's
+     reason, so they can be overruled
+   - a `Previously reported` section: each id with a link to the existing comment
    - the count of items not on a changed line (body-only, cannot be posted inline)
-   - `Worktree: $WT` and the teardown one-liner
+   - a `Files` section giving the absolute paths, so they can be opened directly:
+     ```
+     Ledger:   <SCRATCH>/pr-review/pr<n>/ledger.json
+     Report:   <SCRATCH>/pr-review/pr<n>/report.md
+     Worktree: $WT
+     ```
+   - a `To post` section giving ready-to-run commands, with the real counts substituted:
+
+     ```
+     /pr-review-post all          # the N confirmed findings (refuted and dead anchors excluded)
+     /pr-review-post 1 3 7        # a chosen subset
+     /pr-review-post all --include-refuted 4   # also post refuted #4, per id
+     ```
+
+     Say explicitly that `all` already means confirmed-only: refuted items and dead anchors are
+     never posted unless named with `--include-refuted`, and dead anchors never at all.
+   - the teardown one-liner, if abandoning the round:
      `~/.claude/pr-review/pr-review-wt.sh remove $WT`
 
 Then **stop**. Do not post anything.

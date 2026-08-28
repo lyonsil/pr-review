@@ -167,6 +167,11 @@ the user before presenting the plan.** They must see exactly what was dropped or
 findings that never made it into the payload, or that a refuted finding they never asked to
 override went out anyway.
 
+**The plan is printed to a terminal: plain text and GitHub-flavoured markdown only, never raw
+HTML.** No `<details>`, `<summary>`, or `<br>` - the terminal prints those literally. This applies
+only to what you print for the user; the review body and comment bodies you are quoting are bound
+for GitHub and keep whatever markdown they carry.
+
 Present the plan and **stop for approval**: the body verbatim, any relayed warnings, and per thread
 the `file:line`, the item ids it carries, and its exact text.
 
