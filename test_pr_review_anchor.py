@@ -584,7 +584,9 @@ class TestIncludeRefuted(unittest.TestCase):
 class TestOnChangedLineExclusion(unittest.TestCase):
     """`on_changed_line: false` means GitHub cannot accept the comment inline,
     and it rejects the WHOLE review over one such anchor - so payload must
-    exclude it itself rather than trusting reanchor to have run first."""
+    keep it out of comments[] itself rather than trusting reanchor to have
+    run first. The finding is not lost, though: it lands in the review body
+    instead (see TestDemotedFindings), demoted rather than excluded."""
 
     def led(self):
         return {"items": [
@@ -592,16 +594,20 @@ class TestOnChangedLineExclusion(unittest.TestCase):
             item(2, f="b.ts", line=20, claim="online", on_changed_line=True),
         ], "clusters": []}
 
-    def test_item_not_on_a_changed_line_is_excluded(self):
+    def test_item_not_on_a_changed_line_is_excluded_from_comments(self):
         with contextlib.redirect_stderr(io.StringIO()):
             p = anchor.build_payload(self.led(), ["all"], "intro")
         self.assertEqual([c["path"] for c in p["comments"]], ["b.ts"])
 
-    def test_exclusion_is_warned_on_stderr(self):
+    def test_demotion_is_warned_on_stderr_not_as_an_exclusion(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             anchor.build_payload(self.led(), ["all"], "intro")
-        self.assertIn("#1 (excluded, not on a changed line)", err.getvalue())
+        out = err.getvalue()
+        self.assertIn("#1", out)
+        self.assertIn("moved into the review body", out)
+        self.assertIn("not on a changed line", out)
+        self.assertNotIn("#1 (excluded", out)
 
     def test_missing_or_none_on_changed_line_is_not_excluded(self):
         # A ledger that never went through S5/reanchor has no such field; it
@@ -617,6 +623,97 @@ class TestOnChangedLineExclusion(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             p = anchor.build_payload(led, ["all"], "intro", include_refuted=["1"])
         self.assertEqual([c["path"] for c in p["comments"]], ["b.ts"])
+
+
+class TestDemotedFindings(unittest.TestCase):
+    """A selected item that cannot be anchored to a changed line (a dead
+    anchor, or on_changed_line: false) is still a real, verified finding -
+    it is demoted into the review body instead of being dropped. REFUTED
+    stays a true exclusion: checked first, so a REFUTED item is excluded
+    rather than demoted even when it is also dead, unless re-admitted."""
+
+    def test_dead_item_is_demoted_to_body_not_comments(self):
+        led = {"items": [item(1, claim="alpha", anchor_status="dead",
+                               anchor_note="anchor excerpt no longer present")],
+               "clusters": []}
+        with contextlib.redirect_stderr(io.StringIO()):
+            p = anchor.build_payload(led, ["1"], "intro")
+        self.assertEqual(p["comments"], [])
+        self.assertIn("alpha", p["body"])
+        self.assertIn("#1", p["body"])
+        self.assertIn("Findings not anchored to a changed line", p["body"])
+        self.assertIn("anchor excerpt no longer present", p["body"])
+
+    def test_on_changed_line_false_item_is_demoted_to_body_not_comments(self):
+        led = {"items": [item(1, claim="beta", on_changed_line=False)], "clusters": []}
+        with contextlib.redirect_stderr(io.StringIO()):
+            p = anchor.build_payload(led, ["1"], "intro")
+        self.assertEqual(p["comments"], [])
+        self.assertIn("beta", p["body"])
+        self.assertIn("Findings not anchored to a changed line", p["body"])
+
+    def test_demoted_section_includes_id_severity_location_claim_and_detail(self):
+        led = {"items": [item(1, sev="high", f="a.ts", line=42, claim="alpha claim",
+                               detail="alpha detail", anchor_status="dead")],
+               "clusters": []}
+        with contextlib.redirect_stderr(io.StringIO()):
+            p = anchor.build_payload(led, ["1"], "intro")
+        body = p["body"]
+        self.assertIn("#1", body); self.assertIn("high", body)
+        self.assertIn("a.ts:42", body)
+        self.assertIn("alpha claim", body); self.assertIn("alpha detail", body)
+
+    def test_refuted_item_is_never_demoted_even_if_dead(self):
+        led = {"items": [
+            item(1, claim="alpha", verdict="REFUTED", anchor_status="dead"),
+            item(2, claim="beta"),  # keeps the payload non-empty
+        ], "clusters": []}
+        with contextlib.redirect_stderr(io.StringIO()):
+            p = anchor.build_payload(led, ["all"], "intro")
+        self.assertNotIn("alpha", p["body"])
+        self.assertNotIn("alpha", " ".join(c["body"] for c in p["comments"]))
+
+    def test_readmitted_refuted_dead_item_lands_in_body_not_comments(self):
+        led = {"items": [item(1, claim="alpha", verdict="REFUTED", anchor_status="dead")],
+               "clusters": []}
+        with contextlib.redirect_stderr(io.StringIO()):
+            p = anchor.build_payload(led, ["1"], "intro", include_refuted=["1"])
+        self.assertEqual(p["comments"], [])
+        self.assertIn("alpha", p["body"])
+        self.assertIn("Findings not anchored to a changed line", p["body"])
+
+    def test_attribution_is_last_after_demoted_section(self):
+        led = {"items": [item(1, anchor_status="dead")], "clusters": []}
+        with contextlib.redirect_stderr(io.StringIO()):
+            p = anchor.build_payload(led, ["1"], "intro")
+        body = p["body"]
+        self.assertEqual(body.count(anchor.ATTRIBUTION), 1)
+        self.assertTrue(body.rstrip().endswith(anchor.ATTRIBUTION))
+        self.assertLess(body.index("Findings not anchored"), body.index(anchor.ATTRIBUTION))
+
+    def test_attribution_stays_last_even_if_intro_already_ends_with_it(self):
+        led = {"items": [item(1, anchor_status="dead")], "clusters": []}
+        intro = f"Review intro.\n\n{anchor.ATTRIBUTION}"
+        with contextlib.redirect_stderr(io.StringIO()):
+            p = anchor.build_payload(led, ["1"], intro)
+        body = p["body"]
+        self.assertEqual(body.count(anchor.ATTRIBUTION), 1)
+        self.assertTrue(body.rstrip().endswith(anchor.ATTRIBUTION))
+
+    def test_demotion_warning_distinguishes_from_exclusion(self):
+        led = {"items": [
+            item(1, claim="alpha", anchor_status="dead"),
+            item(2, claim="beta", verdict="REFUTED"),
+            item(3, claim="gamma"),  # keeps the payload non-empty
+        ], "clusters": []}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            anchor.build_payload(led, ["all"], "intro")
+        out = err.getvalue()
+        self.assertIn("moved into the review body", out)
+        self.assertIn("#1", out)
+        self.assertNotIn("#1 (excluded", out)
+        self.assertIn("#2 (excluded, REFUTED)", out)
 
 
 class TestIncludeRefutedNotSelected(unittest.TestCase):
@@ -646,8 +743,11 @@ class TestIncludeRefutedNotSelected(unittest.TestCase):
 
 
 class TestEmptyPayloadIsFatal(unittest.TestCase):
-    """A review with zero comments would POST bare framing plus the
-    attribution footer, which is never what the caller asked for."""
+    """A payload with nothing substantive - no inline comments and no
+    demoted findings - would POST bare framing plus the attribution footer,
+    which is never what the caller asked for. A payload with zero comments
+    but a non-empty demoted section is valid (see TestDemotedFindings): the
+    findings are still in the body, just not anchored inline."""
 
     def test_selecting_only_a_refuted_id_raises_instead_of_building_empty(self):
         led = {"items": [item(1, verdict="REFUTED")], "clusters": []}
@@ -657,12 +757,23 @@ class TestEmptyPayloadIsFatal(unittest.TestCase):
         self.assertIn("REFUTED", str(ctx.exception))
         self.assertIn("#1", str(ctx.exception))
 
-    def test_selecting_only_a_dead_anchor_raises(self):
-        led = {"items": [item(1, anchor_status="dead")], "clusters": []}
+    def test_selecting_only_a_dead_anchor_no_longer_raises(self):
+        # A dead anchor is still a real, verified finding - it demotes into
+        # the review body instead of failing the whole payload.
+        led = {"items": [item(1, claim="alpha", anchor_status="dead")], "clusters": []}
         with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(anchor.PayloadError) as ctx:
-                anchor.build_payload(led, ["1"], "intro")
-        self.assertIn("dead anchor", str(ctx.exception))
+            p = anchor.build_payload(led, ["1"], "intro")
+        self.assertEqual(p["comments"], [])
+        self.assertIn("alpha", p["body"])
+
+    def test_all_dead_selection_is_zero_comments_but_valid(self):
+        led = {"items": [item(1, claim="alpha", f="a.ts", anchor_status="dead"),
+                          item(2, claim="beta", f="b.ts", anchor_status="dead")],
+               "clusters": []}
+        with contextlib.redirect_stderr(io.StringIO()):
+            p = anchor.build_payload(led, ["all"], "intro")
+        self.assertEqual(p["comments"], [])
+        self.assertIn("alpha", p["body"]); self.assertIn("beta", p["body"])
 
     def test_a_cluster_with_no_working_item_ids_raises(self):
         # The `items:`-instead-of-`item_ids:` typo validate() cannot catch.
@@ -793,6 +904,21 @@ class TestPayloadCli(unittest.TestCase):
         self.assertEqual(len(payload["comments"]), 1)
         self.assertIn("alpha", payload["comments"][0]["body"])
 
+    def test_all_dead_selection_via_cli_exits_0_with_zero_comments_and_demoted_body(self):
+        led = {"items": [item(1, claim="alpha", anchor_status="dead")], "clusters": []}
+        ledger_path = self._write_json(led)
+        body_file = self._write_text("Review intro")
+        try:
+            code, out, err = self._run(ledger_path, None, body_file)
+        finally:
+            os.remove(ledger_path); os.remove(body_file)
+        self.assertEqual(code, 0)
+        self.assertIn("moved into the review body", err)
+        payload = json.loads(out)
+        self.assertEqual(payload["comments"], [])
+        self.assertIn("alpha", payload["body"])
+        self.assertIn("Findings not anchored to a changed line", payload["body"])
+
 
 class TestRenderPreview(unittest.TestCase):
     def _payload(self, comments=None, body="Review intro", event="COMMENT"):
@@ -837,6 +963,19 @@ class TestRenderPreview(unittest.TestCase):
         ]))
         for tag in ("<details>", "<summary>", "<br>"):
             self.assertNotIn(tag, out)
+
+    def test_demoted_section_renders_verbatim_and_is_not_truncated(self):
+        led = {"items": [item(1, claim="alpha claim", detail="alpha detail " + "z" * 500,
+                               anchor_status="dead",
+                               anchor_note="anchor excerpt no longer present")],
+               "clusters": []}
+        with contextlib.redirect_stderr(io.StringIO()):
+            payload = anchor.build_payload(led, ["1"], "intro")
+        out = anchor.render_preview(payload)
+        self.assertIn(payload["body"], out)
+        self.assertIn("Findings not anchored to a changed line", out)
+        self.assertIn("alpha claim", out)
+        self.assertIn("alpha detail " + "z" * 500, out)
 
 
 class TestPreviewCli(unittest.TestCase):

@@ -241,8 +241,9 @@ def resolve_include_refuted(ledger, tokens):
     else is an error, never a silent no-op, since a typo here must not
     quietly post a different set than the operator asked to overrule. This
     only lifts the REFUTED exclusion for the named ids; it selects nothing by
-    itself, and it has no effect on a dead anchor (that exclusion is
-    unconditional - see build_payload)."""
+    itself. It has no effect on whether a re-admitted item is dead or
+    on_changed_line: false - those still demote it into the review body
+    instead of posting it inline (see build_payload)."""
     if not tokens:
         return set()
     by_id = {it.get("id"): it for it in ledger.get("items", [])
@@ -276,6 +277,16 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
     its sites, listing every OTHER site's id(s) - never just one, however many
     sites the cluster spans.
 
+    A selected item that cannot be anchored to a changed line (a dead
+    anchor, or on_changed_line: false) is never dropped - it was still
+    verified and selected, so it is demoted into the review body under its
+    own heading instead of being posted inline. REFUTED is the one true
+    exclusion: a finding judged not real belongs nowhere in the output
+    unless --include-refuted names it, checked before the demotion checks so
+    a REFUTED item is excluded rather than demoted even when it is also
+    dead. A re-admitted REFUTED item then follows the normal rules above
+    (inline if anchorable, demoted if dead or off-diff).
+
     include_refuted names specific REFUTED item ids to post anyway (per id,
     never blanket - see resolve_include_refuted). An id must still be in
     `tokens` (the --select set) to appear; the flag only lifts the REFUTED
@@ -284,39 +295,49 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
     admitted = resolve_include_refuted(ledger, include_refuted)
     by_id = {it.get("id"): it for it in ledger.get("items", [])}
 
-    items, dropped, readmitted = [], [], []
+    items, demoted, dropped, readmitted = [], [], [], []
     for iid in selected:
         it = by_id.get(iid)
         if it is None:
             continue
-        # Dead-anchor exclusion is unconditional and checked first: an item
-        # cannot be posted inline at all once dead, whether or not it was
-        # also REFUTED and named in --include-refuted.
+        # REFUTED is the only unconditional exclusion, checked first: a
+        # finding judged not real belongs nowhere in the output, dead anchor
+        # or not, unless --include-refuted names it.
+        if it.get("verdict") == "REFUTED" and iid not in admitted:
+            dropped.append((iid, "REFUTED"))
+            continue
+        if it.get("verdict") == "REFUTED":
+            readmitted.append(iid)
+
         if it.get("anchor_status") == "dead":
-            dropped.append((iid, "dead anchor"))
+            demoted.append((it, "dead anchor", it.get("anchor_note")
+                             or "anchor could not be relocated in the current diff"))
         # The S5 refuter records on_changed_line; false means the finding does
         # not sit on a line this PR touched, and GitHub rejects the ENTIRE
-        # review when any one comment anchors off a changed line. Excluded
-        # unconditionally, like a dead anchor and for the same reason -
-        # --include-refuted does not lift it. Only an explicit False excludes:
-        # a missing or null value means the field was never filled in (a
-        # ledger that has not been through S5 or reanchor), which must stay
-        # postable rather than silently dropping every item.
+        # review when any one comment anchors off a changed line - demoted
+        # for the same reason as a dead anchor. Only an explicit False
+        # demotes: a missing or null value means the field was never filled
+        # in (a ledger that has not been through S5 or reanchor), which must
+        # stay postable rather than silently demoting every item.
         elif it.get("on_changed_line") is False:
-            dropped.append((iid, "not on a changed line"))
-        elif it.get("verdict") == "REFUTED" and iid not in admitted:
-            dropped.append((iid, "REFUTED"))
+            demoted.append((it, "not on a changed line", it.get("anchor_note")
+                             or "not on a changed line in the current diff"))
         else:
             items.append(it)
-            if it.get("verdict") == "REFUTED":
-                readmitted.append(iid)
 
+    if demoted:
+        # Distinct from the exclusion warning below: these items WERE kept -
+        # just moved out of comments[] into the review body, because GitHub
+        # rejects the entire review over one off-diff comment.
+        detail = ", ".join(f"#{it['id']} ({reason})"
+                            for it, reason, _ in sorted(demoted, key=lambda d: d[0]["id"]))
+        print(f"warning: {len(demoted)} selected item(s) moved into the review body "
+              f"(cannot be anchored to a changed line) - {detail}", file=sys.stderr)
     if dropped:
         # Selected-but-excluded items are dropped from the payload on purpose
-        # (a refuted finding or a dead anchor must never be posted by
-        # default), but the caller asked for them - say so on stderr so
-        # nobody believes a finding was posted when it silently wasn't.
-        # Stdout stays pure JSON.
+        # (a refuted finding must never be posted by default), but the
+        # caller asked for them - say so on stderr so nobody believes a
+        # finding was posted when it silently wasn't. Stdout stays pure JSON.
         detail = ", ".join(f"#{iid} (excluded, {reason})" for iid, reason in sorted(dropped))
         print(f"warning: {len(dropped)} selected item(s) not posted - {detail}", file=sys.stderr)
     unselected = sorted(admitted - selected)
@@ -329,19 +350,21 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
         print(f"warning: {len(unselected)} item(s) named by --include-refuted are not in "
               f"--select, so nothing was re-admitted for them - {detail}", file=sys.stderr)
     if readmitted:
-        # Distinct from the exclusion warning above: these items WERE posted,
+        # Distinct from the exclusion warning above: these items WERE kept,
         # but only because --include-refuted named them - the operator should
-        # see that an override, not the default, put a REFUTED finding in
-        # the payload.
+        # see that an override, not the default, put a REFUTED finding back
+        # into the payload (inline or demoted).
         detail = ", ".join(f"#{iid}" for iid in sorted(readmitted))
         print(f"warning: {len(readmitted)} item(s) re-admitted by --include-refuted "
               f"despite being REFUTED - {detail}", file=sys.stderr)
 
-    if not items:
-        # A review with zero comments is never what the caller asked for: it
-        # would POST bare framing plus the attribution footer and nothing
-        # else. Fail here rather than exit 0 on an empty payload, and name
-        # why the selection came out empty.
+    if not items and not demoted:
+        # A payload with nothing substantive - no inline comments and no
+        # demoted findings - would POST bare framing plus the attribution
+        # footer and nothing else. Fail here rather than exit 0, and name
+        # why the selection came out empty. A payload with zero comments but
+        # a non-empty demoted section is fine: the findings are still in the
+        # body, just not anchored inline.
         if dropped:
             why = ("every selected item was excluded - "
                    + ", ".join(f"#{iid} ({reason})" for iid, reason in sorted(dropped)))
@@ -356,6 +379,8 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
     # and a finding that skipped reanchor never got one at all). Posting it
     # anyway would put `"line": null` in the payload, which GitHub rejects
     # for the whole review, not just that comment - fail loudly here instead.
+    # Demoted items are exempt: they render as free text in the body, never
+    # anchored to a line, so a missing line there is expected, not an error.
     unanchored = sorted(it.get("id") for it in items if not it.get("file") or it.get("line") is None)
     if unanchored:
         raise PayloadError("item id(s) missing file/line, cannot be anchored to a comment: "
@@ -388,13 +413,29 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
         comments.append({"path": path, "line": line, "side": "RIGHT",
                          "body": "\n\n---\n\n".join(blocks)})
 
-    # The attribution footer must appear exactly once. A body file the author
-    # already wrote to their own standing convention may well end with it
-    # already - append only when it isn't already present, rather than
-    # trusting every caller to never include it.
+    # The attribution footer must appear exactly once and be the LAST thing
+    # in the body, after the demoted-findings section below. A body file the
+    # author already wrote to their own standing convention may well already
+    # contain it - strip any existing occurrence(s) first so it is never
+    # duplicated or left stranded ahead of the demoted section, then
+    # re-append it once at the very end.
     body = body_intro.strip()
-    if ATTRIBUTION not in body:
-        body = (body + "\n\n" + ATTRIBUTION).strip()
+    if ATTRIBUTION in body:
+        body = body.replace(ATTRIBUTION, "").rstrip()
+
+    if demoted:
+        lines = ["## Findings not anchored to a changed line", ""]
+        for it, _reason, note in sorted(demoted, key=lambda d: d[0]["id"]):
+            loc = f"{it.get('file')}:{it['line']}" if it.get("line") is not None else it.get("file", "?")
+            lines.append(f"**#{it['id']}** ({it['severity']}) {loc} - {it['claim']}")
+            detail = (it.get("detail") or "").strip()
+            if detail:
+                lines.append(""); lines.append(detail)
+            lines.append(""); lines.append(f"_Not anchored: {note}_"); lines.append("")
+        demoted_section = "\n".join(lines).rstrip()
+        body = (body + "\n\n" + demoted_section).strip() if body else demoted_section
+
+    body = (body + "\n\n" + ATTRIBUTION).strip()
 
     return {"body": body, "event": "COMMENT", "comments": comments}
 
