@@ -62,7 +62,18 @@ consider() {
   elif git worktree remove --force "$wt" >/dev/null 2>&1; then
     echo "reaped $wt"
   else
-    echo "error $wt remove-failed"
+    # A failed `git worktree remove --force` can still have torn down the
+    # admin registration and deleted file contents before failing only on
+    # the final rmdir (observed on git 2.52.0 under a permission-denied
+    # parent dir) - leaving an orphaned, deregistered, empty directory that
+    # no future `git worktree list` will surface. Distinguish that from a
+    # genuine no-op failure so the message never implies "nothing happened"
+    # when something did.
+    if [ -d "$wt" ] && ! git worktree list --porcelain | grep -qxF "worktree $wt"; then
+      echo "orphaned $wt manual-cleanup-needed"
+    else
+      echo "error $wt remove-failed"
+    fi
     return 0
   fi
   if [ -n "$branch" ]; then

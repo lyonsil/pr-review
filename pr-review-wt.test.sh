@@ -76,9 +76,9 @@ check "branch still exists" "$(git branch --list strandme | wc -l)" "1"
 echo "== reap: keeps a DIRTY worktree (modified tracked + untracked file) =="
 setup_repo
 git worktree add -q --detach .claude/worktrees/review-555 "$SHA"
-age_dir .claude/worktrees/review-555 48
 echo modified > .claude/worktrees/review-555/f.txt
 echo untracked > .claude/worktrees/review-555/new.txt
+age_dir .claude/worktrees/review-555 48
 OUT=$("$SCRIPT" reap 2>&1)
 check "reports dirty" "$(echo "$OUT" | grep -c '^kept .*review-555 dirty-')" "1"
 check "worktree still registered" "$(git worktree list | grep -c review-555)" "1"
