@@ -15,6 +15,10 @@ class PayloadError(ValueError):
     """A selected item can't be safely anchored into a GitHub review comment."""
 
 
+class IncludeRefutedError(ValueError):
+    """An --include-refuted token doesn't name a REFUTED item in this ledger."""
+
+
 def validate(ledger):
     if not isinstance(ledger, dict):
         return [f"ledger root must be a JSON object, got {type(ledger).__name__}"]
@@ -230,35 +234,89 @@ def resolve_selection(ledger, tokens):
     return ids
 
 
-def build_payload(ledger, tokens, body_intro):
+def resolve_include_refuted(ledger, tokens):
+    """Expand --include-refuted tokens into a set of item ids to re-admit past
+    the REFUTED exclusion, scoped strictly per id. Every token must name an
+    item that both exists in this ledger AND is currently REFUTED - anything
+    else is an error, never a silent no-op, since a typo here must not
+    quietly post a different set than the operator asked to overrule. This
+    only lifts the REFUTED exclusion for the named ids; it selects nothing by
+    itself, and it has no effect on a dead anchor (that exclusion is
+    unconditional - see build_payload)."""
+    if not tokens:
+        return set()
+    by_id = {it.get("id"): it for it in ledger.get("items", [])
+             if isinstance(it.get("id"), int) and not isinstance(it.get("id"), bool)}
+
+    ids, unknown, not_refuted = set(), [], []
+    for raw in tokens:
+        for tok in str(raw).replace(",", " ").split():
+            it = by_id.get(int(tok)) if tok.isdigit() else None
+            if it is None:
+                unknown.append(tok)
+            elif it.get("verdict") != "REFUTED":
+                not_refuted.append(tok)
+            else:
+                ids.add(it["id"])
+
+    if unknown or not_refuted:
+        parts = []
+        if unknown:
+            parts.append(f"item id(s) not present in this ledger: {', '.join(unknown)}")
+        if not_refuted:
+            parts.append(f"item id(s) not REFUTED, nothing to include: {', '.join(not_refuted)}")
+        raise IncludeRefutedError("; ".join(parts))
+    return ids
+
+
+def build_payload(ledger, tokens, body_intro, include_refuted=None):
     """Build the GitHub reviews API body for the selected items, anchored one
     comment per distinct (file, line) site. A cluster whose selected items span
     more than one site gets a 'Same fix as #a, #b.' cross-reference at each of
     its sites, listing every OTHER site's id(s) - never just one, however many
-    sites the cluster spans."""
+    sites the cluster spans.
+
+    include_refuted names specific REFUTED item ids to post anyway (per id,
+    never blanket - see resolve_include_refuted). An id must still be in
+    `tokens` (the --select set) to appear; the flag only lifts the REFUTED
+    exclusion, it is not a second selection mechanism."""
     selected = resolve_selection(ledger, tokens)
+    admitted = resolve_include_refuted(ledger, include_refuted)
     by_id = {it.get("id"): it for it in ledger.get("items", [])}
 
-    items, dropped = [], []
+    items, dropped, readmitted = [], [], []
     for iid in selected:
         it = by_id.get(iid)
         if it is None:
             continue
-        if it.get("verdict") == "REFUTED":
-            dropped.append((iid, "REFUTED"))
-        elif it.get("anchor_status") == "dead":
+        # Dead-anchor exclusion is unconditional and checked first: an item
+        # cannot be posted inline at all once dead, whether or not it was
+        # also REFUTED and named in --include-refuted.
+        if it.get("anchor_status") == "dead":
             dropped.append((iid, "dead anchor"))
+        elif it.get("verdict") == "REFUTED" and iid not in admitted:
+            dropped.append((iid, "REFUTED"))
         else:
             items.append(it)
+            if it.get("verdict") == "REFUTED":
+                readmitted.append(iid)
 
     if dropped:
         # Selected-but-excluded items are dropped from the payload on purpose
-        # (a refuted finding or a dead anchor must never be posted), but the
-        # caller asked for them - say so on stderr so nobody believes a
-        # finding was posted when it silently wasn't. Stdout stays pure JSON.
-        detail = ", ".join(f"#{iid} ({reason})" for iid, reason in sorted(dropped))
-        print(f"warning: {len(dropped)} selected item(s) excluded from payload - {detail}",
-              file=sys.stderr)
+        # (a refuted finding or a dead anchor must never be posted by
+        # default), but the caller asked for them - say so on stderr so
+        # nobody believes a finding was posted when it silently wasn't.
+        # Stdout stays pure JSON.
+        detail = ", ".join(f"#{iid} (excluded, {reason})" for iid, reason in sorted(dropped))
+        print(f"warning: {len(dropped)} selected item(s) not posted - {detail}", file=sys.stderr)
+    if readmitted:
+        # Distinct from the exclusion warning above: these items WERE posted,
+        # but only because --include-refuted named them - the operator should
+        # see that an override, not the default, put a REFUTED finding in
+        # the payload.
+        detail = ", ".join(f"#{iid}" for iid in sorted(readmitted))
+        print(f"warning: {len(readmitted)} item(s) re-admitted by --include-refuted "
+              f"despite being REFUTED - {detail}", file=sys.stderr)
 
     # A missing or null file/line means the item was never anchored (or lost
     # its anchor and wasn't caught upstream - validate() doesn't check line,
@@ -335,8 +393,9 @@ def cmd_payload(args):
         return 1
 
     try:
-        payload = build_payload(led, args.select or ["all"], intro)
-    except (SelectionError, PayloadError) as exc:
+        payload = build_payload(led, args.select or ["all"], intro,
+                                 include_refuted=getattr(args, "include_refuted", None))
+    except (SelectionError, PayloadError, IncludeRefutedError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
@@ -353,6 +412,9 @@ def main():
     r.add_argument("--diff", required=True); r.set_defaults(fn=cmd_reanchor)
     y = sub.add_parser("payload")
     y.add_argument("ledger"); y.add_argument("--select", nargs="*")
+    y.add_argument("--include-refuted", nargs="*",
+                    help="Re-admit specific REFUTED item ids past the default exclusion "
+                         "(per id only - never a blanket override)")
     y.add_argument("--body-file", required=True); y.set_defaults(fn=cmd_payload)
     args = p.parse_args()
     sys.exit(args.fn(args))

@@ -1,4 +1,4 @@
-import unittest, importlib.util, os, json, io, contextlib, tempfile
+import unittest, importlib.util, os, json, io, contextlib, tempfile, re
 from types import SimpleNamespace
 spec = importlib.util.spec_from_file_location(
     "anchor", os.path.join(os.path.dirname(__file__), "pr-review-anchor.py"))
@@ -515,11 +515,74 @@ class TestPayload(unittest.TestCase):
             anchor.resolve_selection(led, ["C1"])
 
 
+class TestIncludeRefuted(unittest.TestCase):
+    def led(self):
+        # Two independently REFUTED items (1 and 3) at different sites, plus
+        # a plain CONFIRMED item (4) to use as a "not actually REFUTED" id.
+        led = {"items": [
+            item(1, sev="blocker", f="a.ts", line=10, cluster=None, claim="alpha"),
+            item(2, sev="blocker", f="a.ts", line=10, cluster=None, claim="beta"),
+            item(3, sev="high", f="b.ts", line=20, cluster=None, claim="gamma"),
+            item(4, sev="low", f="c.ts", line=30, cluster=None, claim="delta"),
+        ], "clusters": []}
+        led["items"][0]["verdict"] = "REFUTED"
+        led["items"][2]["verdict"] = "REFUTED"
+        return led
+
+    def test_readmits_only_the_named_id_the_other_refuted_item_stays_out(self):
+        p = anchor.build_payload(self.led(), ["all"], "intro", include_refuted=["1"])
+        joined = " ".join(c["body"] for c in p["comments"])
+        self.assertIn("alpha", joined)   # #1: named in --include-refuted
+        self.assertNotIn("gamma", joined)  # #3: also REFUTED, not named - stays out
+
+    def test_unknown_id_passed_to_the_flag_is_an_error(self):
+        with self.assertRaises(anchor.IncludeRefutedError):
+            anchor.resolve_include_refuted(self.led(), ["99"])
+
+    def test_id_that_is_not_refuted_passed_to_the_flag_is_an_error(self):
+        # item 4 is CONFIRMED, not REFUTED - nothing for the flag to lift.
+        with self.assertRaises(anchor.IncludeRefutedError):
+            anchor.resolve_include_refuted(self.led(), ["4"])
+
+    def test_readmitted_item_still_must_be_selected_to_appear(self):
+        # --include-refuted only lifts the REFUTED exclusion; it is not a
+        # second selection mechanism. #1 is named but never selected here.
+        p = anchor.build_payload(self.led(), ["4"], "intro", include_refuted=["1"])
+        self.assertEqual([c["path"] for c in p["comments"]], ["c.ts"])
+
+    def test_include_refuted_does_not_resurrect_a_dead_anchor(self):
+        led = {"items": [item(1, cluster=None)], "clusters": []}
+        led["items"][0]["verdict"] = "REFUTED"
+        led["items"][0]["anchor_status"] = "dead"
+        p = anchor.build_payload(led, ["all"], "intro", include_refuted=["1"])
+        self.assertEqual(p["comments"], [])
+
+    def test_warning_distinguishes_excluded_from_readmitted(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            anchor.build_payload(self.led(), ["all"], "intro", include_refuted=["1"])
+        out = err.getvalue()
+        self.assertIn("re-admitted by --include-refuted", out)
+        self.assertIn("#1", out)
+        self.assertNotIn("#1 (excluded", out)
+        self.assertIn("#3 (excluded, REFUTED)", out)
+
+    def test_per_id_scoping_is_not_a_blanket_override(self):
+        # Naming exactly one REFUTED id must never re-admit every REFUTED
+        # item - that would defeat the point of refuting them. This is the
+        # scenario the round's mutation check targets directly.
+        p = anchor.build_payload(self.led(), ["all"], "intro", include_refuted=["1"])
+        ids_posted = {int(m) for c in p["comments"] for m in re.findall(r"#(\d+)", c["body"])}
+        self.assertIn(1, ids_posted)
+        self.assertNotIn(3, ids_posted)
+
+
 class TestPayloadCli(unittest.TestCase):
-    def _run(self, ledger, select, body_file):
+    def _run(self, ledger, select, body_file, include_refuted=None):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = anchor.cmd_payload(SimpleNamespace(ledger=ledger, select=select, body_file=body_file))
+            code = anchor.cmd_payload(SimpleNamespace(
+                ledger=ledger, select=select, body_file=body_file, include_refuted=include_refuted))
         return code, out.getvalue(), err.getvalue()
 
     def _assert_single_curated_error(self, code, out, err):
@@ -588,6 +651,30 @@ class TestPayloadCli(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual(payload["event"], "COMMENT")
         self.assertEqual(payload["body"].count(anchor.ATTRIBUTION), 1)
+        self.assertEqual(len(payload["comments"]), 1)
+        self.assertIn("alpha", payload["comments"][0]["body"])
+
+    def test_include_refuted_unknown_id_via_cli_emits_curated_error(self):
+        ledger_path = self._write_json({"items": [item(1)], "clusters": []})
+        body_file = self._write_text("intro")
+        try:
+            code, out, err = self._run(ledger_path, None, body_file, include_refuted=["99"])
+        finally:
+            os.remove(ledger_path); os.remove(body_file)
+        self._assert_single_curated_error(code, out, err)
+
+    def test_include_refuted_end_to_end_posts_the_overridden_item(self):
+        led = {"items": [item(1, claim="alpha")], "clusters": []}
+        led["items"][0]["verdict"] = "REFUTED"
+        ledger_path = self._write_json(led)
+        body_file = self._write_text("Review intro")
+        try:
+            code, out, err = self._run(ledger_path, None, body_file, include_refuted=["1"])
+        finally:
+            os.remove(ledger_path); os.remove(body_file)
+        self.assertEqual(code, 0)
+        self.assertIn("re-admitted by --include-refuted", err)
+        payload = json.loads(out)
         self.assertEqual(len(payload["comments"]), 1)
         self.assertIn("alpha", payload["comments"][0]["body"])
 
