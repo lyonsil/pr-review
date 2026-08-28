@@ -30,16 +30,31 @@ if not wt:
     sys.exit('error: ledger has no worktree field - re-run /pr-review')
 print(wt)
 " <ledger>)
-   NUMBER=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['target']['number'])" <ledger>)
-   REPO=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['target']['repo'])" <ledger>)
+   NUMBER=$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+n = d.get('target', {}).get('number')
+if not n:
+    sys.exit('error: ledger has no target.number - re-run /pr-review')
+print(n)
+" <ledger>)
+   REPO=$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+r = d.get('target', {}).get('repo')
+if not r:
+    sys.exit('error: ledger has no target.repo - re-run /pr-review')
+print(r)
+" <ledger>)
    ```
 
-   If the `WT` command prints an `error: ...` line instead of a path, stop - there is no worktree
-   to re-anchor or post against.
-
-   Every `gh` command below must not depend on this invocation's cwd matching the target repo -
-   prefix each with `GH_REPO="$REPO"` so `gh`'s own `{owner}/{repo}` placeholder resolves
-   correctly regardless of where the command happens to run.
+   If any of these three commands prints an `error: ...` line instead of a value, stop - there is
+   nothing safe to re-anchor or post against. Before any `gh` call below, also assert `$REPO` is
+   non-empty in the shell that will run it (`[ -n "$REPO" ] || { echo "REPO is empty, aborting"; exit 1; }`)
+   - an empty `GH_REPO` would send the request to whatever repo the ambient `gh` context falls back
+   to, not necessarily this one. Every `gh` command below must not depend on this invocation's cwd
+   matching the target repo - prefix each with `GH_REPO="$REPO"` so `gh`'s own `{owner}/{repo}`
+   placeholder resolves correctly regardless of where the command happens to run.
 6. Resolve the selection. **Refuse any REFUTED id** unless the user explicitly overrides it. To
    post an overruled item, use `payload`'s `--include-refuted <ids>` (see step 3) - a per-id, not
    blanket, override: the id must ALSO be in `--select`, and `--include-refuted` errors (exit 1)
@@ -72,11 +87,12 @@ a fetch run in a different checkout leaves the worktree's own `FETCH_HEAD` untou
 `git -C "$WT" checkout --detach FETCH_HEAD` then fails outright (confirmed: it errors immediately
 when the fetch and the checkout target different checkouts).
 
-`reanchor` exits 1 only if the ledger or diff file fails to load (e.g. `error: diff file not
-found`) - check that and stop before trusting anything downstream. Once both files load it always
-exits 0 regardless of per-item results, so from there judge outcomes by the printed `ok`/`moved`/
-`dead` summary, not the exit code. Report the counts. For each dead anchor, ask whether to demote
-it to the review body or drop it. Do not proceed with a dead anchor in the selection.
+`reanchor` exits 1 only on a ledger or diff **load** failure (e.g. `error: diff file not found`) or
+a ledger **write** failure after re-anchoring (e.g. a read-only ledger file) - check that and stop
+before trusting anything downstream. Otherwise it exits 0 regardless of per-item results, so from
+there judge outcomes by the printed `ok`/`moved`/`dead` summary, not the exit code. Report the
+counts. For each dead anchor, ask whether to demote it to the review body or drop it. Do not
+proceed with a dead anchor in the selection.
 
 Also scan the per-item output (or each item's `anchor_note`) for `ambiguous:` - it means the anchor
 excerpt matched more than one location and the nearest-to-old-line match was chosen automatically.

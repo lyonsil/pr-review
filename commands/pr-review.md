@@ -23,8 +23,10 @@ triage table.
    - `.`: the current branch versus its merge-base with `main`, committed work only. HEAD_SHA is
      `git rev-parse HEAD`. There is no PR, so S3 is skipped and posting is unavailable. Use the
      literal id `local` wherever `<n>` appears in paths below (worktree `wt-prlocal`, ledger dir
-     `pr-review/prlocal/`) - the reaper only cares about the `wt-` prefix
-     (`pr-review-wt.sh`'s `is_review_path`), not the exact suffix. The ledger's `target` is
+     `pr-review/prlocal/`) - the reaper's coverage pattern is `*/scratchpad/wt-*`
+     (`pr-review-wt.sh:9`'s `is_review_path`), so it's the full `.../scratchpad/wt-` path that
+     matters, not just the `wt-` prefix; relocating the worktree out from under `$CLAUDE_SCRATCHPAD`
+     drops reaper coverage even if the basename still starts with `wt-`. The ledger's `target` is
      `{"kind": "local"}`.
 3. For a PR, fetch the head and resolve it to a concrete SHA before anything downstream depends on
    it:
@@ -52,13 +54,16 @@ triage table.
 
    Still use this direct-substitution form - it's the reliable way to capture `$WT` cleanly - but
    don't rely on the lock's `$PPID` for protection. Measured in this harness: each tool call runs
-   in its own short-lived shell, so the pid `create` records is already dead by the next call, and
-   piping or `bash -c`-wrapping records that same short-lived pid anyway - the
-   `locked-by-live-pid-N` guard is inert here in either form. The lock is provenance only (which
+   in its own short-lived shell, and the recorded pid does not survive to the next invocation under
+   any shape (direct substitution, pipe, or `bash -c`) - so the `locked-by-live-pid-N` guard is
+   inert here regardless of which form `create` was called with. The lock is provenance only (which
    session/pid created the worktree, for a human reading `git worktree list`), not a live guard.
-   What actually protects the worktree mid-review is `reap`'s `$CLAUDE_SCRATCHPAD` path exclusion
-   (`kept ... current-session`) plus the 24h age floor (`kept ... age-Nh`) - both checked before
-   the lock, in `pr-review-wt.sh`'s `consider()`.
+   What actually protects the worktree mid-review, in `pr-review-wt.sh`'s `consider()`: first the
+   `$CLAUDE_SCRATCHPAD` path exclusion (`pr-review-wt.sh:37-38` - `kept ... current-session`), then
+   the live-lock check itself (which only ever keeps, given the pid is dead by the next call); only
+   after that, and after the dirty-worktree guard, does the 24h age floor run
+   (`pr-review-wt.sh:53-54` - `kept ... age-Nh`) - a fallback for when `$CLAUDE_SCRATCHPAD` isn't
+   set for the `reap` call, not something checked ahead of the lock.
 
 ## S1. Generate
 
@@ -159,7 +164,9 @@ reasoning stays intact.
          "verdict": "CONFIRMED|REFUTED",
          "verdict_reason": "the S5 refuter's reasoning either way",
          "origin": "code-review|seed:<path>",
-         "dedupe": null                        // or {"prior_url": "...", "note": "..."} from S3
+         "dedupe": null,                       // or {"prior_url": "...", "note": "..."} from S3
+         "anchor_status": null,                 // ok|moved|dead - written by `reanchor` in /pr-review-post, not here
+         "anchor_note": null                    // reanchor's reason string - written alongside anchor_status
        }
      ],
      "clusters": [

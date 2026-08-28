@@ -101,8 +101,11 @@ cmd_create() {
   git worktree add -q --detach "$path" "$committish"
   # $PPID, not $$: this subcommand's own process exits the instant create()
   # returns, so a pid recorded from $$ is already dead by the time any later
-  # reap checks it. $PPID is the invoking shell's pid, which persists for as
-  # long as the caller (and its use of the worktree) does.
+  # reap checks it. $PPID is the invoking shell's pid - still not a live
+  # guard in practice (that shell is itself short-lived across separate tool
+  # invocations), so treat this lock as provenance only. What actually
+  # protects a live worktree is reap's $CLAUDE_SCRATCHPAD path exclusion,
+  # plus the 24h age floor as a fallback - see consider() above.
   git worktree lock --reason "pr-review session ${CLAUDE_SESSION_ID:-local} (pid $PPID)" "$path"
   (cd "$path" && pwd)
 }
