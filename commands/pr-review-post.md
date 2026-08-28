@@ -13,47 +13,70 @@ Post the selected findings: $ARGUMENTS
 3. `python3 ~/.claude/pr-review/pr-review-anchor.py validate <ledger>` - stop on any `error: ...`
    line (exit 1). Do not proceed on a failing validate; if the ledger is malformed, that is a bug
    in how `/pr-review` wrote it, not something to work around here.
-4. If the ledger has no `pr` field (a `.` local-diff review), stop: say posting is unavailable for
-   a local-diff review and print the selected findings for manual use instead.
-5. Read `WT` from the ledger's `worktree` field, not a shell variable - `/pr-review` and
-   `/pr-review-post` are separate invocations, so nothing set in the earlier session's shell
-   survives into this one:
+4. If the ledger's `target.kind` is not `pr` (a `.` local-diff review has `target.kind` `local`),
+   stop: say posting is unavailable for a local-diff review and print the selected findings for
+   manual use instead.
+5. Read `WT`, `NUMBER`, and `REPO` from the ledger - not shell variables - since `/pr-review` and
+   `/pr-review-post` are separate invocations and nothing set in the earlier session's shell
+   survives into this one. Handle a ledger that predates or omits `worktree` rather than letting a
+   raw `KeyError` surface:
 
    ```bash
-   WT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['worktree'])" <ledger>)
+   WT=$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+wt = d.get('worktree')
+if not wt:
+    sys.exit('error: ledger has no worktree field - re-run /pr-review')
+print(wt)
+" <ledger>)
+   NUMBER=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['target']['number'])" <ledger>)
+   REPO=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['target']['repo'])" <ledger>)
    ```
 
-   Likewise read `<n>`, `<owner>`, `<repo>` from the ledger's `pr` object for every `gh` command
-   below.
-6. Resolve the selection. **Refuse any REFUTED id** unless the user explicitly overrode it. Note:
-   there is no selection-time override - `payload` (step 3) unconditionally drops any item whose
-   `verdict` is `REFUTED`, regardless of `--select`. To actually post an overruled item, edit that
-   item's `verdict` in the ledger away from `REFUTED` (keep `verdict_reason` as the record of the
-   original call) before running `payload`.
+   If the `WT` command prints an `error: ...` line instead of a path, stop - there is no worktree
+   to re-anchor or post against.
+
+   Every `gh` command below must not depend on this invocation's cwd matching the target repo -
+   prefix each with `GH_REPO="$REPO"` so `gh`'s own `{owner}/{repo}` placeholder resolves
+   correctly regardless of where the command happens to run.
+6. Resolve the selection. **Refuse any REFUTED id** unless the user explicitly overrides it. To
+   post an overruled item, use `payload`'s `--include-refuted <ids>` (see step 3) - a per-id, not
+   blanket, override: the id must ALSO be in `--select`, and `--include-refuted` errors (exit 1)
+   on an id that's unknown in the ledger or that isn't actually `REFUTED`. This preserves the
+   ledger's `verdict`/`verdict_reason` as recorded; do not hand-edit `verdict` to work around this
+   - that destroys the refuter's recorded reasoning.
 
 ## 2. Re-anchor against the current head
 
-The PR head moves during review. A review POST fails **wholesale** if any one anchor is not on a
-changed line, so re-anchor before building anything.
+The PR head can move during review, and a review POST fails **wholesale** if any one anchor is not
+on a changed line. Re-anchor **unconditionally, every time** - not only when the head has moved -
+so `anchor_status` is set on every item before `payload` runs. Skipping this on the unchanged-head
+path is exactly the gap that lets a body-only or already-dead item stay selectable into step 3.
 
 ```bash
-NOW=$(gh pr view <n> --json headRefOid --jq .headRefOid)
-```
-
-If `NOW` differs from the ledger's `head_sha`, say so, then:
-
-```bash
-git fetch origin pull/<n>/head
+NOW=$(GH_REPO="$REPO" gh pr view "$NUMBER" --json headRefOid --jq .headRefOid)
+if [ "$NOW" != "<ledger head_sha>" ]; then
+  echo "head moved: <ledger head_sha> -> $NOW"
+fi
+git -C "$WT" fetch origin "pull/$NUMBER/head"
 git -C "$WT" checkout --detach FETCH_HEAD
-gh pr diff <n> > "$CLAUDE_SCRATCHPAD/pr-review/pr<n>/head.diff"
+GH_REPO="$REPO" gh pr diff "$NUMBER" > "$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/head.diff"
 python3 ~/.claude/pr-review/pr-review-anchor.py reanchor <ledger> \
-  --worktree "$WT" --diff "$CLAUDE_SCRATCHPAD/pr-review/pr<n>/head.diff"
+  --worktree "$WT" --diff "$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/head.diff"
 ```
 
-`reanchor` rewrites the ledger in place (updating `line`, `anchor_status`, `anchor_note` per item)
-and always exits 0 - a `dead` count is reported, not fatal, so check the printed summary rather
-than the exit code. Report the `ok` / `moved` / `dead` counts. For each dead anchor, ask whether to
-demote it to the review body or drop it. Do not proceed with a dead anchor in the selection.
+Fetch and check out **inside the worktree** (`git -C "$WT" fetch ...` / `git -C "$WT" checkout
+...`), never in whatever directory this command happens to run from. `FETCH_HEAD` is per-checkout:
+a fetch run in a different checkout leaves the worktree's own `FETCH_HEAD` untouched, and
+`git -C "$WT" checkout --detach FETCH_HEAD` then fails outright (confirmed: it errors immediately
+when the fetch and the checkout target different checkouts).
+
+`reanchor` exits 1 only if the ledger or diff file fails to load (e.g. `error: diff file not
+found`) - check that and stop before trusting anything downstream. Once both files load it always
+exits 0 regardless of per-item results, so from there judge outcomes by the printed `ok`/`moved`/
+`dead` summary, not the exit code. Report the counts. For each dead anchor, ask whether to demote
+it to the review body or drop it. Do not proceed with a dead anchor in the selection.
 
 Also scan the per-item output (or each item's `anchor_note`) for `ambiguous:` - it means the anchor
 excerpt matched more than one location and the nearest-to-old-line match was chosen automatically.
@@ -68,28 +91,43 @@ Anchoring is **per distinct code site**, not per cluster and not per item. A clu
 landing on one of the two sites that needed it. The payload builder already merges items that
 share a `(file, line)` and cross-references cluster siblings at other sites.
 
-Write the review body to `$CLAUDE_SCRATCHPAD/pr-review/pr<n>/body.md`. The body is **bare framing
-plus the authorized items only**. No side observations, no verification summary, no findings the
-user did not select - those go back to chat, never to the PR. **Do not append the attribution
-string yourself** - `payload` adds `_(AI-assisted, with my guidance)_` to the body exactly once
-and only there, never to an inline thread; the body file you write should not contain it at all.
+Write the review body to `$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/body.md`. The body is **bare
+framing plus the authorized items only**. No side observations, no verification summary, no
+findings the user did not select - those go back to chat, never to the PR. **Do not append the
+attribution string yourself** - `payload` adds `_(AI-assisted, with my guidance)_` to the body
+exactly once and only there, never to an inline thread; the body file you write should not contain
+it at all.
 
 ```bash
 python3 ~/.claude/pr-review/pr-review-anchor.py payload <ledger> \
-  --select <tokens> --body-file "$CLAUDE_SCRATCHPAD/pr-review/pr<n>/body.md" \
-  > "$CLAUDE_SCRATCHPAD/pr-review/pr<n>/payload.json" \
-  2> "$CLAUDE_SCRATCHPAD/pr-review/pr<n>/payload.stderr"
+  --select <tokens> \
+  --include-refuted <overruled-ids> \
+  --body-file "$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/body.md" \
+  > "$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/payload.json" \
+  2> "$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/payload.stderr"
+STATUS=$?
 ```
 
-Check the exit code first. `payload` exits 1 (and writes nothing usable to stdout) on: an
-unrecognized selection token, an id - or a cluster-referenced id - not present in the ledger, or a
-selected item whose `file`/`line` is missing or null. Treat any of these as fatal: report the
-`error: ...` line and stop rather than posting a partial or empty review.
+Omit `--include-refuted` entirely when nothing is being overruled. Always read
+`payload.stderr` next - both the fatal-error path and the warning path write there, never to
+stdout:
 
-On success, **read `payload.stderr` and relay every line to the user before presenting the plan**.
-`payload` warns there (never on stdout) naming each id it silently excluded from the JSON for being
-REFUTED or dead-anchored. The user must see exactly what was dropped, or they will believe they
-posted findings that never made it into the payload.
+```bash
+cat "$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/payload.stderr"
+```
+
+If `$STATUS` is nonzero, that file holds the fatal `error: ...` line. `payload` exits 1 on: an
+unrecognized selection token, a selected id (or cluster-referenced id) absent from the ledger, an
+`--include-refuted` id that's unknown or that isn't actually `REFUTED`, or a selected item whose
+`file`/`line` is missing or null. Treat any of these as fatal: report the error and stop rather
+than posting a partial or empty review.
+
+If `$STATUS` is 0, that same file may still hold `warning: ...` lines - naming ids silently
+excluded from the JSON (`REFUTED` without a matching `--include-refuted`, or dead-anchored), or ids
+re-admitted **because** of `--include-refuted`. **Relay every line to the user before presenting
+the plan.** They must see exactly what was dropped or overridden, or they will believe they posted
+findings that never made it into the payload, or that a refuted finding they never asked to
+override went out anyway.
 
 Present the plan and **stop for approval**: the body verbatim, any relayed warnings, and per thread
 the `file:line`, the item ids it carries, and its exact text.
@@ -101,8 +139,8 @@ Honor any constraints in $ARGUMENTS - for example "do not say whether anything i
 Only after approval. One atomic review:
 
 ```bash
-cat "$CLAUDE_SCRATCHPAD/pr-review/pr<n>/payload.json" \
-  | gh api "repos/<owner>/<repo>/pulls/<n>/reviews" --input -
+cat "$CLAUDE_SCRATCHPAD/pr-review/pr$NUMBER/payload.json" \
+  | GH_REPO="$REPO" gh api "repos/{owner}/{repo}/pulls/$NUMBER/reviews" --input -
 ```
 
 Pipe via **stdin**. `gh` cannot read scratchpad paths from this sandbox.
