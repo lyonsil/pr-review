@@ -117,11 +117,34 @@ mkdir -p "$SCRATCH"
 git worktree list --porcelain > "$SCRATCH/worktrees.before"
 ```
 
-Invoke the `code-review` skill at level `max` against the worktree. Tell it explicitly:
+**Two different skills are named `code-review`. Invoke the BUILT-IN one, never the plugin.**
+
+- Built-in, the one to use: skill name exactly `code-review`. It takes a level
+  (`low`/`medium`/`high`/`max`/`ultra`) and honours issue-cap instructions.
+- Plugin, never use: skill name `code-review:code-review`. It has no level concept, always spawns
+  exactly 5 Sonnet agents, ignores cap instructions, and **posts a comment to the PR on its own** -
+  which would bypass this pipeline's triage gate and publish unreviewed findings under the user's
+  account. Its description ("Code review a pull request") reads like a better match for this task
+  than the built-in's. It is not. Do not select it.
+
+Invoke it with the level as the FIRST token of the arguments. The built-in reuses the last level
+the user typed when none is given, so an unspecified level silently downgrades the review:
+
+```
+Skill(skill="code-review", args="max <PR-url-or-target> - <the instructions below>")
+```
+
+Tell it explicitly:
 
 - Analyze the changes in the existing worktree at `$WT`. **Do not create a worktree of your own.**
 - Raise the per-subagent issue cap to 16 (from 8) and the final-report cap to 30 (from 15).
 - Present the final report as a numbered list.
+
+**Verify the right one ran before continuing.** A `max` review spawns well more than 5 subagents and
+posts nothing. If you see exactly 5 parallel Sonnet reviewers, or anything gets posted to the PR at
+this stage, the plugin ran: STOP, tell the user, and say whether a comment was posted so they can
+delete it. Do not proceed to S2 on a plugin-produced report - it is capped and filtered differently
+and its findings will not carry the fields the ledger needs.
 
 Then snapshot again and report any delta to the user:
 
