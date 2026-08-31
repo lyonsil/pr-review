@@ -53,6 +53,45 @@ is still being iterated on and the reasoning is not recoverable from the diffs.
 - **Re-anchoring runs unconditionally**, not only when the head moved - otherwise `anchor_status`
   is never set on the unchanged-head path and the dead-anchor filter cannot fire.
 
+## Calibrating the pressure-test
+
+Measured over the first three real runs (PRs #2724/#2729/#2730, 141 items): a 73% refutation rate,
+84% on one run. Most refutations were well-argued - the confirmed set drove six real fix commits on
+#2724 - but the pipeline's own shape pushed the rate up and made it hard to read. One refutation
+was demonstrably wrong (#2724 item 14, refuted as "pre-existing" on a line the PR had added; the
+author removed exactly that line three days later). Rulings taken in response:
+
+- **Four verdicts, not two.** About a third of refutations conceded the observation and refuted on
+  reachability, scope, or overstated severity ("the mechanics are right, but ..."). A binary
+  verdict forced those into REFUTED, which `payload` drops. `DOWNGRADED` now carries them into the
+  review body, and `INCONCLUSIVE` holds genuine uncertainty instead of resolving it as a refutation.
+  *If wrong:* the body grows a section nobody reads, and the vocabulary collapses back to two.
+- **The refuter no longer defaults to REFUTED when it cannot verify.** The old instruction paired
+  with "you cannot run tests/typecheck/lint" in one run's prompts, which is incoherent: it removed
+  the means of verification while keeping the rule that failing to verify means refute. The refuter
+  is now given a verification ladder and must climb it; `INCONCLUSIVE` is the only landing spot for
+  what it still cannot settle, and it must name what would settle it.
+- **`link-deps` exists so verification is possible at all**, and refuses whenever a tracked lockfile
+  differs between the merge base and the head - a stale `node_modules` makes "I ran it and it
+  passed" worse than no answer. *If wrong:* it declines more often than it needs to, which is the
+  safe direction.
+- **`severity_in` is recorded and never overwritten.** Refuters revise severity in the same
+  response as the verdict, so on PR #2730 all four `high` findings were refuted AND rewritten to
+  `low`. The triage table then read as though only low-severity noise had been filtered. The pair
+  is now shown as `high -> low` wherever it differs.
+- **Two refute triggers were removed as dispositional rather than truth-based:** "not on a line
+  this PR changed" (already its own field, already enforced by `payload` - it was being counted
+  three times) and "a linter or CI would catch it" (which speaks to who reports a problem, not
+  whether it exists).
+- **`validate` rejects any non-terminal verdict.** One item in three runs was left `PENDING`
+  because a refuter returned a well-formed verdict behind a prose preamble and the orchestrator
+  never recorded it. `payload`'s exclusion is REFUTED-only, so that item would have posted as
+  confirmed had it been selected. The gap was in `validate`, which never inspected `verdict` at all.
+- **Refuters default to the generator's model tier.** A weaker refuter's characteristic failure -
+  cannot trace a path, reads that as absence of a path - is precisely the bias being corrected. A
+  cheaper model stays allowed for single-file, single-site items, but may not return REFUTED on a
+  reachability argument, since that requires a whole-repo search.
+
 ## Process
 
 - Every guard is mutation-proven: a test that still passes with its guard removed is treated as a

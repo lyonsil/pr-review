@@ -4,6 +4,25 @@ for the PR review pipeline. Standard library only."""
 import argparse, json, os, re, sys
 
 SEVERITIES = ("blocker", "high", "medium", "low")
+
+# The S5 refuter's four terminal verdicts. Every item must carry one: a
+# placeholder like "PENDING" means a refuter's answer was never recorded, and
+# the payload builder's exclusion is REFUTED-only, so an unrecorded verdict
+# would post as though it had been confirmed. validate() rejects anything
+# outside this tuple for exactly that reason.
+VERDICTS = ("CONFIRMED", "DOWNGRADED", "REFUTED", "INCONCLUSIVE")
+
+# Verdicts that never post inline but are still carried into the review body.
+# DOWNGRADED is the "true, but smaller than first stated" verdict that keeps a
+# real observation out of the drop bucket; INCONCLUSIVE survives escalation
+# without a resolution and is surfaced rather than silently lost.
+BODY_ONLY_VERDICTS = {
+    "DOWNGRADED": ("Secondary findings",
+                   "real, but lower impact than the first pass claimed"),
+    "INCONCLUSIVE": ("Unresolved findings",
+                     "could not be verified either way - judge these by hand"),
+}
+
 ATTRIBUTION = "_(AI-assisted, with my guidance)_"
 
 
@@ -33,6 +52,18 @@ def validate(ledger):
                         "(letter suffixes like '2a' are forbidden)")
         if it.get("severity") not in SEVERITIES:
             errs.append(f"item {iid!r} severity {it.get('severity')!r} not one of {SEVERITIES}")
+        # severity_in is what the generator assigned, before the refuter's
+        # revision. Without it a refuter that downgrades and refutes in one
+        # step leaves a triage table where every dropped finding reads as
+        # low-severity noise, hiding that high-severity findings were dropped.
+        if it.get("severity_in") not in SEVERITIES:
+            errs.append(f"item {iid!r} severity_in {it.get('severity_in')!r} not one of "
+                        f"{SEVERITIES} (record the severity the generator assigned)")
+        if it.get("verdict") not in VERDICTS:
+            errs.append(f"item {iid!r} verdict {it.get('verdict')!r} not one of {VERDICTS} "
+                        "(every item must carry a terminal verdict before the ledger is ready)")
+        if not str(it.get("verdict_reason") or "").strip():
+            errs.append(f"item {iid!r} is missing required field 'verdict_reason'")
         for field in ("file", "claim", "anchor_excerpt"):
             if not it.get(field):
                 errs.append(f"item {iid!r} is missing required field '{field}'")
@@ -295,7 +326,7 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
     admitted = resolve_include_refuted(ledger, include_refuted)
     by_id = {it.get("id"): it for it in ledger.get("items", [])}
 
-    items, demoted, dropped, readmitted = [], [], [], []
+    items, demoted, dropped, readmitted, secondary = [], [], [], [], []
     for iid in selected:
         it = by_id.get(iid)
         if it is None:
@@ -308,6 +339,15 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
             continue
         if it.get("verdict") == "REFUTED":
             readmitted.append(iid)
+
+        # DOWNGRADED and INCONCLUSIVE are true-or-unresolved, not false: they
+        # are below the bar for an inline comment but must not vanish, so they
+        # go to their own body sections regardless of how well they anchor.
+        # Checked ahead of the anchoring branches, which only decide inline
+        # vs body for findings that were going to post inline.
+        elif it.get("verdict") in BODY_ONLY_VERDICTS:
+            secondary.append((it, it["verdict"]))
+            continue
 
         if it.get("anchor_status") == "dead":
             demoted.append((it, "dead anchor", it.get("anchor_note")
@@ -333,6 +373,14 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
                             for it, reason, _ in sorted(demoted, key=lambda d: d[0]["id"]))
         print(f"warning: {len(demoted)} selected item(s) moved into the review body "
               f"(cannot be anchored to a changed line) - {detail}", file=sys.stderr)
+    if secondary:
+        # Kept, like demoted items - but for a verdict reason, not an anchoring
+        # one. Say so separately so the operator can tell "the refuter judged
+        # this smaller than claimed" from "GitHub would reject this anchor".
+        detail = ", ".join(f"#{it['id']} ({verdict})"
+                            for it, verdict in sorted(secondary, key=lambda d: d[0]["id"]))
+        print(f"notice: {len(secondary)} selected item(s) carried in the review body rather "
+              f"than posted inline - {detail}", file=sys.stderr)
     if dropped:
         # Selected-but-excluded items are dropped from the payload on purpose
         # (a refuted finding must never be posted by default), but the
@@ -358,7 +406,7 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
         print(f"warning: {len(readmitted)} item(s) re-admitted by --include-refuted "
               f"despite being REFUTED - {detail}", file=sys.stderr)
 
-    if not items and not demoted:
+    if not items and not demoted and not secondary:
         # A payload with nothing substantive - no inline comments and no
         # demoted findings - would POST bare framing plus the attribution
         # footer and nothing else. Fail here rather than exit 0, and name
@@ -434,6 +482,32 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
             lines.append(""); lines.append(f"_Not anchored: {note}_"); lines.append("")
         demoted_section = "\n".join(lines).rstrip()
         body = (body + "\n\n" + demoted_section).strip() if body else demoted_section
+
+    # One section per body-only verdict, in the order BODY_ONLY_VERDICTS
+    # declares them, so a run's body reads the same way every time.
+    for verdict, (heading, gloss) in BODY_ONLY_VERDICTS.items():
+        group = [it for it, v in secondary if v == verdict]
+        if not group:
+            continue
+        lines = [f"## {heading} ({gloss})", ""]
+        for it in sorted(group, key=lambda x: x["id"]):
+            loc = f"{it.get('file')}:{it['line']}" if it.get("line") is not None else it.get("file", "?")
+            sev = it.get("severity")
+            sev_in = it.get("severity_in")
+            # Show the generator's severity alongside the refuter's whenever
+            # they differ: a finding that arrived as `high` and is being
+            # carried as `low` is exactly the case a reader must not miss.
+            sev_text = f"{sev_in} -> {sev}" if sev_in and sev_in != sev else str(sev)
+            lines.append(f"**#{it['id']}** ({sev_text}) {loc} - {it['claim']}")
+            detail = (it.get("detail") or "").strip()
+            if detail:
+                lines.append(""); lines.append(detail)
+            reason = (it.get("verdict_reason") or "").strip()
+            if reason:
+                lines.append(""); lines.append(f"_{verdict.capitalize()}: {reason}_")
+            lines.append("")
+        section = "\n".join(lines).rstrip()
+        body = (body + "\n\n" + section).strip() if body else section
 
     body = (body + "\n\n" + ATTRIBUTION).strip()
 

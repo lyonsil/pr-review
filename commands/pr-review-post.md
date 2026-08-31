@@ -80,6 +80,11 @@ print(r)
    ledger's `verdict`/`verdict_reason` as recorded; do not hand-edit `verdict` to work around this
    - that destroys the refuter's recorded reasoning.
 
+   `DOWNGRADED` and `INCONCLUSIVE` need no override and must not be given one: `payload` carries
+   them into the review body under their own headings, with the refuter's reason and, where the
+   severity was revised, `<severity_in> -> <severity>`. They are real-or-unresolved findings held
+   below the inline bar, not dropped ones - `--include-refuted` rejects them by design.
+
 ## 2. Re-anchor against the current head
 
 The PR head can move during review, and a review POST fails **wholesale** if any one anchor is not
@@ -117,7 +122,9 @@ anchor would fail the entire review POST. `payload` therefore moves every dead o
 into the review body automatically, under its own heading, and keeps it out of `comments[]`.
 Report which ids were demoted and why, then carry on. Refuted items are the opposite case and are
 never demoted: they were judged not real, so they appear nowhere unless re-admitted per-id with
-`--include-refuted`.
+`--include-refuted`. `DOWNGRADED` and `INCONCLUSIVE` items reach the body by verdict rather than by
+anchoring, under their own headings, and `payload` reports them on stderr as a `notice:` line
+rather than a `warning:` - they were never candidates for an inline comment.
 
 Also scan the per-item output (or each item's `anchor_note`) for `ambiguous:` - it means the anchor
 excerpt matched more than one location and the nearest-to-old-line match was chosen automatically.
@@ -169,7 +176,9 @@ If `$STATUS` is 0, that same file may still hold `warning: ...` lines - naming i
 the JSON (`REFUTED` without a matching `--include-refuted`, a dead anchor, or `on_changed_line:
 false`, which `payload` excludes unconditionally because GitHub rejects the whole review over one
 off-diff anchor), ids named by `--include-refuted` that were **not** in `--select` and so
-re-admitted nothing, or ids re-admitted **because** of `--include-refuted`. **Relay every line to
+re-admitted nothing, or ids re-admitted **because** of `--include-refuted`. A `notice:` line lists
+the items carried in the body by verdict (`DOWNGRADED`/`INCONCLUSIVE`) - relay it too, so the user
+knows those went out in the review body rather than as inline comments. **Relay every line to
 the user before presenting the plan.** They must see exactly what was dropped or overridden, or they will believe they posted
 findings that never made it into the payload, or that a refuted finding they never asked to
 override went out anyway.

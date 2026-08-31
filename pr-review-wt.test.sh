@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test harness for pr-review-wt.sh. Creates throwaway git repos under $TMPDIR.
-# Expected: passed=54 failed=0
+# Expected: passed=60 failed=0
 set -uo pipefail
 # Resolve to an absolute path before any test cd's into a throwaway repo dir.
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/pr-review-wt.sh"
@@ -204,5 +204,45 @@ check "prints the usage line"       "$(printf '%s' "$ERR" | grep -c '^usage: ')"
 check "reaped nothing"              "$(git worktree list | grep -c review-666)" "1"
 ERR=$("$SCRIPT" reap -v extra 2>&1 >/dev/null); RC=$?
 check "extra argument exits nonzero" "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
+
+
+echo "== link-deps: links when no lockfile changed =="
+setup_repo
+mkdir -p node_modules && echo x > node_modules/marker
+echo '{}' > package-lock.json; git add package-lock.json; git commit -qm lock
+BASE=$(git rev-parse HEAD)
+echo more >> f.txt; git add f.txt; git commit -qm work
+HEAD_SHA=$(git rev-parse HEAD)
+WT=$(mktemp -d)/wt
+"$SCRIPT" create "$WT" "$HEAD_SHA" >/dev/null
+OUT=$("$SCRIPT" link-deps "$WT" "$BASE" 2>&1)
+check "reports linked"         "$(echo "$OUT" | grep -c '^linked ')" "1"
+check "marker is reachable"    "$([ -f "$WT/node_modules/marker" ] && echo yes || echo no)" "yes"
+
+echo "== link-deps: declines when a lockfile changed =="
+setup_repo
+mkdir -p node_modules && echo x > node_modules/marker
+echo '{}' > package-lock.json; git add package-lock.json; git commit -qm lock
+BASE=$(git rev-parse HEAD)
+echo '{"changed":1}' > package-lock.json; git add package-lock.json; git commit -qm bump
+HEAD_SHA=$(git rev-parse HEAD)
+WT=$(mktemp -d)/wt
+"$SCRIPT" create "$WT" "$HEAD_SHA" >/dev/null
+OUT=$("$SCRIPT" link-deps "$WT" "$BASE" 2>&1)
+check "reports declined"       "$(echo "$OUT" | grep -c '^declined lockfile-changed')" "1"
+check "nothing was linked"     "$([ -e "$WT/node_modules" ] && echo yes || echo no)" "no"
+
+echo "== link-deps: declines when the primary checkout has no node_modules =="
+setup_repo
+BASE=$(git rev-parse HEAD)
+WT=$(mktemp -d)/wt
+"$SCRIPT" create "$WT" "$BASE" >/dev/null
+OUT=$("$SCRIPT" link-deps "$WT" "$BASE" 2>&1)
+check "reports declined"       "$(echo "$OUT" | grep -c '^declined no-node_modules')" "1"
+
+echo "== link-deps: refuses without both arguments =="
+setup_repo
+"$SCRIPT" link-deps >/dev/null 2>&1; RC=$?
+check "usage exit code"        "$RC" "2"
 
 echo; echo "passed=$PASS failed=$FAIL"; [ "$FAIL" -eq 0 ]

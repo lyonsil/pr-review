@@ -6,9 +6,9 @@ anchor = importlib.util.module_from_spec(spec); spec.loader.exec_module(anchor)
 
 
 def item(i, sev="high", f="a.ts", line=10, cluster=None, **kw):
-    d = {"id": i, "severity": sev, "file": f, "line": line, "line_end": line,
-         "anchor_excerpt": "x", "claim": "c", "detail": "d", "cluster": cluster,
-         "verdict": "CONFIRMED"}
+    d = {"id": i, "severity": sev, "severity_in": sev, "file": f, "line": line,
+         "line_end": line, "anchor_excerpt": "x", "claim": "c", "detail": "d",
+         "cluster": cluster, "verdict": "CONFIRMED", "verdict_reason": "r"}
     d.update(kw); return d
 
 
@@ -1053,3 +1053,106 @@ class TestPreviewCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTerminalVerdictRequired(unittest.TestCase):
+    """An item whose refuter answer was never recorded must not reach posting.
+    The payload's exclusion is REFUTED-only, so a placeholder verdict posts as
+    though the finding had been confirmed."""
+
+    def test_placeholder_verdict_is_rejected(self):
+        led = {"items": [item(1, verdict="PENDING")], "clusters": []}
+        self.assertTrue(any("not one of" in e and "verdict" in e
+                            for e in anchor.validate(led)), anchor.validate(led))
+
+    def test_missing_verdict_is_rejected(self):
+        led = {"items": [item(1)], "clusters": []}
+        del led["items"][0]["verdict"]
+        self.assertTrue(any("verdict" in e for e in anchor.validate(led)))
+
+    def test_each_terminal_verdict_is_accepted(self):
+        for v in anchor.VERDICTS:
+            led = {"items": [item(1, verdict=v)], "clusters": []}
+            self.assertEqual(anchor.validate(led), [], f"{v} should be legal")
+
+    def test_blank_verdict_reason_is_rejected(self):
+        led = {"items": [item(1, verdict_reason="   ")], "clusters": []}
+        self.assertTrue(any("verdict_reason" in e for e in anchor.validate(led)))
+
+    def test_missing_severity_in_is_rejected(self):
+        led = {"items": [item(1)], "clusters": []}
+        del led["items"][0]["severity_in"]
+        self.assertTrue(any("severity_in" in e for e in anchor.validate(led)))
+
+    def test_unknown_severity_in_is_rejected(self):
+        led = {"items": [item(1, severity_in="critical")], "clusters": []}
+        self.assertTrue(any("severity_in" in e for e in anchor.validate(led)))
+
+
+class TestBodyOnlyVerdicts(unittest.TestCase):
+    """DOWNGRADED and INCONCLUSIVE are true-or-unresolved, not false: they are
+    carried in the review body rather than dropped like REFUTED."""
+
+    def _led(self, verdict):
+        return {"items": [
+            item(1, sev="blocker", f="a.ts", line=10, claim="real one"),
+            item(2, sev="low", f="b.ts", line=20, claim="smaller one",
+                 verdict=verdict, verdict_reason="unreachable in production"),
+        ], "clusters": []}
+
+    def test_downgraded_is_in_the_body_and_not_a_comment(self):
+        p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro")
+        self.assertIn("smaller one", p["body"])
+        self.assertNotIn("smaller one", " ".join(c["body"] for c in p["comments"]))
+
+    def test_inconclusive_is_in_the_body_and_not_a_comment(self):
+        p = anchor.build_payload(self._led("INCONCLUSIVE"), ["all"], "intro")
+        self.assertIn("smaller one", p["body"])
+        self.assertNotIn("smaller one", " ".join(c["body"] for c in p["comments"]))
+
+    def test_refuted_by_contrast_is_dropped_from_body_and_comments(self):
+        p = anchor.build_payload(self._led("REFUTED"), ["all"], "intro")
+        self.assertNotIn("smaller one", p["body"])
+        self.assertNotIn("smaller one", " ".join(c["body"] for c in p["comments"]))
+
+    def test_downgraded_carries_the_refuters_reason_into_the_body(self):
+        p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro")
+        self.assertIn("unreachable in production", p["body"])
+
+    def test_body_shows_the_generators_severity_when_the_refuter_changed_it(self):
+        led = self._led("DOWNGRADED")
+        led["items"][1]["severity_in"] = "high"
+        p = anchor.build_payload(led, ["all"], "intro")
+        self.assertIn("high -> low", p["body"])
+
+    def test_body_shows_one_severity_when_the_refuter_left_it_alone(self):
+        p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro")
+        self.assertNotIn("low -> low", p["body"])
+
+    def test_a_downgraded_only_selection_is_not_an_empty_payload_error(self):
+        led = self._led("DOWNGRADED")
+        p = anchor.build_payload(led, ["2"], "intro")
+        self.assertEqual(p["comments"], [])
+        self.assertIn("smaller one", p["body"])
+
+    def test_verdict_routing_beats_anchoring_for_an_off_diff_downgrade(self):
+        """An off-diff DOWNGRADED item belongs under its verdict heading, not
+        under the unanchored heading - the reason it is not inline is the
+        verdict, and mislabelling it hides that."""
+        led = self._led("DOWNGRADED")
+        led["items"][1]["on_changed_line"] = False
+        p = anchor.build_payload(led, ["all"], "intro")
+        heading = anchor.BODY_ONLY_VERDICTS["DOWNGRADED"][0]
+        before, _, after = p["body"].partition(f"## {heading}")
+        self.assertIn("smaller one", after)
+        self.assertNotIn("smaller one", before)
+
+    def test_include_refuted_does_not_accept_a_downgraded_id(self):
+        led = self._led("DOWNGRADED")
+        with self.assertRaises(anchor.IncludeRefutedError):
+            anchor.resolve_include_refuted(led, ["2"])
+
+    def test_attribution_stays_last_after_a_body_only_section(self):
+        p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro")
+        self.assertTrue(p["body"].rstrip().endswith(anchor.ATTRIBUTION))
+        self.assertEqual(p["body"].count(anchor.ATTRIBUTION), 1)

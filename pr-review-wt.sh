@@ -170,6 +170,53 @@ cmd_remove() {
   return 0
 }
 
+# Make the primary checkout's installed dependencies visible inside a review
+# worktree, so a refuter can actually run typecheck/lint/tests instead of
+# reasoning from source and calling the result unverifiable.
+#
+# Only safe when the PR does not itself change what is installed, so this
+# refuses whenever any tracked lockfile differs between the merge base and the
+# worktree's head - a stale node_modules would make a refuter's "I ran it and
+# it passed" worse than no answer at all. Prints exactly one machine-readable
+# line: `linked <path>` or `declined <reason>`.
+cmd_link_deps() {
+  local wt="${1:-}" base="${2:-}"
+  if [ -z "$wt" ] || [ -z "$base" ]; then
+    echo "usage: pr-review-wt.sh link-deps <worktree-path> <merge-base>" >&2; return 2
+  fi
+  if [ ! -d "$wt" ]; then echo "error: no such worktree: $wt" >&2; return 1; fi
+
+  local common
+  common=$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null) || {
+    echo "error: not a git worktree: $wt" >&2; return 1; }
+  case "$common" in /*) ;; *) common="$wt/$common" ;; esac
+  local main_repo
+  main_repo=$(cd "$common/.." 2>/dev/null && pwd) || {
+    echo "error: cannot locate the primary checkout for $wt" >&2; return 1; }
+
+  if [ -e "$wt/node_modules" ]; then echo "declined already-present"; return 0; fi
+  if [ ! -d "$main_repo/node_modules" ]; then
+    echo "declined no-node_modules-in-$main_repo"; return 0
+  fi
+
+  # Every tracked lockfile, not just the root one: a monorepo can carry more
+  # than one (this repo has release/app's alongside the root's), and a change
+  # to any of them makes the primary checkout's tree the wrong tree.
+  local locks
+  locks=$(git -C "$wt" ls-files -- '*package-lock.json' 'package-lock.json' 2>/dev/null | sort -u)
+  if [ -n "$locks" ]; then
+    local changed
+    changed=$(git -C "$wt" diff --name-only "$base" HEAD -- $locks 2>/dev/null)
+    if [ -n "$changed" ]; then
+      echo "declined lockfile-changed:$(echo "$changed" | tr '\n' ',' | sed 's/,$//')"; return 0
+    fi
+  fi
+
+  ln -s "$main_repo/node_modules" "$wt/node_modules" || {
+    echo "error: could not link node_modules into $wt" >&2; return 1; }
+  echo "linked $wt/node_modules"
+}
+
 cmd_scratchpad() {
   local sp
   if sp=$(scratchpad_path); then printf '%s\n' "$sp"; return 0; fi
@@ -182,5 +229,6 @@ case "${1:-}" in
   create)     shift; cmd_create "$@" ;;
   remove)     shift; cmd_remove "$@" ;;
   scratchpad) shift; cmd_scratchpad "$@" ;;
-  *) echo "usage: pr-review-wt.sh {reap [-v]|create <path> <committish>|remove <path>|scratchpad}" >&2; exit 2 ;;
+  link-deps)  shift; cmd_link_deps "$@" ;;
+  *) echo "usage: pr-review-wt.sh {reap [-v]|create <path> <committish>|remove <path>|scratchpad|link-deps <path> <merge-base>}" >&2; exit 2 ;;
 esac

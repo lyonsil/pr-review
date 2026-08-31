@@ -86,8 +86,8 @@ triage table.
    so `MERGE_BASE=$(git merge-base HEAD "origin/$BASE_REF")` is enough.
 
    Store `MERGE_BASE` in the ledger as `merge_base` (S6), and pass it to every refuter in S5 -
-   "pre-existing on the merge-base" is one of their standing refute triggers and they need the SHA
-   to check it.
+   establishing what is pre-existing versus introduced is central to their job, and they need the
+   SHA to check it.
 6. Create the worktree and capture the path with a **direct command substitution** - never through
    a pipe, and never wrapped in `bash -c`:
 
@@ -197,24 +197,102 @@ renumbering.
 ## S5. Pressure-test
 
 Dispatch **one independent refuter subagent per item**, in parallel batches. Give each: the item's
-claim, its `file:line`, the worktree path `$WT`, `MERGE_BASE`, and the relevant CLAUDE.md paths.
+claim, its `detail` and `evidence`, its `file:line`, the worktree path `$WT`, `MERGE_BASE`, and the
+relevant CLAUDE.md paths.
 
-Instruct each refuter:
+First make verification actually possible, so a refuter is never reduced to guessing:
 
-> Try to REFUTE this finding. Default to REFUTED when you cannot positively verify it. Cite
-> `file:line` evidence for your verdict either way. Refute if the issue is pre-existing on the
-> merge-base, already handled elsewhere in the diff, intentional per an adjacent comment or ADR,
-> something a linter/compiler/CI would catch, or not on a line this PR changed. You may revise
-> the severity up or down; give your reason. Also report whether the anchor line is on a line
-> this PR changed.
+```bash
+~/.claude/pr-review/pr-review-wt.sh link-deps "$WT" "$MERGE_BASE"
+```
 
-Record `verdict`, `verdict_reason`, and `on_changed_line` per item. Apply any severity revisions,
-then **re-sort and renumber** so the 1..N ordering still holds.
+It prints `linked <path>` or `declined <reason>`, and links the primary checkout's `node_modules`
+only when no tracked lockfile differs between `MERGE_BASE` and the head - a stale dependency tree
+would make "I ran it and it passed" worse than no answer. **Pass the result into every refuter
+prompt**: on `linked`, say that `npm run typecheck`, `npm run lint` and `npm test` are available in
+`$WT`; on `declined`, say so and name the reason. Never tell a refuter it cannot verify anything -
+`git`, `grep` and the full history are always available, and most claims are settled with those.
 
-Note for later: a REFUTED verdict is sticky downstream but not final. `/pr-review-post`'s
-`payload --include-refuted <ids>` lets the user overrule specific REFUTED ids, per id, at post
-time - without touching the ledger's `verdict`/`verdict_reason`, so the refuter's recorded
-reasoning stays intact.
+### The refuter's job
+
+A refuter's task is to reach the truth, not to win. Instruct each one:
+
+> Establish whether this finding is true, and how much it matters. You are the last check before it
+> reaches the PR author, so an unexamined "I could not tell" costs as much as a wrong answer.
+>
+> **Verify before you judge.** Work the ladder as far as the claim needs: read the anchored code
+> and everything it calls; `git diff <MERGE_BASE> HEAD -- <file>` to see what this PR actually
+> changed; `git log -S` / `git show <MERGE_BASE>:<file>` to establish what is pre-existing; grep for
+> every producer and consumer before asserting a value can or cannot occur; and, if dependencies
+> were linked, RUN the check - typecheck, lint, or the single test file that would settle it.
+> Naming a command you did not run is not evidence.
+>
+> Report one of four verdicts:
+>
+> - `CONFIRMED` - the claim is true and matters as stated.
+> - `DOWNGRADED` - the observation is true, but smaller than claimed: unreachable on any current
+>   path, an instance of a pre-existing pattern the PR merely continues, intentional per an
+>   adjacent comment or ADR, or simply less severe than first rated. **This is the right verdict
+>   whenever you find yourself writing "the mechanics are right, but ..." - say what survives, and
+>   downgrade it. Do not refute a finding you have just agreed with.**
+> - `REFUTED` - the claim itself is false. Reserved for a claim you have positively disproved:
+>   the code does not do what the finding says, or the consequence provably cannot follow from it.
+> - `INCONCLUSIVE` - you could not settle it. Say exactly what you could not check and what would
+>   settle it. Use this rather than defaulting to a verdict you cannot support.
+>
+> Give `file:line` evidence for the verdict either way. You may revise the severity; give your
+> reason. Also report whether the anchor sits on a line this PR changed.
+
+Reply format, exactly and with nothing before it:
+
+```
+VERDICT: CONFIRMED|DOWNGRADED|REFUTED|INCONCLUSIVE
+SEVERITY: blocker|high|medium|low
+ON_CHANGED_LINE: true|false
+REASON: <3-6 sentences with file:line evidence>
+```
+
+**Do not refute on grounds that are about posting rather than truth.** Whether the anchor sits on a
+changed line is recorded in `on_changed_line` and enforced by `payload` on its own; it is never a
+reason for a verdict. Neither is "a linter or CI would catch it" - that speaks to who reports the
+problem, not whether it exists.
+
+### Model
+
+Refuters run on the **same tier as the generator by default**. A refuter overturns a finding the
+generator raised, and a weaker model's characteristic failure is exactly the one that matters here:
+unable to trace a path, it reads that as absence of a path.
+
+A cheaper model is allowed only for an item that is **single-file, single-site, and settled by
+reading that file** - a localization string, a TSDoc omission, a comment that misdescribes adjacent
+code, a catalog entry. Such a refuter may not return `REFUTED` on a reachability argument: any
+verdict resting on "nothing anywhere in the repo produces this" requires a whole-repo search, so
+escalate it to the default tier instead. Say in the report which items ran on a cheaper model.
+
+### Recording the result
+
+Record `verdict`, `verdict_reason`, and `on_changed_line` per item. Record the generator's severity
+as `severity_in` and the refuter's as `severity` - **never overwrite `severity_in`**. A refuter that
+downgrades and refutes in one step otherwise leaves a triage table where every dropped finding reads
+as low-severity noise, hiding that a `high` was dropped.
+
+**Every item must end S5 with one of the four verdicts.** A refuter that returns prose without a
+parseable `VERDICT:` line has not answered - re-dispatch it once with the format restated, and if it
+still will not answer, record `INCONCLUSIVE` with that as the reason. Never leave a placeholder:
+`payload`'s exclusion is `REFUTED`-only, so a finding left in any other state posts to the PR as
+though it had been confirmed. `validate` rejects the ledger for this, but do not rely on it to
+catch what this step should not produce.
+
+Any item left `INCONCLUSIVE` after one escalation must be **named to the user in the S6 report**,
+with what could not be checked. Do not close out the round silently holding an unanswered finding.
+
+Then apply any severity revisions and **re-sort and renumber** so the 1..N ordering still holds.
+
+Note for later: `REFUTED` is sticky downstream but not final. `/pr-review-post`'s
+`payload --include-refuted <ids>` lets the user overrule specific REFUTED ids, per id, at post time -
+without touching the ledger's `verdict`/`verdict_reason`, so the refuter's recorded reasoning stays
+intact. `DOWNGRADED` and `INCONCLUSIVE` need no overrule: they are carried into the review body
+automatically.
 
 ## S6. Report
 
@@ -236,7 +314,8 @@ reasoning stays intact.
      "items": [
        {
          "id": 1,                              // global 1..N, integer only, no letter suffixes
-         "severity": "blocker|high|medium|low",
+         "severity": "blocker|high|medium|low",   // AFTER the S5 refuter's revision
+         "severity_in": "blocker|high|medium|low",// what the GENERATOR assigned; never overwritten
          "cluster": "C3",                      // or null - must match a "clusters[].id" below
          "file": "src/foo.ts",
          "line": 142,
@@ -250,8 +329,8 @@ reasoning stays intact.
          "claim": "one sentence",
          "detail": "full text for the author",
          "evidence": ["src/bar.ts:88"],
-         "verdict": "CONFIRMED|REFUTED",
-         "verdict_reason": "the S5 refuter's reasoning either way",
+         "verdict": "CONFIRMED|DOWNGRADED|REFUTED|INCONCLUSIVE",  // no placeholders; see S5
+         "verdict_reason": "the S5 refuter's reasoning, whichever verdict it reached",
          "origin": "code-review|seed:<path>",
          "dedupe": null,                       // or {"prior_url": "...", "note": "..."} from S3
          "anchor_status": null,                 // ok|moved|dead - written by `reanchor` in /pr-review-post, not here
@@ -268,9 +347,11 @@ reasoning stays intact.
    validate:
    `python3 ~/.claude/pr-review/pr-review-anchor.py validate <ledger>`
    Failures print `error: ...` lines to stderr and exit 1 (letter-suffixed ids, non-contiguous or
-   duplicate ids, wrong severity ordering, a cluster/item referencing an unknown id, or a
-   non-dict ledger root are all rejected this way - a wrong cluster key name like `items` instead
-   of `item_ids` is NOT, since it just reads as an empty cluster). Fix the ledger and re-run
+   duplicate ids, wrong severity ordering, a cluster/item referencing an unknown id, a missing or
+   unknown `severity_in`, an empty `verdict_reason`, a `verdict` outside the four terminal values -
+   a leftover `PENDING` included - or a non-dict ledger root are all rejected this way; a wrong
+   cluster key name like `items` instead of `item_ids` is NOT, since it just reads as an empty
+   cluster). Fix the ledger and re-run
    validate; never report a ledger as ready while validate is failing.
 3. Write `report.md` alongside it.
 4. Print, in this order. **This goes to a terminal, not to GitHub. Emit plain text and
@@ -278,11 +359,23 @@ reasoning stays intact.
    the terminal prints those literally as tags instead of rendering them. Use a plain heading and
    an indented or bulleted list wherever you want a section to read as secondary.
 
-   - the triage table: id, severity, cluster, `file:line`, one-line claim
+   - the triage table: id, severity, cluster, `file:line`, one-line claim. Where the refuter
+     changed the severity, show it as `<severity_in> -> <severity>`, never just the survivor - a
+     table that prints only the revised value hides that a `high` was downgraded on its way out.
+   - a `Verdict summary` line: counts of CONFIRMED / DOWNGRADED / REFUTED / INCONCLUSIVE, and the
+     refutation rate as `REFUTED / total`. State it plainly; it is the number that tells you
+     whether the pressure-test is calibrated.
+   - a `Carried in the review body` section: every DOWNGRADED item - id, `<severity_in> -> <severity>`,
+     claim, and the refuter's reason. These post automatically with `all`; they are not dropped and
+     need no `--include-refuted`.
+   - an `Unresolved` section: every INCONCLUSIVE item, with what the refuter could not check and
+     what would settle it. **Never omit this section when it is non-empty**, and say plainly that
+     these need a human judgement.
    - a `Refuted (not posted unless you name them)` section: each id, its claim, and the refuter's
      reason, so they can be overruled
    - a `Previously reported` section: each id with a link to the existing comment
    - the count of items not on a changed line (body-only, cannot be posted inline)
+   - which items, if any, ran their refuter on a cheaper model (S5)
    - a `Files` section giving the absolute paths, so they can be opened directly:
      ```
      Ledger:   <SCRATCH>/pr-review/pr<n>/ledger.json
@@ -292,13 +385,14 @@ reasoning stays intact.
    - a `To post` section giving ready-to-run commands, with the real counts substituted:
 
      ```
-     /pr-review-post all          # the N confirmed findings (refuted and dead anchors excluded)
+     /pr-review-post all          # N confirmed inline + M carried in the body; refuted excluded
      /pr-review-post 1 3 7        # a chosen subset
      /pr-review-post all --include-refuted 4   # also post refuted #4, per id
      ```
 
-     Say explicitly that `all` already means confirmed-only: refuted items and dead anchors are
-     never posted unless named with `--include-refuted`, and dead anchors never at all.
+     Say explicitly what `all` covers: CONFIRMED findings post inline; DOWNGRADED and INCONCLUSIVE
+     findings are carried in the review body automatically; REFUTED items are excluded unless named
+     with `--include-refuted`; dead anchors are demoted to the body and never posted inline.
    - the teardown one-liner, if abandoning the round:
      `~/.claude/pr-review/pr-review-wt.sh remove $WT`
 
