@@ -12,16 +12,46 @@ SEVERITIES = ("blocker", "high", "medium", "low")
 # outside this tuple for exactly that reason.
 VERDICTS = ("CONFIRMED", "DOWNGRADED", "REFUTED", "INCONCLUSIVE")
 
-# Verdicts that never post inline but are still carried into the review body.
-# DOWNGRADED is the "true, but smaller than first stated" verdict that keeps a
-# real observation out of the drop bucket; INCONCLUSIVE survives escalation
-# without a resolution and is surfaced rather than silently lost.
+# Sections for verdicts routed to the review body instead of posting inline.
+# This routing is OPT-IN (--body-only-verdicts); by default placement is decided
+# by whether a finding can be anchored, not by what verdict it reached.
+#
+# Anchoring is a mechanical property of the diff; the verdict is a judgement
+# about the finding. Conflating them buried most of a review's findings in one
+# wall of body text, where a reader cannot see which of them land in the file
+# they are currently reading. A finding's status belongs in its label, not in
+# its placement - so every inline comment leads with severity AND verdict, and
+# only an unanchorable finding falls back to the body.
 BODY_ONLY_VERDICTS = {
     "DOWNGRADED": ("Secondary findings",
                    "real, but lower impact than the first pass claimed"),
     "INCONCLUSIVE": ("Unresolved findings",
                      "could not be verified either way - judge these by hand"),
 }
+
+# How each verdict is labelled in an inline comment header.
+VERDICT_LABEL = {
+    "CONFIRMED": "confirmed",
+    "DOWNGRADED": "downgraded on review",
+    "INCONCLUSIVE": "unresolved",
+    "REFUTED": "refuted - posted by explicit override",
+}
+
+# The prose that introduces a verdict's reasoning, inline and in the body.
+VERDICT_REASON_LABEL = {
+    "CONFIRMED": "Verification",
+    "DOWNGRADED": "Why this is downgraded",
+    "INCONCLUSIVE": "Unresolved",
+    "REFUTED": "Refuted",
+}
+
+
+def severity_text(it):
+    """`<generator> -> <refuter>` whenever the pressure-test revised it, so a
+    finding that arrived `high` and is being posted `low` reads as such rather
+    than looking like a nit all along."""
+    sev, sev_in = it.get("severity"), it.get("severity_in")
+    return f"{sev_in} -> {sev}" if sev_in and sev_in != sev else str(sev)
 
 ATTRIBUTION = "_(AI-assisted, with my guidance)_"
 
@@ -202,11 +232,22 @@ def cmd_reanchor(args):
         return 1
 
     counts = {"ok": 0, "moved": 0, "dead": 0}
+    corrected = []
     for it in led.get("items", []):
         status, new_line, why = reanchor_item(it, args.worktree, changed)
         it["anchor_status"], it["anchor_note"] = status, why
         if new_line and status != "dead":
             it["line"] = new_line
+        # Derive on_changed_line from the diff rather than trusting the S5
+        # refuter's answer. Refuters get this wrong in both directions - and a
+        # wrong `true` is the one error that fails the ENTIRE review POST, not
+        # just its own comment, so the mechanical answer must win over the
+        # judged one. A dead anchor is off-diff by definition.
+        was = it.get("on_changed_line")
+        now = status != "dead" and (it.get("line") in changed.get(it.get("file"), set()))
+        it["on_changed_line"] = now
+        if was is not None and bool(was) != now:
+            corrected.append((it.get("id"), bool(was), now))
         counts[status] += 1
         print(f"{status:6} #{it.get('id')!s:<3} {it.get('file')}:{new_line or it.get('line')} {why}")
 
@@ -216,6 +257,13 @@ def cmd_reanchor(args):
     except OSError as exc:
         print(f"error: could not write ledger file {args.ledger}: {exc}", file=sys.stderr)
         return 1
+
+    if corrected:
+        # Say so loudly: the refuter asserted something the diff contradicts,
+        # which is worth knowing about that refuter's other answers too.
+        detail = ", ".join(f"#{iid} {was} -> {now}" for iid, was, now in corrected)
+        print(f"\nnotice: corrected on_changed_line against the diff for "
+              f"{len(corrected)} item(s) - {detail}", file=sys.stderr)
 
     print(f"\nok={counts['ok']} moved={counts['moved']} dead={counts['dead']}")
     return 0
@@ -301,7 +349,8 @@ def resolve_include_refuted(ledger, tokens):
     return ids
 
 
-def build_payload(ledger, tokens, body_intro, include_refuted=None):
+def build_payload(ledger, tokens, body_intro, include_refuted=None,
+                  body_only_verdicts=None):
     """Build the GitHub reviews API body for the selected items, anchored one
     comment per distinct (file, line) site. A cluster whose selected items span
     more than one site gets a 'Same fix as #a, #b.' cross-reference at each of
@@ -321,9 +370,14 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
     include_refuted names specific REFUTED item ids to post anyway (per id,
     never blanket - see resolve_include_refuted). An id must still be in
     `tokens` (the --select set) to appear; the flag only lifts the REFUTED
-    exclusion, it is not a second selection mechanism."""
+    exclusion, it is not a second selection mechanism.
+
+    body_only_verdicts optionally forces whole verdicts into the body even when
+    they anchor cleanly. It defaults to empty: placement follows anchoring, and
+    each comment carries its verdict in its header instead."""
     selected = resolve_selection(ledger, tokens)
     admitted = resolve_include_refuted(ledger, include_refuted)
+    body_only = set(body_only_verdicts or ())
     by_id = {it.get("id"): it for it in ledger.get("items", [])}
 
     items, demoted, dropped, readmitted, secondary = [], [], [], [], []
@@ -340,12 +394,10 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
         if it.get("verdict") == "REFUTED":
             readmitted.append(iid)
 
-        # DOWNGRADED and INCONCLUSIVE are true-or-unresolved, not false: they
-        # are below the bar for an inline comment but must not vanish, so they
-        # go to their own body sections regardless of how well they anchor.
-        # Checked ahead of the anchoring branches, which only decide inline
-        # vs body for findings that were going to post inline.
-        elif it.get("verdict") in BODY_ONLY_VERDICTS:
+        # Opt-in only. By default this set is empty and a DOWNGRADED or
+        # INCONCLUSIVE finding posts inline like any other, carrying its
+        # verdict in the comment header - see BODY_ONLY_VERDICTS for why.
+        elif it.get("verdict") in body_only:
             secondary.append((it, it["verdict"]))
             continue
 
@@ -443,20 +495,43 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
         if it.get("cluster"):
             cluster_sites.setdefault(it["cluster"], set()).add((it["file"], it["line"]))
 
+    # Which other selected findings land in the same file. This is the payoff
+    # for deciding placement by anchoring: a reader in one file sees what else
+    # is wrong in it without reading the whole review first.
+    file_sites = {}
+    for it in items:
+        file_sites.setdefault(it["file"], set()).add(it["id"])
+
     comments = []
     for (path, line), group in sorted(sites.items()):
         blocks = []
         for it in sorted(group, key=lambda x: x["id"]):
-            text = f"**#{it['id']}** ({it['severity']}) {it['claim']}"
+            verdict = it.get("verdict")
+            label = VERDICT_LABEL.get(verdict)
+            head = f"**#{it['id']}** - {severity_text(it)}"
+            if label:
+                head += f" · {label}"
+            text = head + "\n\n" + it["claim"]
             detail = (it.get("detail") or "").strip()
             if detail:
                 text += "\n\n" + detail
+            # A finding posted inline must carry the reasoning that set its
+            # verdict, or a downgraded item reads as an unqualified demand for
+            # a change the pressure-test already decided was not needed.
+            reason = (it.get("verdict_reason") or "").strip()
+            if reason:
+                text += (f"\n\n_{VERDICT_REASON_LABEL.get(verdict, 'Verdict')}: "
+                         f"{reason}_")
             cl = it.get("cluster")
             if cl and len(cluster_sites.get(cl, ())) > 1:
                 others = sorted(o["id"] for o in items
                                 if o.get("cluster") == cl and (o["file"], o["line"]) != (path, line))
                 if others:
                     text += "\n\nSame fix as " + ", ".join(f"#{o}" for o in others) + "."
+            same_file = sorted(file_sites.get(path, set()) - {it["id"]})
+            if same_file:
+                text += ("\n\n_Other findings in this file: "
+                         + ", ".join(f"#{o}" for o in same_file) + "_")
             blocks.append(text)
         comments.append({"path": path, "line": line, "side": "RIGHT",
                          "body": "\n\n---\n\n".join(blocks)})
@@ -475,10 +550,20 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None):
         lines = ["## Findings not anchored to a changed line", ""]
         for it, _reason, note in sorted(demoted, key=lambda d: d[0]["id"]):
             loc = f"{it.get('file')}:{it['line']}" if it.get("line") is not None else it.get("file", "?")
-            lines.append(f"**#{it['id']}** ({it['severity']}) {loc} - {it['claim']}")
+            verdict = it.get("verdict")
+            label = VERDICT_LABEL.get(verdict)
+            head = f"**#{it['id']}** ({severity_text(it)}"
+            head += f" · {label})" if label else ")"
+            lines.append(f"{head} {loc} - {it['claim']}")
             detail = (it.get("detail") or "").strip()
             if detail:
                 lines.append(""); lines.append(detail)
+            # These are here only because they could not anchor, so they carry
+            # the same verdict reasoning an inline comment would have shown.
+            reason = (it.get("verdict_reason") or "").strip()
+            if reason:
+                lines.append("")
+                lines.append(f"_{VERDICT_REASON_LABEL.get(verdict, 'Verdict')}: {reason}_")
             lines.append(""); lines.append(f"_Not anchored: {note}_"); lines.append("")
         demoted_section = "\n".join(lines).rstrip()
         body = (body + "\n\n" + demoted_section).strip() if body else demoted_section
@@ -542,7 +627,8 @@ def cmd_payload(args):
 
     try:
         payload = build_payload(led, args.select or ["all"], intro,
-                                 include_refuted=getattr(args, "include_refuted", None))
+                                 include_refuted=getattr(args, "include_refuted", None),
+                                 body_only_verdicts=getattr(args, "body_only_verdicts", None))
     except (SelectionError, PayloadError, IncludeRefutedError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -612,6 +698,10 @@ def main():
     y.add_argument("--include-refuted", nargs="*",
                     help="Re-admit specific REFUTED item ids past the default exclusion "
                          "(per id only - never a blanket override)")
+    y.add_argument("--body-only-verdicts", nargs="*", choices=sorted(BODY_ONLY_VERDICTS),
+                    help="Force these verdicts into the review body even when they anchor "
+                         "cleanly. Default: none - placement follows anchoring, and each "
+                         "comment carries its verdict in its header")
     y.add_argument("--body-file", required=True); y.set_defaults(fn=cmd_payload)
     w = sub.add_parser("preview")
     w.add_argument("payload"); w.set_defaults(fn=cmd_preview)

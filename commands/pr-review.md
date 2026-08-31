@@ -88,6 +88,33 @@ triage table.
    Store `MERGE_BASE` in the ledger as `merge_base` (S6), and pass it to every refuter in S5 -
    establishing what is pre-existing versus introduced is central to their job, and they need the
    SHA to check it.
+
+   **Check for a stacked PR whose base was rebased before you trust that scope.** If the base
+   branch has been rebased since this branch forked, the merge-base sits below the entire base
+   stack and the diff wrongly contains another PR's work - GitHub's own Files tab shows the same
+   thing, so the inflation is easy to mistake for the real scope:
+
+   ```bash
+   BASE_TIP=$(git rev-parse FETCH_HEAD)
+   git merge-base --is-ancestor "$BASE_TIP" "$HEAD_SHA" \
+     || echo "base was rebased - MERGE_BASE spans the base stack, derive the fork point"
+   ```
+
+   When it is not an ancestor, find the real fork point with `git cherry "$BASE_TIP" "$HEAD_SHA"`:
+   the `+` commits are the ones with no patch-equivalent in the base, and the review scope starts
+   at the parent of the first `+` commit that belongs to THIS PR's work (read the subjects - the
+   leading `+` commits are often rebase leftovers of the base's own history). Confirm the range
+   with a diffstat before accepting it, and state the scope explicitly in S6 and in the review body.
+
+   **This yields two different bases, and they are not interchangeable:**
+
+   | | which SHA | used for |
+   | --- | --- | --- |
+   | review base | the fork point you derived | what S5 refuters diff against - "did THIS PR introduce it" |
+   | posting base | GitHub's merge-base | what can anchor - GitHub accepts comments only on lines in ITS diff |
+
+   The posting base is a superset, so a finding can sit outside the review scope and still be
+   postable. Judge `on_changed_line` against the **posting** base (S6), never the review base.
 6. Create the worktree and capture the path with a **direct command substitution** - never through
    a pipe, and never wrapped in `bash -c`:
 
@@ -168,6 +195,11 @@ One item = one defect, with one fix, at one site. Break every composite item apa
 Then renumber **globally, 1..N, ordered by severity descending then file path**. Severity
 vocabulary is exactly `blocker`, `high`, `medium`, `low`.
 
+The generator does emit values outside that set - `medium-high`, `low-medium`. Normalize each to
+the **lower** neighbour (`medium-high` -> `medium`, `low-medium` -> `low`): the hyphenated form is
+a hedge, and a hedge should not inflate a severity on its way to an author. Record the normalized
+value as `severity_in` and say in the S6 report that you normalized.
+
 **Letter suffixes are forbidden.** Never produce `2a` or `30g`. If an item splits, every
 downstream number shifts. The validator (S6 step 2) enforces this and will reject the ledger
 otherwise - along with duplicate ids, non-contiguous ids, and wrong severity ordering.
@@ -199,6 +231,12 @@ renumbering.
 Dispatch **one independent refuter subagent per item**, in parallel batches. Give each: the item's
 claim, its `detail` and `evidence`, its `file:line`, the worktree path `$WT`, `MERGE_BASE`, and the
 relevant CLAUDE.md paths.
+
+Refuters running in parallel share ONE worktree, so tell each: write probe files to your own temp
+directory, never to `$WT`; revert any tracked file you mutate for a mutation test; and **leave
+untracked files you did not create alone** - they belong to a sibling refuter still running.
+Without this they spend tokens reporting each other's scratch files as unexplained repo state, and
+one tidying up "stray" files will delete another's probe mid-run.
 
 First make verification actually possible, so a refuter is never reduced to guessing:
 
@@ -321,11 +359,11 @@ automatically.
          "line": 142,
          "line_end": 148,
          "anchor_excerpt": "verbatim source lines this finding sits on - survives head drift",
-         "on_changed_line": true,              // from the S5 refuter; false = body-only, can't post inline.
-                                               // `payload` excludes false items itself, with a
-                                               // stderr warning - GitHub rejects the WHOLE review
-                                               // over one off-diff anchor. Missing/null is treated
-                                               // as "not excluded", so fill it in for every item.
+         "on_changed_line": true,              // VERIFY against the diff - see step 2a. Not the
+                                               // refuter's word: false = body-only, and a wrong
+                                               // true fails the WHOLE review, not just its comment.
+                                               // Missing/null is treated as "not excluded", so
+                                               // fill it in for every item.
          "claim": "one sentence",
          "detail": "full text for the author",
          "evidence": ["src/bar.ts:88"],
@@ -342,6 +380,22 @@ automatically.
      ]
    }
    ```
+
+2a. **Derive `on_changed_line` from the diff, overwriting what S5 recorded.** Refuters get this
+   wrong in both directions, and one contradicting its own stated evidence is not unusual - it is a
+   mechanical property of the diff, not a judgement, so the diff wins. A wrong `false` silently
+   demotes a good finding to the body; a wrong `true` makes GitHub reject the **entire** review.
+
+   Judge against the **posting base** (GitHub's merge-base), not the review base - `gh pr diff <n>`
+   is exactly that diff. Parse the `+` hunk ranges per file and set the field for every item:
+
+   ```bash
+   GH_REPO="$REPO" gh pr diff <n> > "$SCRATCH/pr-review/pr<n>/head.diff"
+   ```
+
+   Report any item whose recorded value you had to flip, and treat it as a signal about that
+   refuter's other answers. (`/pr-review-post`'s `reanchor` does this too, but the ledger should
+   not be wrong in the meantime.)
 
 2. Validate it, and fix any error it reports before continuing - do not proceed on a failing
    validate:

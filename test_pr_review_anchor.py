@@ -248,6 +248,69 @@ class TestParseChangedLinesRealisticDiff(unittest.TestCase):
         self.assertNotIn("pure-rename-new.ts", anchor.parse_changed_lines(REALISTIC_DIFF))
 
 
+def _diff_for(changed):
+    """Minimal unified diff whose parse_changed_lines() output is `changed`."""
+    out = []
+    for path, lines in changed.items():
+        out.append(f"--- a/{path}")
+        out.append(f"+++ b/{path}")
+        for n in sorted(lines):
+            out.append(f"@@ -0,0 +{n},1 @@")
+            out.append("+x")
+    return "\n".join(out) + "\n"
+
+
+class TestReanchorFixesOnChangedLine(unittest.TestCase):
+    """reanchor derives on_changed_line from the diff instead of trusting the
+    S5 refuter. Refuters get this wrong in both directions, and a wrong `true`
+    fails the ENTIRE review POST rather than just its own comment."""
+
+    def _run(self, items, changed, content="one\ntwo\nthree\n"):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "a.ts"), "w") as fh:
+            fh.write(content)
+        led = {"schema": 1, "items": items, "clusters": []}
+        lp = os.path.join(d, "ledger.json")
+        dp = os.path.join(d, "d.diff")
+        with open(lp, "w") as fh:
+            json.dump(led, fh)
+        # parse_changed_lines is exercised elsewhere; feed a diff that yields
+        # exactly `changed` so this test isolates the correction behaviour.
+        with open(dp, "w") as fh:
+            fh.write(_diff_for(changed))
+        args = SimpleNamespace(ledger=lp, worktree=d, diff=dp)
+        anchor.cmd_reanchor(args)
+        with open(lp) as fh:
+            return {i["id"]: i for i in json.load(fh)["items"]}
+
+    def test_a_refuters_false_is_corrected_to_true(self):
+        out = self._run([item(1, line=2, anchor_excerpt="two",
+                              on_changed_line=False)], {"a.ts": {2}})
+        self.assertIs(out[1]["on_changed_line"], True)
+
+    def test_a_refuters_true_is_corrected_to_false(self):
+        """The dangerous direction: this is the one that fails the whole POST."""
+        out = self._run([item(1, line=2, anchor_excerpt="two",
+                              on_changed_line=True)], {"a.ts": {99}})
+        self.assertIs(out[1]["on_changed_line"], False)
+
+    def test_a_dead_anchor_is_off_diff_by_definition(self):
+        out = self._run([item(1, line=2, anchor_excerpt="nowhere",
+                              on_changed_line=True)], {"a.ts": {2}})
+        self.assertEqual(out[1]["anchor_status"], "dead")
+        self.assertIs(out[1]["on_changed_line"], False)
+
+    def test_a_moved_anchor_is_judged_at_its_new_line(self):
+        out = self._run([item(1, line=1, anchor_excerpt="three",
+                              on_changed_line=False)], {"a.ts": {3}})
+        self.assertEqual(out[1]["line"], 3)
+        self.assertIs(out[1]["on_changed_line"], True)
+
+    def test_a_ledger_with_no_prior_value_is_filled_in(self):
+        out = self._run([item(1, line=2, anchor_excerpt="two")], {"a.ts": {2}})
+        self.assertIs(out[1]["on_changed_line"], True)
+
+
 class TestReanchorAmbiguity(unittest.TestCase):
     def _wt(self, content):
         d = tempfile.mkdtemp()
@@ -1090,8 +1153,10 @@ class TestTerminalVerdictRequired(unittest.TestCase):
 
 
 class TestBodyOnlyVerdicts(unittest.TestCase):
-    """DOWNGRADED and INCONCLUSIVE are true-or-unresolved, not false: they are
-    carried in the review body rather than dropped like REFUTED."""
+    """Placement follows ANCHORING, not verdict. DOWNGRADED and INCONCLUSIVE
+    post inline like anything else and carry their status in the header; only
+    an unanchorable finding falls back to the body. --body-only-verdicts is the
+    opt-in that restores the old verdict-based routing."""
 
     def _led(self, verdict):
         return {"items": [
@@ -1100,52 +1165,89 @@ class TestBodyOnlyVerdicts(unittest.TestCase):
                  verdict=verdict, verdict_reason="unreachable in production"),
         ], "clusters": []}
 
-    def test_downgraded_is_in_the_body_and_not_a_comment(self):
-        p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro")
-        self.assertIn("smaller one", p["body"])
-        self.assertNotIn("smaller one", " ".join(c["body"] for c in p["comments"]))
+    def _comments(self, p):
+        return " ".join(c["body"] for c in p["comments"])
 
-    def test_inconclusive_is_in_the_body_and_not_a_comment(self):
+    def test_downgraded_posts_inline_by_default(self):
+        p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro")
+        self.assertIn("smaller one", self._comments(p))
+
+    def test_inconclusive_posts_inline_by_default(self):
         p = anchor.build_payload(self._led("INCONCLUSIVE"), ["all"], "intro")
-        self.assertIn("smaller one", p["body"])
-        self.assertNotIn("smaller one", " ".join(c["body"] for c in p["comments"]))
+        self.assertIn("smaller one", self._comments(p))
 
     def test_refuted_by_contrast_is_dropped_from_body_and_comments(self):
         p = anchor.build_payload(self._led("REFUTED"), ["all"], "intro")
         self.assertNotIn("smaller one", p["body"])
-        self.assertNotIn("smaller one", " ".join(c["body"] for c in p["comments"]))
+        self.assertNotIn("smaller one", self._comments(p))
 
-    def test_downgraded_carries_the_refuters_reason_into_the_body(self):
+    def test_an_inline_comment_states_its_verdict(self):
+        """Placement no longer signals status, so the label must - otherwise a
+        downgraded finding reads as an unqualified demand for a change."""
         p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro")
-        self.assertIn("unreachable in production", p["body"])
+        self.assertIn(anchor.VERDICT_LABEL["DOWNGRADED"], self._comments(p))
 
-    def test_body_shows_the_generators_severity_when_the_refuter_changed_it(self):
+    def test_an_inline_comment_carries_the_refuters_reason(self):
+        p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro")
+        self.assertIn("unreachable in production", self._comments(p))
+
+    def test_inline_shows_the_generators_severity_when_the_refuter_changed_it(self):
         led = self._led("DOWNGRADED")
         led["items"][1]["severity_in"] = "high"
         p = anchor.build_payload(led, ["all"], "intro")
-        self.assertIn("high -> low", p["body"])
+        self.assertIn("high -> low", self._comments(p))
 
-    def test_body_shows_one_severity_when_the_refuter_left_it_alone(self):
+    def test_inline_shows_one_severity_when_the_refuter_left_it_alone(self):
         p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro")
-        self.assertNotIn("low -> low", p["body"])
+        self.assertNotIn("low -> low", self._comments(p))
 
-    def test_a_downgraded_only_selection_is_not_an_empty_payload_error(self):
-        led = self._led("DOWNGRADED")
-        p = anchor.build_payload(led, ["2"], "intro")
-        self.assertEqual(p["comments"], [])
-        self.assertIn("smaller one", p["body"])
-
-    def test_verdict_routing_beats_anchoring_for_an_off_diff_downgrade(self):
-        """An off-diff DOWNGRADED item belongs under its verdict heading, not
-        under the unanchored heading - the reason it is not inline is the
-        verdict, and mislabelling it hides that."""
+    def test_an_off_diff_downgrade_falls_back_to_the_body(self):
+        """Anchoring is the only thing that moves a finding out of comments[],
+        and the body must say it was the anchor, not the verdict."""
         led = self._led("DOWNGRADED")
         led["items"][1]["on_changed_line"] = False
         p = anchor.build_payload(led, ["all"], "intro")
-        heading = anchor.BODY_ONLY_VERDICTS["DOWNGRADED"][0]
-        before, _, after = p["body"].partition(f"## {heading}")
+        _, _, after = p["body"].partition("## Findings not anchored")
         self.assertIn("smaller one", after)
-        self.assertNotIn("smaller one", before)
+        self.assertNotIn("smaller one", self._comments(p))
+
+    def test_an_unanchored_body_finding_still_carries_its_verdict_and_reason(self):
+        led = self._led("DOWNGRADED")
+        led["items"][1]["on_changed_line"] = False
+        p = anchor.build_payload(led, ["all"], "intro")
+        self.assertIn(anchor.VERDICT_LABEL["DOWNGRADED"], p["body"])
+        self.assertIn("unreachable in production", p["body"])
+
+    def test_body_only_verdicts_opt_in_restores_verdict_routing(self):
+        p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro",
+                                 body_only_verdicts=["DOWNGRADED"])
+        heading = anchor.BODY_ONLY_VERDICTS["DOWNGRADED"][0]
+        self.assertIn(heading, p["body"])
+        self.assertIn("smaller one", p["body"])
+        self.assertNotIn("smaller one", self._comments(p))
+
+    def test_body_only_opt_in_leaves_other_verdicts_inline(self):
+        p = anchor.build_payload(self._led("INCONCLUSIVE"), ["all"], "intro",
+                                 body_only_verdicts=["DOWNGRADED"])
+        self.assertIn("smaller one", self._comments(p))
+
+    def test_a_downgraded_only_selection_now_produces_a_comment(self):
+        p = anchor.build_payload(self._led("DOWNGRADED"), ["2"], "intro")
+        self.assertEqual(len(p["comments"]), 1)
+
+    def test_same_file_findings_cross_reference_each_other(self):
+        """The payoff for anchoring-based placement: a reader in one file sees
+        what else lands in it without reading the whole review."""
+        led = {"items": [
+            item(1, sev="high", f="a.ts", line=10, claim="first"),
+            item(2, sev="low", f="a.ts", line=20, claim="second"),
+            item(3, sev="low", f="b.ts", line=30, claim="elsewhere"),
+        ], "clusters": []}
+        p = anchor.build_payload(led, ["all"], "intro")
+        by_line = {c["line"]: c["body"] for c in p["comments"]}
+        self.assertIn("Other findings in this file: #2", by_line[10])
+        self.assertIn("Other findings in this file: #1", by_line[20])
+        self.assertNotIn("Other findings in this file", by_line[30])
 
     def test_include_refuted_does_not_accept_a_downgraded_id(self):
         led = self._led("DOWNGRADED")

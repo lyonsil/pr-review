@@ -80,10 +80,20 @@ print(r)
    ledger's `verdict`/`verdict_reason` as recorded; do not hand-edit `verdict` to work around this
    - that destroys the refuter's recorded reasoning.
 
-   `DOWNGRADED` and `INCONCLUSIVE` need no override and must not be given one: `payload` carries
-   them into the review body under their own headings, with the refuter's reason and, where the
-   severity was revised, `<severity_in> -> <severity>`. They are real-or-unresolved findings held
-   below the inline bar, not dropped ones - `--include-refuted` rejects them by design.
+   `DOWNGRADED` and `INCONCLUSIVE` need no override and must not be given one - but not because
+   they are held back: **placement follows anchoring, not verdict.** Every selected finding that
+   can be anchored posts inline whatever verdict it reached, carrying `<severity_in> -> <severity>`,
+   its status (`confirmed` / `downgraded on review` / `unresolved`) and the refuter's reasoning in
+   its own header. Only a finding that cannot anchor falls back to the body.
+
+   Anchoring is a mechanical property of the diff; the verdict is a judgement about the finding.
+   Routing on the verdict buries most of a review in one wall of body text, where a reader cannot
+   see which findings land in the file they are already reading - which is the whole reason inline
+   comments exist. `--include-refuted` still rejects these two verdicts by design: it lifts the
+   REFUTED exclusion only.
+
+   `--body-only-verdicts DOWNGRADED INCONCLUSIVE` restores the old verdict-based routing if a
+   particular review wants it. It is opt-in and off by default.
 
 ## 2. Re-anchor against the current head
 
@@ -122,15 +132,41 @@ anchor would fail the entire review POST. `payload` therefore moves every dead o
 into the review body automatically, under its own heading, and keeps it out of `comments[]`.
 Report which ids were demoted and why, then carry on. Refuted items are the opposite case and are
 never demoted: they were judged not real, so they appear nowhere unless re-admitted per-id with
-`--include-refuted`. `DOWNGRADED` and `INCONCLUSIVE` items reach the body by verdict rather than by
-anchoring, under their own headings, and `payload` reports them on stderr as a `notice:` line
-rather than a `warning:` - they were never candidates for an inline comment.
+`--include-refuted`. `DOWNGRADED` and `INCONCLUSIVE` items are NOT routed by verdict - they post
+inline like anything else when they anchor (see step 1), so they appear in the demotion warning
+only when their own anchor failed.
+
+`reanchor` also recomputes `on_changed_line` from the diff and overwrites whatever S5 recorded,
+printing a `notice:` naming every id it corrected. Do not treat that as noise: it means a refuter
+asserted something the diff contradicts, which is worth weighing against that refuter's other
+answers. A wrong `true` fails the **entire** review POST, not just its own comment.
 
 Also scan the per-item output (or each item's `anchor_note`) for `ambiguous:` - it means the anchor
 excerpt matched more than one location and the nearest-to-old-line match was chosen automatically.
 **Surface every ambiguous anchor to the user before proceeding**: a wrong duplicate match anchors
 a comment to the wrong line, and re-anchoring alone cannot tell the difference between the right
 site and a coincidentally identical one.
+
+### When the head moved, re-verify the claims - not just the anchors
+
+`reanchor` checks that each finding's **line** still exists. It cannot check that the finding is
+still **true**, and after a rebase or restack it often isn't. Two separate passes, both required
+whenever `$NOW` differed from the ledger's `head_sha`:
+
+1. **Standing claims in the body.** Anything the body asserts about the current state of the branch
+   - a previously-reported item still being unfixed, a red CI step, a stale generated artifact -
+   must be re-run against the new head. A restack that regenerates a bundle or reformats a file
+   turns those sentences into false accusations, and CI claims are the ones an author will
+   reasonably take personally. Drop or rewrite whatever no longer holds, and say in the body that
+   it was re-verified at the new SHA.
+2. **The premises under each verdict.** A DOWNGRADED verdict usually rests on something being
+   unreachable, pre-existing, or gated. If the head moved, ask whether the gate is still there.
+   A finding whose only two gates were "the shipped config supplies the key" and "the committed
+   build output still marks it required" becomes materially more serious the moment that build
+   output is regenerated - the finding did not change, the reason for holding it low did.
+
+Do not silently rewrite a refuter's recorded `verdict_reason` to paper over this. Append a dated
+`_Re-checked at <sha>: ..._` note so the original reasoning and the correction are both visible.
 
 ## 3. Build the posting plan
 
@@ -200,6 +236,13 @@ only the first few comments, never replace a comment body with a description of 
 approving a summary is approving text they have not read, which then posts under their own GitHub
 account. If the output is long, that is the correct amount of output.
 
+The requirement is that the user sees the bytes that will post - not that you retype them. At two
+dozen comments the preview runs to tens of KB, and transcribing it by hand risks the one failure
+worse than not showing it: an approved text that differs from what posts. So render it (the tool
+output itself is shown in the transcript) and give the absolute path to `payload.json` and
+`preview.txt` so it can be reopened. What is never acceptable is a hand-written précis standing in
+for the preview.
+
 Alongside it, relay any warnings `payload` wrote to stderr (excluded refuted ids, dead anchors,
 re-admitted ids), and state the head SHA the anchors were resolved against.
 
@@ -207,7 +250,19 @@ Honor any constraints in $ARGUMENTS - for example "do not say whether anything i
 
 ## 4. Post
 
-Only after approval. One atomic review:
+Only after approval. **Re-read the head first** - approval takes human time, and a rebase landing
+in that window is exactly what leaves the anchors stale:
+
+```bash
+NOW=$(GH_REPO="$REPO" gh pr view "$NUMBER" --json headRefOid --jq .headRefOid)
+[ "$NOW" = "<ledger head_sha>" ] || { echo "head moved to $NOW - go back to step 2"; exit 1; }
+```
+
+Do not skip this because step 2 already re-anchored. Step 2 runs before the approval pause; this
+runs after it. On a mismatch, return to step 2 **and** re-run the step 2 claim re-verification -
+a restack can fix the very things the body asserts are broken.
+
+Then one atomic review:
 
 ```bash
 cat "$SCRATCH/pr-review/pr$NUMBER/payload.json" \
@@ -216,8 +271,20 @@ cat "$SCRATCH/pr-review/pr$NUMBER/payload.json" \
 
 Pipe via **stdin**. `gh` cannot read scratchpad paths from this sandbox.
 
-If the POST fails, do not retry blindly - re-run step 2, since a wholesale failure almost always
-means the head moved again between re-anchoring and posting.
+**A failed call does not mean nothing was written.** A 5xx (502 in particular) can be a lost
+response to a request GitHub already applied - the review exists, and re-running step 4 would post
+every comment a second time under the user's own account. So on ANY error, check what landed before
+doing anything else:
+
+```bash
+GH_REPO="$REPO" gh api "repos/{owner}/{repo}/pulls/$NUMBER/reviews" --paginate \
+  --jq '.[] | select(.user.login=="<the posting user>") | {id, submitted_at, body_start: (.body[0:60])}'
+```
+
+If a review matching this payload's body is there, the POST succeeded: verify its comment count
+(`select(.pull_request_review_id==<id>)` over `pulls/$NUMBER/comments`) and go to step 5. Only if
+nothing landed should you retry, and then re-run step 2 first, since a genuine wholesale rejection
+usually means the head moved.
 
 ## 5. Tear down
 

@@ -102,3 +102,46 @@ author removed exactly that line three days later). Rulings taken in response:
   consistency matters more than separate review surfaces.
 - One hardening round was run past the single-fix-wave limit, because the wave's own new subcommand
   re-opened the plan's worst defect (`CLAUDE_SCRATCHPAD=/` yielding an empty path).
+
+## Learned from PR #2724 (a 40-item review on a restacked stacked PR)
+
+- **Placement follows anchoring, not verdict.** `payload` used to route DOWNGRADED and
+  INCONCLUSIVE into the review body however cleanly they anchored, on the theory that they sat
+  below an inline bar. On a 28-finding review that buried 22 of them in one wall of text, where a
+  reader cannot see which findings land in the file they are already reading - the whole reason
+  inline comments exist. Anchoring is a mechanical property of the diff; the verdict is a judgement
+  about the finding. They are now reported separately: every anchorable finding posts inline
+  carrying `<severity_in> -> <severity>` plus its status and the refuter's reasoning, and only an
+  unanchorable one falls back to the body. `--body-only-verdicts` restores the old routing, opt-in.
+  The old rule also had no override at all, so the operator's only way out was to hand-build
+  `payload.json` and bypass the tool - a worse outcome than either behaviour.
+- **`reanchor` derives `on_changed_line`; it no longer trusts S5.** Refuters got it wrong in both
+  directions in one run, including one that answered `true` while its own stated evidence said the
+  lines were untouched. A wrong `false` silently demotes a good finding; a wrong `true` fails the
+  ENTIRE review POST. It is a property of the diff, so the diff decides and corrections are
+  reported - a refuter contradicting the diff is worth weighing against its other answers.
+- **Re-read the head immediately before POST, not only in step 2.** Step 2 runs before the approval
+  pause; a rebase lands during it. A restack between preview and post was caught only by an ad-hoc
+  check, and would otherwise have posted 26 comments against rewritten line numbers.
+- **A 5xx is ambiguous, not a failure.** A 502 on the POST had already created the review. The old
+  guidance ("do not retry blindly - re-run step 2") would still have double-posted every comment
+  under the user's own account. Always query for a matching review before retrying anything.
+- **After a head move, re-verify the claims, not just the anchors.** `reanchor` checks that a line
+  still exists, never that a finding is still true. A restack regenerated a build artifact and
+  reformatted a file, which fixed two items the review body asserted were still broken - one of
+  them framed as a red CI step. It also removed one of the two gates that had justified downgrading
+  two findings: the findings did not change, the reason for holding them low did. Corrections are
+  appended as a dated `_Re-checked at <sha>_` note rather than overwriting a refuter's reasoning.
+- **A stacked PR whose base was rebased inflates the scope silently.** The merge-base fell below
+  the entire base stack, so both the pipeline and GitHub's Files tab showed 107 files across 163
+  commits for a 45-file PR. Detect with `git merge-base --is-ancestor`, derive the fork point with
+  `git cherry`. This also splits the base in two: the review base (what refuters diff against) and
+  the posting base (GitHub's merge-base, which decides what can anchor). The posting base is a
+  superset, so a finding can be outside the review scope and still postable - one was.
+- **Hedged severities are normalized downward.** The generator emits `medium-high` / `low-medium`,
+  outside the four-value vocabulary. The hyphenated form is a hedge, and a hedge should not inflate
+  a severity on its way to an author.
+- **Parallel refuters share one worktree.** Several spent tokens reporting each other's probe files
+  as unexplained repo state; one tidying up "stray" files would have deleted another's probe
+  mid-run. They are now told to use their own temp dir and never touch untracked files they did not
+  create.
