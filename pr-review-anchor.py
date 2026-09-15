@@ -23,35 +23,60 @@ VERDICTS = ("CONFIRMED", "DOWNGRADED", "REFUTED", "INCONCLUSIVE")
 # its placement - so every inline comment leads with severity AND verdict, and
 # only an unanchorable finding falls back to the body.
 BODY_ONLY_VERDICTS = {
-    "DOWNGRADED": ("Secondary findings",
-                   "real, but lower impact than the first pass claimed"),
+    "DOWNGRADED": ("Secondary findings", "real, at the severity shown"),
     "INCONCLUSIVE": ("Unresolved findings",
                      "could not be verified either way - judge these by hand"),
 }
 
-# How each verdict is labelled in an inline comment header.
+# How each verdict is labelled in an inline comment header. These publish to a
+# PR author who has no glossary for the pipeline's vocabulary, so each one says
+# what it means rather than naming a stage of the review.
+#
+# DOWNGRADED reads the same as CONFIRMED on purpose. With the severity revision
+# no longer published (see severity_text), a downgraded finding IS a real
+# finding at the severity shown, and a label distinguishing it would only
+# describe an internal revision the author never saw.
 VERDICT_LABEL = {
-    "CONFIRMED": "confirmed",
-    "DOWNGRADED": "downgraded on review",
-    "INCONCLUSIVE": "unresolved",
-    "REFUTED": "refuted - posted by explicit override",
+    "CONFIRMED": "checked and confirmed",
+    "DOWNGRADED": "checked and confirmed",
+    "INCONCLUSIVE": "needs a human call",
+    "REFUTED": "probably not a real problem - posted at the reviewer's request",
 }
 
-# The prose that introduces a verdict's reasoning, inline and in the body.
+# The prose that introduces a verdict's reasoning where that reasoning is about
+# the CODE. DOWNGRADED is deliberately absent: "why this was lowered" is review
+# bookkeeping, and verdict_reason_block drops the footer entirely rather than
+# renaming it. See that function for where a downgrade's reasoning goes instead.
 VERDICT_REASON_LABEL = {
-    "CONFIRMED": "Verification",
-    "DOWNGRADED": "Why this is downgraded",
-    "INCONCLUSIVE": "Unresolved",
-    "REFUTED": "Refuted",
+    "CONFIRMED": "How this was checked",
+    "INCONCLUSIVE": "What could not be checked",
+    "REFUTED": "Why this may not hold",
 }
 
 
 def severity_text(it):
-    """`<generator> -> <refuter>` whenever the pressure-test revised it, so a
-    finding that arrived `high` and is being posted `low` reads as such rather
-    than looking like a nit all along."""
-    sev, sev_in = it.get("severity"), it.get("severity_in")
-    return f"{sev_in} -> {sev}" if sev_in and sev_in != sev else str(sev)
+    """The severity a finding is posted at, and only that.
+
+    `severity_in` stays in the ledger and the S6 triage table still prints
+    `<in> -> <out>`, because that arrow is what tells the reviewer whether the
+    pressure-test is calibrated. It does not publish: a PR author reading one
+    comment has no use for the revision history of a number they never saw."""
+    return str(it.get("severity"))
+
+
+def verdict_reason_block(it):
+    """The published footer carrying the pressure-test's reasoning, or "" when
+    that reasoning is about the review rather than about the code.
+
+    DOWNGRADED has no entry in VERDICT_REASON_LABEL, so it renders nothing.
+    Whatever a downgrade's reasoning holds that changes what the author needs to
+    know - that a path is gated, unreachable, or pre-existing - is folded into
+    the finding's own `Why it matters:` slot while the review is drafted, in the
+    author's terms. The refuter's `verdict_reason` stays intact in the ledger
+    either way; this only decides what publishes."""
+    label = VERDICT_REASON_LABEL.get(it.get("verdict"))
+    reason = (it.get("verdict_reason") or "").strip()
+    return f"_{label}: {reason}_" if label and reason else ""
 
 ATTRIBUTION = "_(AI-assisted, with my guidance)_"
 
@@ -353,7 +378,7 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
                   body_only_verdicts=None):
     """Build the GitHub reviews API body for the selected items, anchored one
     comment per distinct (file, line) site. A cluster whose selected items span
-    more than one site gets a 'Same fix as #a, #b.' cross-reference at each of
+    more than one site gets a 'Similar fix as #a, #b.' cross-reference at each of
     its sites, listing every OTHER site's id(s) - never just one, however many
     sites the cluster spans.
 
@@ -403,7 +428,8 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
 
         if it.get("anchor_status") == "dead":
             demoted.append((it, "dead anchor", it.get("anchor_note")
-                             or "anchor could not be relocated in the current diff"))
+                             or "the code this finding pointed at has moved or gone "
+                                "since the review ran"))
         # The S5 refuter records on_changed_line; false means the finding does
         # not sit on a line this PR touched, and GitHub rejects the ENTIRE
         # review when any one comment anchors off a changed line - demoted
@@ -413,7 +439,8 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
         # stay postable rather than silently demoting every item.
         elif it.get("on_changed_line") is False:
             demoted.append((it, "not on a changed line", it.get("anchor_note")
-                             or "not on a changed line in the current diff"))
+                             or "this finding is not on a line the PR changed, so GitHub "
+                                "cannot attach a comment to it"))
         else:
             items.append(it)
 
@@ -515,19 +542,17 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
             detail = (it.get("detail") or "").strip()
             if detail:
                 text += "\n\n" + detail
-            # A finding posted inline must carry the reasoning that set its
-            # verdict, or a downgraded item reads as an unqualified demand for
-            # a change the pressure-test already decided was not needed.
-            reason = (it.get("verdict_reason") or "").strip()
-            if reason:
-                text += (f"\n\n_{VERDICT_REASON_LABEL.get(verdict, 'Verdict')}: "
-                         f"{reason}_")
+            # Carries the pressure-test's reasoning when it is about the code.
+            # Empty for a downgrade - see verdict_reason_block.
+            block = verdict_reason_block(it)
+            if block:
+                text += "\n\n" + block
             cl = it.get("cluster")
             if cl and len(cluster_sites.get(cl, ())) > 1:
                 others = sorted(o["id"] for o in items
                                 if o.get("cluster") == cl and (o["file"], o["line"]) != (path, line))
                 if others:
-                    text += "\n\nSame fix as " + ", ".join(f"#{o}" for o in others) + "."
+                    text += "\n\nSimilar fix as " + ", ".join(f"#{o}" for o in others) + "."
             same_file = sorted(file_sites.get(path, set()) - {it["id"]})
             if same_file:
                 text += ("\n\n_Other findings in this file: "
@@ -547,7 +572,7 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
         body = body.replace(ATTRIBUTION, "").rstrip()
 
     if demoted:
-        lines = ["## Findings not anchored to a changed line", ""]
+        lines = ["## Findings that could not be attached to a line in this diff", ""]
         for it, _reason, note in sorted(demoted, key=lambda d: d[0]["id"]):
             loc = f"{it.get('file')}:{it['line']}" if it.get("line") is not None else it.get("file", "?")
             verdict = it.get("verdict")
@@ -560,11 +585,10 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
                 lines.append(""); lines.append(detail)
             # These are here only because they could not anchor, so they carry
             # the same verdict reasoning an inline comment would have shown.
-            reason = (it.get("verdict_reason") or "").strip()
-            if reason:
-                lines.append("")
-                lines.append(f"_{VERDICT_REASON_LABEL.get(verdict, 'Verdict')}: {reason}_")
-            lines.append(""); lines.append(f"_Not anchored: {note}_"); lines.append("")
+            block = verdict_reason_block(it)
+            if block:
+                lines.append(""); lines.append(block)
+            lines.append(""); lines.append(f"_Not attached to a line: {note}_"); lines.append("")
         demoted_section = "\n".join(lines).rstrip()
         body = (body + "\n\n" + demoted_section).strip() if body else demoted_section
 
@@ -577,19 +601,13 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
         lines = [f"## {heading} ({gloss})", ""]
         for it in sorted(group, key=lambda x: x["id"]):
             loc = f"{it.get('file')}:{it['line']}" if it.get("line") is not None else it.get("file", "?")
-            sev = it.get("severity")
-            sev_in = it.get("severity_in")
-            # Show the generator's severity alongside the refuter's whenever
-            # they differ: a finding that arrived as `high` and is being
-            # carried as `low` is exactly the case a reader must not miss.
-            sev_text = f"{sev_in} -> {sev}" if sev_in and sev_in != sev else str(sev)
-            lines.append(f"**#{it['id']}** ({sev_text}) {loc} - {it['claim']}")
+            lines.append(f"**#{it['id']}** ({severity_text(it)}) {loc} - {it['claim']}")
             detail = (it.get("detail") or "").strip()
             if detail:
                 lines.append(""); lines.append(detail)
-            reason = (it.get("verdict_reason") or "").strip()
-            if reason:
-                lines.append(""); lines.append(f"_{verdict.capitalize()}: {reason}_")
+            block = verdict_reason_block(it)
+            if block:
+                lines.append(""); lines.append(block)
             lines.append("")
         section = "\n".join(lines).rstrip()
         body = (body + "\n\n" + section).strip() if body else section

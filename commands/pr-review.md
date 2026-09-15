@@ -166,6 +166,10 @@ Tell it explicitly:
 - Analyze the changes in the existing worktree at `$WT`. **Do not create a worktree of your own.**
 - Raise the per-subagent issue cap to 16 (from 8) and the final-report cap to 30 (from 15).
 - Present the final report as a numbered list.
+- Write each finding to the contract in "How every finding is written" below - a one-sentence
+  `claim` in observable terms, then `**What happens:**` / `**Why it matters:**` / `**Fix:**`.
+  Quote the section into the arguments rather than referring to it; the skill cannot read this
+  file. Findings that arrive in that shape need no rewriting in S2.
 
 **Verify the right one ran before continuing.** A `max` review spawns well more than 5 subagents and
 posts nothing. If you see exactly 5 parallel Sonnet reviewers, or anything gets posted to the PR at
@@ -204,6 +208,64 @@ value as `severity_in` and say in the S6 report that you normalized.
 downstream number shifts. The validator (S6 step 2) enforces this and will reject the ledger
 otherwise - along with duplicate ids, non-contiguous ids, and wrong severity ordering.
 
+## How every finding is written
+
+The contract for the text that reaches the PR author - `claim`, `detail`, and the refuter's
+`REASON`. It applies from S2 through S6, whatever stage produces the words.
+
+Write for a competent engineer who does not know this subsystem. The generator's default voice
+states a conclusion and leaves the reader to reconstruct the path to it; the author usually cannot,
+and a finding they cannot follow is a finding they cannot act on.
+
+An explanatory voice must not cost precision. The same text is read by an AI asked to fix the
+finding, so the actionable content sits in fixed slots that prose can never displace.
+
+### `claim` - one sentence, in observable terms
+
+What goes wrong as a reader would experience it, not the mechanism that causes it. Present tense,
+and specific enough to be false if the finding is wrong.
+
+- Yes: `The Comments tab shows a stale scroll position when you switch back to it after navigating.`
+- No: `useBcvSyncScroll does not gate on visibility.` - that is the mechanism; it belongs in
+  `What happens:`.
+- No: `Improve the scroll sync's handling of hidden views.` - not falsifiable, and not a defect.
+
+This sentence leads every inline comment and fills the triage table, so it has to stand alone.
+
+### `detail` - three labelled slots, always in this order
+
+- `**What happens:**` (required) - the causal chain one step at a time, each step carrying the
+  `file:line` where it happens, naming the real symbols. The mechanism goes here.
+- `**Why it matters:**` (required unless the severity is self-evident from the claim) - the
+  consequence, how often it is hit, and who hits it. A pressure-test's gating reason belongs here
+  too: "only reachable when `enableX` is set, which the shipped config does not do" is exactly what
+  makes a low severity read as sensible rather than arbitrary.
+- `**Fix:**` (always required, always last) - the concrete change at this site, imperative,
+  naming the file and symbol to change.
+
+Cap `detail` at about 120 words. If it needs more, you probably have two findings - go back to S2.
+
+### Four rules that keep the fix actionable
+
+1. **Never hedge the `Fix:` line.** Not "consider whether", not "you might want to". If two fixes
+   are viable, name both and say which this review recommends and why.
+2. **Explanatory never means vague.** `useBcvSyncScroll`, not "the hook". `z-index.ts:14`, not
+   "the constants file". Every symbol, path and value exactly as it appears in the code - a fixer
+   working from this text should never have to guess which site is meant.
+3. **Explain the mechanism in THIS code, not the concept in general.** A paragraph on how React
+   effects work is not teaching; walking the specific path through this diff is.
+4. **Keep the review process out of the prose.** The author never saw this pipeline: no verdicts,
+   no refuters, no "the generator flagged", no severity revisions, no item numbers beyond the `#n`
+   cross-references `payload` adds itself. The comment header already carries a plain-English
+   status - the prose neither repeats nor explains it.
+
+### Worked example
+
+```jsonc
+"claim": "The Comments tab shows a stale scroll position when you switch back to it after navigating.",
+"detail": "**What happens:** rc-dock keeps an inactive tab mounted but hidden with `display: none`. The effect at `use-bcv-sync-scroll.hook.ts:44` still fires on every `scrRef` change, but a display-none iframe has no layout, so the `scrollIntoView` at line 51 reads zero and silently no-ops. The request is lost rather than deferred.\n\n**Why it matters:** in Simple mode only one tab per stack is visible, so this is the common path, not an edge case.\n\n**Fix:** wrap the scroll in `useRunWhenVisible` (`lib/platform-bible-react/src/hooks/use-run-when-visible.hook.ts`) so repeats collapse into one catch-up that runs on activation."
+```
+
 ## S3. Dedupe against what is already on the PR
 
 Skip entirely for a `.` target, or if the PR has no comments.
@@ -228,9 +290,10 @@ renumbering.
 
 ## S5. Pressure-test
 
-Dispatch **one independent refuter subagent per item**, in parallel batches. Give each: the item's
-claim, its `detail` and `evidence`, its `file:line`, the worktree path `$WT`, `MERGE_BASE`, and the
-relevant CLAUDE.md paths.
+Dispatch **one independent refuter subagent per item**, in parallel batches, passing the Agent
+tool's `model: "sonnet"` override on each call (see Model below). Give each: the item's claim, its
+`detail` and `evidence`, its `file:line`, the worktree path `$WT`, `MERGE_BASE`, and the relevant
+CLAUDE.md paths.
 
 Refuters running in parallel share ONE worktree, so tell each: write probe files to your own temp
 directory, never to `$WT`; revert any tracked file you mutate for a mutation test; and **leave
@@ -290,6 +353,12 @@ ON_CHANGED_LINE: true|false
 REASON: <3-6 sentences with file:line evidence>
 ```
 
+Write `REASON` for the PR author, not for the pipeline. On a `CONFIRMED` verdict it publishes
+verbatim under **How this was checked**, and on `INCONCLUSIVE` under **What could not be checked**,
+so say what you checked and what you found, keep the `file:line` evidence, and leave out the review
+vocabulary. A `DOWNGRADED` reason does not publish at all - see "Recording the result" below for
+where it goes instead.
+
 **Do not refute on grounds that are about posting rather than truth.** Whether the anchor sits on a
 changed line is recorded in `on_changed_line` and enforced by `payload` on its own; it is never a
 reason for a verdict. Neither is "a linter or CI would catch it" - that speaks to who reports the
@@ -297,15 +366,16 @@ problem, not whether it exists.
 
 ### Model
 
-Refuters run on the **same tier as the generator by default**. A refuter overturns a finding the
-generator raised, and a weaker model's characteristic failure is exactly the one that matters here:
-unable to trace a path, it reads that as absence of a path.
+Refuters run on **Sonnet by default**, regardless of what tier the generator ran on. A refuter
+overturns a finding the generator raised, and a weaker model's characteristic failure is exactly
+the one that matters here: unable to trace a path, it reads that as absence of a path - so do not
+drop below Sonnet as the default.
 
-A cheaper model is allowed only for an item that is **single-file, single-site, and settled by
-reading that file** - a localization string, a TSDoc omission, a comment that misdescribes adjacent
-code, a catalog entry. Such a refuter may not return `REFUTED` on a reachability argument: any
-verdict resting on "nothing anywhere in the repo produces this" requires a whole-repo search, so
-escalate it to the default tier instead. Say in the report which items ran on a cheaper model.
+An even cheaper model is allowed only for an item that is **single-file, single-site, and settled
+by reading that file** - a localization string, a TSDoc omission, a comment that misdescribes
+adjacent code, a catalog entry. Such a refuter may not return `REFUTED` on a reachability argument:
+any verdict resting on "nothing anywhere in the repo produces this" requires a whole-repo search, so
+escalate it to Sonnet instead. Say in the report which items ran on a cheaper model.
 
 ### Recording the result
 
@@ -323,6 +393,15 @@ catch what this step should not produce.
 
 Any item left `INCONCLUSIVE` after one escalation must be **named to the user in the S6 report**,
 with what could not be checked. Do not close out the round silently holding an unanswered finding.
+
+**Fold each downgrade's reasoning into the finding itself.** Neither `severity_in -> severity` nor
+"why this was lowered" publishes - both describe a revision the author never saw, and `payload`
+emits neither. So for every `DOWNGRADED` item, read its `verdict_reason` and ask whether it changes
+what the author needs to know. When it does - the path is gated, unreachable, pre-existing, or
+intentional - rewrite it into that item's `Why it matters:` slot in the author's terms, so the
+severity it posts at reads as sensible rather than arbitrary. When it is only bookkeeping ("less
+severe than first rated"), drop it. Either way leave `verdict_reason` itself untouched: it is the
+refuter's record, and the S6 terminal report still prints it.
 
 Then apply any severity revisions and **re-sort and renumber** so the 1..N ordering still holds.
 
@@ -364,8 +443,8 @@ automatically.
                                                // true fails the WHOLE review, not just its comment.
                                                // Missing/null is treated as "not excluded", so
                                                // fill it in for every item.
-         "claim": "one sentence",
-         "detail": "full text for the author",
+         "claim": "one sentence in observable terms - see How every finding is written",
+         "detail": "**What happens:** / **Why it matters:** / **Fix:** - same section",
          "evidence": ["src/bar.ts:88"],
          "verdict": "CONFIRMED|DOWNGRADED|REFUTED|INCONCLUSIVE",  // no placeholders; see S5
          "verdict_reason": "the S5 refuter's reasoning, whichever verdict it reached",
@@ -416,12 +495,17 @@ automatically.
    - the triage table: id, severity, cluster, `file:line`, one-line claim. Where the refuter
      changed the severity, show it as `<severity_in> -> <severity>`, never just the survivor - a
      table that prints only the revised value hides that a `high` was downgraded on its way out.
+     This arrow is **terminal-only**: it is how you judge whether the pressure-test is calibrated.
+     `payload` publishes the final severity alone, so never carry the arrow into `claim`, `detail`,
+     or the review body.
    - a `Verdict summary` line: counts of CONFIRMED / DOWNGRADED / REFUTED / INCONCLUSIVE, and the
      refutation rate as `REFUTED / total`. State it plainly; it is the number that tells you
      whether the pressure-test is calibrated.
-   - a `Carried in the review body` section: every DOWNGRADED item - id, `<severity_in> -> <severity>`,
-     claim, and the refuter's reason. These post automatically with `all`; they are not dropped and
-     need no `--include-refuted`.
+   - a `Downgraded` section: every DOWNGRADED item - id, `<severity_in> -> <severity>`, claim, and
+     the refuter's reason. These post inline with `all` like any other anchorable finding; they are
+     not dropped and need no `--include-refuted`. Say for each whether you folded its reason into
+     the item's `Why it matters:` text or judged it bookkeeping and dropped it, since neither the
+     arrow nor the reason reaches the author.
    - an `Unresolved` section: every INCONCLUSIVE item, with what the refuter could not check and
      what would settle it. **Never omit this section when it is non-empty**, and say plainly that
      these need a human judgement.

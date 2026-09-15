@@ -82,9 +82,14 @@ print(r)
 
    `DOWNGRADED` and `INCONCLUSIVE` need no override and must not be given one - but not because
    they are held back: **placement follows anchoring, not verdict.** Every selected finding that
-   can be anchored posts inline whatever verdict it reached, carrying `<severity_in> -> <severity>`,
-   its status (`confirmed` / `downgraded on review` / `unresolved`) and the refuter's reasoning in
-   its own header. Only a finding that cannot anchor falls back to the body.
+   can be anchored posts inline whatever verdict it reached, carrying the severity it settled at
+   and a plain-English status in its own header - `checked and confirmed` or `needs a human call`.
+   Only a finding that cannot anchor falls back to the body.
+
+   `DOWNGRADED` deliberately renders the same as `CONFIRMED`. With the severity revision no longer
+   published, a downgraded finding IS a real finding at the severity shown, and whatever its
+   downgrade reasoning held that the author needs was folded into its `Why it matters:` text back
+   in `/pr-review` S5.
 
    Anchoring is a mechanical property of the diff; the verdict is a judgement about the finding.
    Routing on the verdict buries most of a review in one wall of body text, where a reader cannot
@@ -177,10 +182,19 @@ share a `(file, line)` and cross-references cluster siblings at other sites.
 
 Write the review body to `$SCRATCH/pr-review/pr$NUMBER/body.md`. The body is **bare
 framing plus the authorized items only**. No side observations, no verification summary, no
-findings the user did not select - those go back to chat, never to the PR. **Do not append the
-attribution string yourself** - `payload` adds `_(AI-assisted, with my guidance)_` to the body
-exactly once and only there, never to an inline thread; the body file you write should not contain
-it at all.
+findings the user did not select - those go back to chat, never to the PR.
+
+The framing is two or three sentences, written for someone opening the PR cold: what was reviewed,
+how many findings there are, and how to read the labels each comment carries - that the severity
+shown is the severity the reviewer settled on, that `checked and confirmed` means the finding was
+verified against the code, and that `needs a human call` means it could not be settled either way
+and the author has to judge it. Do not explain the pipeline that produced any of this: no stages,
+no refuters, no severity revisions. A reader should be able to act on the review without knowing
+how it was made.
+
+**Do not append the attribution string yourself** - `payload` adds
+`_(AI-assisted, with my guidance)_` to the body exactly once and only there, never to an
+inline thread; the body file you write should not contain it at all.
 
 ```bash
 python3 ~/.claude/pr-review/pr-review-anchor.py payload <ledger> \

@@ -53,6 +53,35 @@ is still being iterated on and the reasoning is not recoverable from the diffs.
 - **Re-anchoring runs unconditionally**, not only when the head moved - otherwise `anchor_status`
   is never set on the unchanged-head path and the dead-anchor filter cannot fire.
 
+## Voice of a published review
+
+Readers were finding the reviews hard to follow, in two separate ways: the finding prose assumed
+the subsystem, and the scaffolding around it was pipeline vocabulary nobody outside this tool has a
+glossary for.
+
+- **Findings are drafted into fixed labelled slots**, not free prose: a one-sentence `claim` in
+  observable terms, then `**What happens:**` / `**Why it matters:**` / `**Fix:**`. A teaching voice
+  was the goal, but the same text is read by an AI asked to fix the finding, and unstructured
+  explanation is exactly what buries the actionable sentence. Slots let the prose grow without the
+  fix ever moving. *If wrong:* the contract is one section of `pr-review.md`; deleting it reverts
+  to whatever the generator emits.
+- **Labels say what they mean.** `confirmed` -> `checked and confirmed`, `unresolved` -> `needs a
+  human call`, `Verification:` -> `How this was checked:`. The pipeline's stage names were never
+  information the PR author could use.
+- **The severity revision does not publish.** `severity_in -> severity` is how you judge whether
+  the pressure-test is calibrated, so the S6 triage table still prints the arrow - but a PR author
+  reading one comment has no use for the revision history of a number they never saw. `severity_in`
+  stays in the ledger; `severity_text()` publishes the final value alone.
+- **A downgrade's reasoning is folded into the finding, not appended as a footer.** "Why this was
+  lowered" describes an internal revision; "only reachable when `enableX` is set, which the shipped
+  config does not do" is the same fact written as something the author can use, and it belongs in
+  `Why it matters:`. So `VERDICT_REASON_LABEL` has no `DOWNGRADED` entry and the footer renders
+  nothing, while `verdict_reason` stays intact in the ledger for the terminal report. CONFIRMED and
+  INCONCLUSIVE keep their footers: those reason about the code, not about the review.
+- **With no arrow and no footer, DOWNGRADED renders identically to CONFIRMED** - which is correct,
+  since it *is* a real finding at the severity shown. A distinguishing label would only describe a
+  revision the author never saw.
+
 ## Calibrating the pressure-test
 
 Measured over the first three real runs (PRs #2724/#2729/#2730, 141 items): a 73% refutation rate,
@@ -111,8 +140,9 @@ author removed exactly that line three days later). Rulings taken in response:
   reader cannot see which findings land in the file they are already reading - the whole reason
   inline comments exist. Anchoring is a mechanical property of the diff; the verdict is a judgement
   about the finding. They are now reported separately: every anchorable finding posts inline
-  carrying `<severity_in> -> <severity>` plus its status and the refuter's reasoning, and only an
-  unanchorable one falls back to the body. `--body-only-verdicts` restores the old routing, opt-in.
+  carrying its status and the refuter's reasoning, and only an unanchorable one falls back to the
+  body. (The `<severity_in> -> <severity>` this originally published, and the downgrade reasoning,
+  were later dropped from the published surface - see "Voice of a published review".) `--body-only-verdicts` restores the old routing, opt-in.
   The old rule also had no override at all, so the operator's only way out was to hand-build
   `payload.json` and bypass the tool - a worse outcome than either behaviour.
 - **`reanchor` derives `on_changed_line`; it no longer trusts S5.** Refuters got it wrong in both

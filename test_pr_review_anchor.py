@@ -481,12 +481,12 @@ class TestPayload(unittest.TestCase):
     def test_cluster_spanning_two_sites_cross_references_the_other(self):
         p = anchor.build_payload(self.led(), ["all"], "intro")
         b = next(c for c in p["comments"] if c["path"] == "b.ts")["body"]
-        self.assertIn("Same fix as #1", b)
+        self.assertIn("Similar fix as #1", b)
 
     def test_cluster_on_a_single_site_gets_no_cross_reference(self):
         led = {"items": [item(1, cluster="C2")], "clusters": [{"id": "C2", "item_ids": [1]}]}
         p = anchor.build_payload(led, ["all"], "intro")
-        self.assertNotIn("Same fix as", p["comments"][0]["body"])
+        self.assertNotIn("Similar fix as", p["comments"][0]["body"])
 
     def test_attribution_appears_once_in_body_and_never_in_a_comment(self):
         p = anchor.build_payload(self.led(), ["all"], "intro")
@@ -546,9 +546,9 @@ class TestPayload(unittest.TestCase):
         ], "clusters": [{"id": "C1", "item_ids": [1, 2, 3]}]}
         p = anchor.build_payload(led, ["all"], "intro")
         bodies = {c["path"]: c["body"] for c in p["comments"]}
-        self.assertIn("Same fix as #2, #3.", bodies["a.ts"])
-        self.assertIn("Same fix as #1, #3.", bodies["b.ts"])
-        self.assertIn("Same fix as #1, #2.", bodies["c.ts"])
+        self.assertIn("Similar fix as #2, #3.", bodies["a.ts"])
+        self.assertIn("Similar fix as #1, #3.", bodies["b.ts"])
+        self.assertIn("Similar fix as #1, #2.", bodies["c.ts"])
 
     # --- Fix round 1 ---
 
@@ -704,7 +704,7 @@ class TestDemotedFindings(unittest.TestCase):
         self.assertEqual(p["comments"], [])
         self.assertIn("alpha", p["body"])
         self.assertIn("#1", p["body"])
-        self.assertIn("Findings not anchored to a changed line", p["body"])
+        self.assertIn("Findings that could not be attached to a line in this diff", p["body"])
         self.assertIn("anchor excerpt no longer present", p["body"])
 
     def test_on_changed_line_false_item_is_demoted_to_body_not_comments(self):
@@ -713,7 +713,7 @@ class TestDemotedFindings(unittest.TestCase):
             p = anchor.build_payload(led, ["1"], "intro")
         self.assertEqual(p["comments"], [])
         self.assertIn("beta", p["body"])
-        self.assertIn("Findings not anchored to a changed line", p["body"])
+        self.assertIn("Findings that could not be attached to a line in this diff", p["body"])
 
     def test_demoted_section_includes_id_severity_location_claim_and_detail(self):
         led = {"items": [item(1, sev="high", f="a.ts", line=42, claim="alpha claim",
@@ -743,7 +743,7 @@ class TestDemotedFindings(unittest.TestCase):
             p = anchor.build_payload(led, ["1"], "intro", include_refuted=["1"])
         self.assertEqual(p["comments"], [])
         self.assertIn("alpha", p["body"])
-        self.assertIn("Findings not anchored to a changed line", p["body"])
+        self.assertIn("Findings that could not be attached to a line in this diff", p["body"])
 
     def test_attribution_is_last_after_demoted_section(self):
         led = {"items": [item(1, anchor_status="dead")], "clusters": []}
@@ -752,7 +752,7 @@ class TestDemotedFindings(unittest.TestCase):
         body = p["body"]
         self.assertEqual(body.count(anchor.ATTRIBUTION), 1)
         self.assertTrue(body.rstrip().endswith(anchor.ATTRIBUTION))
-        self.assertLess(body.index("Findings not anchored"), body.index(anchor.ATTRIBUTION))
+        self.assertLess(body.index("Findings that could not be attached"), body.index(anchor.ATTRIBUTION))
 
     def test_attribution_stays_last_even_if_intro_already_ends_with_it(self):
         led = {"items": [item(1, anchor_status="dead")], "clusters": []}
@@ -980,7 +980,7 @@ class TestPayloadCli(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual(payload["comments"], [])
         self.assertIn("alpha", payload["body"])
-        self.assertIn("Findings not anchored to a changed line", payload["body"])
+        self.assertIn("Findings that could not be attached to a line in this diff", payload["body"])
 
 
 class TestRenderPreview(unittest.TestCase):
@@ -1036,7 +1036,7 @@ class TestRenderPreview(unittest.TestCase):
             payload = anchor.build_payload(led, ["1"], "intro")
         out = anchor.render_preview(payload)
         self.assertIn(payload["body"], out)
-        self.assertIn("Findings not anchored to a changed line", out)
+        self.assertIn("Findings that could not be attached to a line in this diff", out)
         self.assertIn("alpha claim", out)
         self.assertIn("alpha detail " + "z" * 500, out)
 
@@ -1187,19 +1187,49 @@ class TestBodyOnlyVerdicts(unittest.TestCase):
         p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro")
         self.assertIn(anchor.VERDICT_LABEL["DOWNGRADED"], self._comments(p))
 
-    def test_an_inline_comment_carries_the_refuters_reason(self):
+    def test_an_inline_comment_carries_a_confirmed_finding_s_reason(self):
+        """A CONFIRMED verdict's reasoning is evidence for the claim, so it
+        publishes - under a label a PR author can read without a glossary."""
         p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro")
-        self.assertIn("unreachable in production", self._comments(p))
+        self.assertIn("_How this was checked: r_", self._comments(p))
 
-    def test_inline_shows_the_generators_severity_when_the_refuter_changed_it(self):
+    def test_a_downgrade_publishes_no_reason_footer(self):
+        """"Why this was lowered" explains an internal revision the author
+        never saw. Anything in it they DO need is folded into the finding's own
+        `Why it matters:` slot at drafting time, not appended as bookkeeping."""
+        p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro")
+        item_2 = [c for c in p["comments"] if c["path"] == "b.ts"][0]["body"]
+        self.assertIn("smaller one", item_2)
+        self.assertNotIn("unreachable in production", item_2)
+        self.assertNotIn("Verdict:", item_2)
+
+    def test_inline_shows_only_the_final_severity_when_the_refuter_changed_it(self):
         led = self._led("DOWNGRADED")
         led["items"][1]["severity_in"] = "high"
         p = anchor.build_payload(led, ["all"], "intro")
-        self.assertIn("high -> low", self._comments(p))
+        item_2 = [c for c in p["comments"] if c["path"] == "b.ts"][0]["body"]
+        self.assertNotIn("high", item_2)
+        self.assertIn("low", item_2)
+
+    def test_no_published_surface_carries_a_severity_arrow(self):
+        """The arrow is the S6 triage table's job. One assertion over the whole
+        payload, so a new render site cannot reintroduce it unnoticed."""
+        led = self._led("DOWNGRADED")
+        led["items"][1]["severity_in"] = "high"
+        led["items"][1]["on_changed_line"] = False
+        p = anchor.build_payload(led, ["all"], "intro")
+        self.assertNotIn(" -> ", p["body"] + self._comments(p))
 
     def test_inline_shows_one_severity_when_the_refuter_left_it_alone(self):
         p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro")
         self.assertNotIn("low -> low", self._comments(p))
+
+    def test_an_inconclusive_finding_still_says_what_could_not_be_checked(self):
+        """Unlike a downgrade, this reasoning is about the code: it tells the
+        author what they have to judge themselves."""
+        p = anchor.build_payload(self._led("INCONCLUSIVE"), ["all"], "intro")
+        self.assertIn("_What could not be checked: unreachable in production_",
+                      self._comments(p))
 
     def test_an_off_diff_downgrade_falls_back_to_the_body(self):
         """Anchoring is the only thing that moves a finding out of comments[],
@@ -1207,16 +1237,33 @@ class TestBodyOnlyVerdicts(unittest.TestCase):
         led = self._led("DOWNGRADED")
         led["items"][1]["on_changed_line"] = False
         p = anchor.build_payload(led, ["all"], "intro")
-        _, _, after = p["body"].partition("## Findings not anchored")
+        _, _, after = p["body"].partition("## Findings that could not be attached")
         self.assertIn("smaller one", after)
         self.assertNotIn("smaller one", self._comments(p))
 
-    def test_an_unanchored_body_finding_still_carries_its_verdict_and_reason(self):
+    def test_an_unanchored_body_finding_still_carries_its_verdict_label(self):
         led = self._led("DOWNGRADED")
         led["items"][1]["on_changed_line"] = False
         p = anchor.build_payload(led, ["all"], "intro")
         self.assertIn(anchor.VERDICT_LABEL["DOWNGRADED"], p["body"])
-        self.assertIn("unreachable in production", p["body"])
+
+    def test_the_body_drops_a_downgrade_s_reason_the_same_way_inline_does(self):
+        """The demoted section renders the same finding through a second code
+        path; the two must agree or a finding's wording changes with its
+        anchoring."""
+        led = self._led("DOWNGRADED")
+        led["items"][1]["on_changed_line"] = False
+        p = anchor.build_payload(led, ["all"], "intro")
+        self.assertIn("smaller one", p["body"])
+        self.assertNotIn("unreachable in production", p["body"])
+
+    def test_the_opt_in_body_section_drops_a_downgrade_s_reason_too(self):
+        """Third render path for the same finding - --body-only-verdicts."""
+        led = self._led("DOWNGRADED")
+        p = anchor.build_payload(led, ["all"], "intro",
+                                 body_only_verdicts=["DOWNGRADED"])
+        self.assertIn("smaller one", p["body"])
+        self.assertNotIn("unreachable in production", p["body"])
 
     def test_body_only_verdicts_opt_in_restores_verdict_routing(self):
         p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro",
