@@ -116,10 +116,38 @@ author removed exactly that line three days later). Rulings taken in response:
   because a refuter returned a well-formed verdict behind a prose preamble and the orchestrator
   never recorded it. `payload`'s exclusion is REFUTED-only, so that item would have posted as
   confirmed had it been selected. The gap was in `validate`, which never inspected `verdict` at all.
-- **Refuters default to the generator's model tier.** A weaker refuter's characteristic failure -
-  cannot trace a path, reads that as absence of a path - is precisely the bias being corrected. A
-  cheaper model stays allowed for single-file, single-site items, but may not return REFUTED on a
-  reachability argument, since that requires a whole-repo search.
+- **Refuters default to Sonnet, whatever tier the generator ran on.** A weaker refuter's
+  characteristic failure - cannot trace a path, reads that as absence of a path - is precisely the
+  bias being corrected, so Sonnet is the floor. It is also the ceiling by default: the generator
+  runs at `max`, and inheriting that tier across one agent per finding made the pressure-test cost
+  more than everything else in the pipeline combined. A cheaper model stays allowed for a single
+  unclustered item that is single-file and single-site, but may not return REFUTED on a reachability
+  argument, since that requires a whole-repo search. (This supersedes an earlier ruling that
+  refuters inherit the generator's tier; the prompt was changed and this entry was not, which left
+  the two disagreeing about the most expensive knob in the pipeline.)
+
+## Cost of the pressure-test
+
+- **One refuter per cluster, one per unclustered item** - not one per item. A refuter pays the same
+  fixed cost (its own context, CLAUDE.md and the rules files, the source it reads) whether it
+  answers one claim or six. Measured on the two surviving ledgers for paratext-10-studio PR #190:
+  68 items across 13 distinct files, one file carrying 14 findings, and 9 clusters covering 50 of
+  the 68; the second run, 53 items across 18 files with 13 clusters covering 41. So that constant
+  was being paid 68 times to examine 13 files, and cluster grouping takes the agent count to 27 and
+  25 respectively. *If wrong:* revert one paragraph of S5; the ledger schema does not change.
+- **Grouped by cluster and by nothing else** - explicitly not by file, and not by batch size. The
+  saving from batching unrelated items is only the fixed overhead, and it is bought with the two
+  failure modes a shared context introduces: one verdict priming the next, and attention thinning
+  down a long list. Cluster siblings share a premise, so correlated verdicts there are correlation
+  that should exist. It also puts weight on S4 being honest, which is why S4 now says so.
+- **No cap on cluster size.** The largest real cluster was 10. A cap would split exactly the groups
+  where sharing a context pays best, and the dispatch line in the S6 report exists so the cost and
+  the largest group stay visible if that turns out to be the wrong call.
+- **A cluster refuter must answer each site separately, and may reach different verdicts.** The
+  dominant defect this whole review exists to catch is a fix landing at one of the two sites that
+  needed it. A premise holding at the first site says nothing about whether the second was changed,
+  so a reply is checked against the dispatched ids and a short reply counts as unanswered, not as
+  agreement.
 
 ## Process
 

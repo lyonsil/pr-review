@@ -288,12 +288,31 @@ Group items whose fix is the same or near-identical into `C1..Cn`. Give each a t
 one-line `shared_fix`. Items keep their global ids; a cluster is a view over items, never a
 renumbering.
 
+**Cluster carefully - S5 dispatches one refuter per cluster.** A cluster is no longer only a way to
+present findings: it asserts that its items rest on the same premise, and the whole cluster is
+verified by one agent in one context. Two items that merely look alike, or land in the same file
+for unrelated reasons, are NOT a cluster - grouping them makes one agent's judgement on the first
+colour its answer on the rest. If you cannot write a `shared_fix` that is literally the same change
+at each site, leave the items unclustered and let them get their own refuters.
+
 ## S5. Pressure-test
 
-Dispatch **one independent refuter subagent per item**, in parallel batches, passing the Agent
-tool's `model: "sonnet"` override on each call (see Model below). Give each: the item's claim, its
-`detail` and `evidence`, its `file:line`, the worktree path `$WT`, `MERGE_BASE`, and the relevant
-CLAUDE.md paths.
+Dispatch **one refuter subagent per cluster, and one per unclustered item**, in parallel batches,
+passing the Agent tool's `model: "sonnet"` override on each call (see Model below). Give each: every
+item it owns (id, claim, `detail`, `evidence`, `file:line`), the cluster's `shared_fix` where there
+is one, the worktree path `$WT`, `MERGE_BASE`, and the relevant CLAUDE.md paths.
+
+Grouping by cluster, not by item, is what keeps this stage affordable. A refuter pays the same fixed
+cost - its own context, the repo's CLAUDE.md and rules, the files it reads - whether it answers one
+claim or six, and on a real 68-item review that constant was being paid 68 times to examine 13
+files. Cluster siblings share a premise and usually share the code that settles it, so verifying the
+second site costs a fraction of the first.
+
+**Group by cluster and by nothing else.** Do not batch unrelated items to make the agent count
+smaller: that pays the full cost of a shared context - one verdict priming the next, attention
+thinning down a long list - to save only the fixed overhead. Where the S4 clustering is honest, the
+correlation a shared context introduces is correlation that *should* exist; where it is not, this
+stage is where that shows up.
 
 Refuters running in parallel share ONE worktree, so tell each: write probe files to your own temp
 directory, never to `$WT`; revert any tracked file you mutate for a mutation test; and **leave
@@ -318,8 +337,16 @@ prompt**: on `linked`, say that `npm run typecheck`, `npm run lint` and `npm tes
 
 A refuter's task is to reach the truth, not to win. Instruct each one:
 
-> Establish whether this finding is true, and how much it matters. You are the last check before it
-> reaches the PR author, so an unexamined "I could not tell" costs as much as a wrong answer.
+> Establish whether each of these findings is true, and how much it matters. You are the last check
+> before they reach the PR author, so an unexamined "I could not tell" costs as much as a wrong
+> answer.
+>
+> **Answer every finding separately, and expect them to differ.** The findings you were given share
+> a fix, which means they share a premise - not a verdict. The single most common defect this review
+> exists to catch is a fix that landed at one of the two sites that needed it, so a premise that
+> holds at the first site tells you nothing about whether the second site was actually changed. Go
+> to each site and check it. If you find yourself about to answer the fourth finding from what you
+> learned on the first, you have stopped verifying.
 >
 > **Verify before you judge.** Work the ladder as far as the claim needs: read the anchored code
 > and everything it calls; `git diff <MERGE_BASE> HEAD -- <file>` to see what this PR actually
@@ -344,9 +371,12 @@ A refuter's task is to reach the truth, not to win. Instruct each one:
 > Give `file:line` evidence for the verdict either way. You may revise the severity; give your
 > reason. Also report whether the anchor sits on a line this PR changed.
 
-Reply format, exactly and with nothing before it:
+Reply format, exactly and with nothing before it - **one block per finding, in the order they were
+given, with a blank line between blocks**. A block for every id you were given, even where several
+reach the same verdict:
 
 ```
+ITEM: <id>
 VERDICT: CONFIRMED|DOWNGRADED|REFUTED|INCONCLUSIVE
 SEVERITY: blocker|high|medium|low
 ON_CHANGED_LINE: true|false
@@ -371,11 +401,13 @@ overturns a finding the generator raised, and a weaker model's characteristic fa
 the one that matters here: unable to trace a path, it reads that as absence of a path - so do not
 drop below Sonnet as the default.
 
-An even cheaper model is allowed only for an item that is **single-file, single-site, and settled
-by reading that file** - a localization string, a TSDoc omission, a comment that misdescribes
-adjacent code, a catalog entry. Such a refuter may not return `REFUTED` on a reachability argument:
-any verdict resting on "nothing anywhere in the repo produces this" requires a whole-repo search, so
-escalate it to Sonnet instead. Say in the report which items ran on a cheaper model.
+An even cheaper model is allowed only for a **single unclustered item that is single-file,
+single-site, and settled by reading that file** - a localization string, a TSDoc omission, a comment
+that misdescribes adjacent code, a catalog entry. It is never allowed for a cluster: a cluster spans
+sites by definition, so "settled by reading one file" cannot be true of it. Such a refuter may not
+return `REFUTED` on a reachability argument either: any verdict resting on "nothing anywhere in the
+repo produces this" requires a whole-repo search, so escalate it to Sonnet instead. Say in the
+report which items ran on a cheaper model.
 
 ### Recording the result
 
@@ -384,9 +416,12 @@ as `severity_in` and the refuter's as `severity` - **never overwrite `severity_i
 downgrades and refutes in one step otherwise leaves a triage table where every dropped finding reads
 as low-severity noise, hiding that a `high` was dropped.
 
-**Every item must end S5 with one of the four verdicts.** A refuter that returns prose without a
-parseable `VERDICT:` line has not answered - re-dispatch it once with the format restated, and if it
-still will not answer, record `INCONCLUSIVE` with that as the reason. Never leave a placeholder:
+**Every item must end S5 with one of the four verdicts.** Check each reply against the ids you
+dispatched: a cluster refuter that returns four blocks for a six-item cluster has silently dropped
+two findings, and an item nobody answered is indistinguishable from one nobody raised. A refuter
+that returns prose without a parseable `VERDICT:` line, or that omits ids, has not answered -
+re-dispatch it once with the format and the missing ids restated, and if it still will not answer,
+record `INCONCLUSIVE` for each unanswered item with that as the reason. Never leave a placeholder:
 `payload`'s exclusion is `REFUTED`-only, so a finding left in any other state posts to the PR as
 though it had been confirmed. `validate` rejects the ledger for this, but do not rely on it to
 catch what this step should not produce.
@@ -514,6 +549,10 @@ automatically.
    - a `Previously reported` section: each id with a link to the existing comment
    - the count of items not on a changed line (body-only, cannot be posted inline)
    - which items, if any, ran their refuter on a cheaper model (S5)
+   - a `Pressure-test dispatch` line: how many refuter agents ran for how many items, and the
+     largest cluster any one of them owned. This is the stage's cost driver, and the cluster size
+     is where a shared context starts thinning - record it so the grouping stays checkable against
+     what it is buying.
    - a `Files` section giving the absolute paths, so they can be opened directly:
      ```
      Ledger:   <SCRATCH>/pr-review/pr<n>/ledger.json
