@@ -8,7 +8,8 @@ anchor = importlib.util.module_from_spec(spec); spec.loader.exec_module(anchor)
 def item(i, sev="high", f="a.ts", line=10, cluster=None, **kw):
     d = {"id": i, "severity": sev, "severity_in": sev, "file": f, "line": line,
          "line_end": line, "anchor_excerpt": "x", "claim": "c", "detail": "d",
-         "cluster": cluster, "verdict": "CONFIRMED", "verdict_reason": "r"}
+         "cluster": cluster, "verdict": "CONFIRMED", "verdict_reason": "r",
+         "fix_verdict": "SOUND", "fix_reason": "checked at a.ts:10"}
     d.update(kw); return d
 
 
@@ -1150,6 +1151,121 @@ class TestTerminalVerdictRequired(unittest.TestCase):
     def test_unknown_severity_in_is_rejected(self):
         led = {"items": [item(1, severity_in="critical")], "clusters": []}
         self.assertTrue(any("severity_in" in e for e in anchor.validate(led)))
+
+
+class TestFixVerdictRequired(unittest.TestCase):
+    """The `**Fix:**` slot posts to the author verbatim, so it carries its own
+    verified answer. A claim is verified by observation; a fix is a proposal
+    about code that does not exist yet, and nothing upstream of this checked
+    it - five of twenty fix lines on paranext-core #2821 were unworkable as
+    written while every claim under them was sound."""
+
+    def test_missing_fix_verdict_is_rejected(self):
+        led = {"items": [item(1)], "clusters": []}
+        del led["items"][0]["fix_verdict"]
+        errs = anchor.validate(led)
+        self.assertTrue(any("fix_verdict" in e for e in errs), errs)
+
+    def test_unknown_fix_verdict_is_rejected(self):
+        led = {"items": [item(1, fix_verdict="PENDING")], "clusters": []}
+        errs = anchor.validate(led)
+        self.assertTrue(any("fix_verdict" in e and "not one of" in e for e in errs), errs)
+
+    def test_each_fix_verdict_is_accepted(self):
+        for v in anchor.FIX_VERDICTS:
+            led = {"items": [item(1, fix_verdict=v)], "clusters": []}
+            self.assertEqual(anchor.validate(led), [], f"{v} should be legal")
+
+    def test_blank_fix_reason_is_rejected(self):
+        led = {"items": [item(1, fix_reason="   ")], "clusters": []}
+        errs = anchor.validate(led)
+        self.assertTrue(any("fix_reason" in e for e in errs), errs)
+
+    def test_refuted_item_needs_no_fix_verdict(self):
+        """A REFUTED finding posts nowhere, so its fix text reaches no author.
+        Holding it to this bar would block ledgers over text nobody reads."""
+        led = {"items": [item(1, verdict="REFUTED")], "clusters": []}
+        del led["items"][0]["fix_verdict"]
+        del led["items"][0]["fix_reason"]
+        self.assertEqual(anchor.validate(led), [])
+
+    def test_publishing_verdicts_all_require_a_fix_verdict(self):
+        """DOWNGRADED and INCONCLUSIVE post inline whenever they anchor, so the
+        exemption is REFUTED-only and must not widen to every non-CONFIRMED."""
+        for v in ("CONFIRMED", "DOWNGRADED", "INCONCLUSIVE"):
+            led = {"items": [item(1, verdict=v)], "clusters": []}
+            del led["items"][0]["fix_verdict"]
+            errs = anchor.validate(led)
+            self.assertTrue(any("fix_verdict" in e for e in errs),
+                            f"{v} publishes, so it must require a fix verdict; got {errs}")
+
+
+class TestFixSlotHedges(unittest.TestCase):
+    """A hedged fix hands the author a decision the review declined to make.
+    Where a concrete edit cannot be verified, the contract asks for the
+    constraint any fix must satisfy - which is still imperative."""
+
+    def _detail(self, fix):
+        return f"**What happens:** x\n\n**Why it matters:** y\n\n**Fix:** {fix}"
+
+    def test_hedged_fix_is_rejected_and_names_the_phrase(self):
+        led = {"items": [item(1, detail=self._detail(
+            "consider whether the entries should be copied"))], "clusters": []}
+        errs = anchor.validate(led)
+        self.assertTrue(any("hedged" in e for e in errs), errs)
+        self.assertTrue(any("consider whether" in e for e in errs), errs)
+
+    def test_imperative_fix_passes(self):
+        led = {"items": [item(1, detail=self._detail(
+            "Copy each entry with a spread and a fresh `submenu` array in "
+            "`menu.service.ts:220`, preserving the `click` closures."))], "clusters": []}
+        self.assertEqual(anchor.validate(led), [])
+
+    def test_hedge_is_matched_case_insensitively(self):
+        led = {"items": [item(1, detail=self._detail("Perhaps widen the guard."))],
+               "clusters": []}
+        self.assertTrue(any("hedged" in e for e in anchor.validate(led)))
+
+    def test_hedge_elsewhere_in_detail_does_not_trip_the_check(self):
+        """Scoped to the Fix slot. `Why it matters:` legitimately discusses what
+        a reader might consider; only the prescription has to be unhedged."""
+        detail = ("**What happens:** x\n\n**Why it matters:** a reader may want "
+                  "to consider whether this path is hot.\n\n**Fix:** Widen the "
+                  "guard at `a.ts:10`.")
+        led = {"items": [item(1, detail=detail)], "clusters": []}
+        self.assertEqual(anchor.validate(led), [])
+
+    def test_detail_without_a_fix_slot_is_not_linted(self):
+        """This is a lint over the fix text, not an enforcement of the slot's
+        presence - a ledger predating the slots still validates."""
+        led = {"items": [item(1, detail="consider whether to do something")],
+               "clusters": []}
+        self.assertEqual(anchor.validate(led), [])
+
+    def test_refuted_item_may_carry_a_hedged_fix(self):
+        led = {"items": [item(1, verdict="REFUTED",
+                              detail=self._detail("perhaps revisit this"))], "clusters": []}
+        self.assertEqual(anchor.validate(led), [])
+
+    def test_no_fix_is_needed_is_a_hedge(self):
+        """The real case: a Fix slot reading 'none is needed if the trade
+        stands' asserts a decision the author still has to make."""
+        led = {"items": [item(1, detail=self._detail(
+            "none is needed if the trade stands"))], "clusters": []}
+        self.assertTrue(any("hedged" in e for e in anchor.validate(led)))
+
+
+class TestFixSlotExtraction(unittest.TestCase):
+    def test_returns_text_after_the_marker(self):
+        self.assertEqual(anchor.fix_slot("**What happens:** a\n\n**Fix:** do the thing"),
+                         "do the thing")
+
+    def test_returns_empty_without_a_marker(self):
+        self.assertEqual(anchor.fix_slot("**What happens:** a"), "")
+
+    def test_returns_empty_for_missing_detail(self):
+        self.assertEqual(anchor.fix_slot(None), "")
+        self.assertEqual(anchor.fix_slot(""), "")
 
 
 class TestBodyOnlyVerdicts(unittest.TestCase):

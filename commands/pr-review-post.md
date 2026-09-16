@@ -31,6 +31,13 @@ Post the selected findings: $ARGUMENTS
 4. `python3 ~/.claude/pr-review/pr-review-anchor.py validate <ledger>` - stop on any `error: ...`
    line (exit 1). Do not proceed on a failing validate; if the ledger is malformed, that is a bug
    in how `/pr-review` wrote it, not something to work around here.
+
+   A `fix_verdict` error means the ledger was written before the fix was checked - either by an
+   older `/pr-review`, or by a run whose refuter never answered. **Re-run `/pr-review`; never hand-add
+   the field.** Writing `"fix_verdict": "SOUND"` to clear the error publishes an unchecked fix under
+   the user's account, which is precisely what the guard exists to prevent. The same goes for a
+   `hedged` error: reword the `Fix:` slot into the concrete edit or the constraint, do not delete
+   the finding to get past it.
 5. If the ledger's `target.kind` is not `pr` (a `.` local-diff review has `target.kind` `local`),
    stop: say posting is unavailable for a local-diff review and print the selected findings for
    manual use instead.
@@ -100,6 +107,13 @@ print(r)
    `--body-only-verdicts DOWNGRADED INCONCLUSIVE` restores the old verdict-based routing if a
    particular review wants it. It is opt-in and off by default.
 
+   **Surface every `UNVERIFIABLE` fix in the selection before going further.** These post like any
+   other finding - the claim was verified, only the remedy was not - but the author is being handed
+   a fix nobody could establish, so the user decides whether it goes out as-is, gets reworded to a
+   constraint, or is dropped from the selection. List them by id with the refuter's `fix_reason`,
+   and do not fold the question into the step 3 approval, where it reads as one line in a long
+   preview.
+
 ## 2. Re-anchor against the current head
 
 The PR head can move during review, and a review POST fails **wholesale** if any one anchor is not
@@ -152,11 +166,11 @@ excerpt matched more than one location and the nearest-to-old-line match was cho
 a comment to the wrong line, and re-anchoring alone cannot tell the difference between the right
 site and a coincidentally identical one.
 
-### When the head moved, re-verify the claims - not just the anchors
+### When the head moved, re-verify the claims and the fixes - not just the anchors
 
 `reanchor` checks that each finding's **line** still exists. It cannot check that the finding is
-still **true**, and after a rebase or restack it often isn't. Two separate passes, both required
-whenever `$NOW` differed from the ledger's `head_sha`:
+still **true**, and it never reads the `Fix:` slot at all. After a rebase or restack, neither
+holds. Three separate passes, all required whenever `$NOW` differed from the ledger's `head_sha`:
 
 1. **Standing claims in the body.** Anything the body asserts about the current state of the branch
    - a previously-reported item still being unfixed, a red CI step, a stale generated artifact -
@@ -169,9 +183,18 @@ whenever `$NOW` differed from the ledger's `head_sha`:
    A finding whose only two gates were "the shipped config supplies the key" and "the committed
    build output still marks it required" becomes materially more serious the moment that build
    output is regenerated - the finding did not change, the reason for holding it low did.
+3. **The fixes.** A fix names symbols, files and line numbers in the *head* it was verified
+   against. A rebase that renames a symbol, moves it between modules, changes an export, or
+   regenerates the file the fix points at turns a verified instruction into a wrong one, and nothing
+   downstream notices. Re-check every selected item's fix against the new head with the same three
+   properties S5 used: does every symbol it names still exist and stay reachable from the site, does
+   the mechanism still apply, does the obligation table still bind the same way. Downgrade anything
+   you cannot re-establish to a constraint rather than posting a stale prescription, and set its
+   `fix_verdict` to match.
 
-Do not silently rewrite a refuter's recorded `verdict_reason` to paper over this. Append a dated
-`_Re-checked at <sha>: ..._` note so the original reasoning and the correction are both visible.
+Do not silently rewrite a refuter's recorded `verdict_reason` or `fix_reason` to paper over any of
+this. Append a dated `_Re-checked at <sha>: ..._` note so the original reasoning and the correction
+are both visible.
 
 ## 3. Build the posting plan
 

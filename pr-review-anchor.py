@@ -12,6 +12,32 @@ SEVERITIES = ("blocker", "high", "medium", "low")
 # outside this tuple for exactly that reason.
 VERDICTS = ("CONFIRMED", "DOWNGRADED", "REFUTED", "INCONCLUSIVE")
 
+# The S5 refuter's verdict on the finding's `**Fix:**` slot, which is separate
+# from its verdict on the claim. A claim is verified by observation; a fix is a
+# proposal about code that does not exist yet, so it needs its own answer and
+# its own evidence. Required on every item the payload can publish - i.e. every
+# item whose `verdict` is not REFUTED - because `detail` (Fix slot included)
+# posts to the author verbatim, and an unanswered fix is indistinguishable from
+# a checked one once it is in the ledger.
+FIX_VERDICTS = ("SOUND", "REWRITTEN", "UNVERIFIABLE")
+
+# Phrases that turn a `Fix:` slot from a prescription into a suggestion. The
+# contract's rule is that a fix is unhedged about what was verified and silent
+# about what was not: where the refuter cannot verify a concrete edit, it states
+# the constraint any fix must satisfy - which is imperative - rather than
+# offering the author a choice it has not made. Kept deliberately tight, since
+# a false positive here blocks a whole ledger; each pattern is a phrase that
+# cannot occur in an imperative instruction.
+HEDGE_PATTERNS = (
+    r"\bconsider\s+(?:whether|if|\w+ing)\b",
+    r"\byou\s+(?:might|may|could)\s+want\b",
+    r"\bit\s+(?:might|may)\s+be\s+(?:worth|better|preferable|wise)\b",
+    r"\bone\s+option\s+(?:is|would\s+be)\b",
+    r"\bperhaps\b",
+    r"\bif\s+you\s+(?:prefer|like)\b",
+    r"\bno(?:ne)?\s+(?:fix|change)?\s*is\s+needed\b",
+)
+
 # Sections for verdicts routed to the review body instead of posting inline.
 # This routing is OPT-IN (--body-only-verdicts); by default placement is decided
 # by whether a finding can be anchored, not by what verdict it reached.
@@ -93,6 +119,32 @@ class IncludeRefutedError(ValueError):
     """An --include-refuted token doesn't name a REFUTED item in this ledger."""
 
 
+def fix_slot(detail):
+    """The text of a finding's `**Fix:**` slot, or "" when `detail` has none.
+
+    The slot is always last by contract, so everything after the label is the
+    fix. Returns "" rather than raising on a `detail` shaped some other way:
+    this is a lint over the fix text, not an enforcement of the slot's
+    presence, and a ledger written before the slots existed still validates.
+    """
+    if not detail:
+        return ""
+    marker = re.search(r"\*\*Fix:\*\*", detail)
+    if not marker:
+        return ""
+    return detail[marker.end():].strip()
+
+
+def hedges_in(text):
+    """Every hedge phrase present in `text`, as matched, in pattern order."""
+    found = []
+    for pat in HEDGE_PATTERNS:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            found.append(m.group(0))
+    return found
+
+
 def validate(ledger):
     if not isinstance(ledger, dict):
         return [f"ledger root must be a JSON object, got {type(ledger).__name__}"]
@@ -119,6 +171,22 @@ def validate(ledger):
                         "(every item must carry a terminal verdict before the ledger is ready)")
         if not str(it.get("verdict_reason") or "").strip():
             errs.append(f"item {iid!r} is missing required field 'verdict_reason'")
+        # The fix is answered separately from the claim, and only where it can
+        # reach an author: a REFUTED item posts nowhere, so holding its fix to
+        # this bar would block ledgers over text nobody will read.
+        if it.get("verdict") != "REFUTED":
+            if it.get("fix_verdict") not in FIX_VERDICTS:
+                errs.append(f"item {iid!r} fix_verdict {it.get('fix_verdict')!r} not one of "
+                            f"{FIX_VERDICTS} (the Fix: slot posts verbatim, so it needs its own "
+                            "verified answer before the ledger is ready)")
+            if not str(it.get("fix_reason") or "").strip():
+                errs.append(f"item {iid!r} is missing required field 'fix_reason' "
+                            "(what was checked about the fix, with file:line evidence)")
+            hedged = hedges_in(fix_slot(it.get("detail")))
+            if hedged:
+                errs.append(f"item {iid!r} Fix: slot is hedged ({', '.join(repr(h) for h in hedged)}) "
+                            "- state the concrete edit, or state the constraint any fix must "
+                            "satisfy; do not offer the author a choice you have not made")
         for field in ("file", "claim", "anchor_excerpt"):
             if not it.get(field):
                 errs.append(f"item {iid!r} is missing required field '{field}'")

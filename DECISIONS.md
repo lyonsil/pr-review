@@ -126,6 +126,61 @@ author removed exactly that line three days later). Rulings taken in response:
   refuters inherit the generator's tier; the prompt was changed and this entry was not, which left
   the two disagreeing about the most expensive knob in the pipeline.)
 
+## Verifying the fix, not just the finding
+
+Measured on paranext-core PR #2821 (a 20-item posted review): **five of twenty `Fix:` lines were
+unworkable as written, while every claim under them was sound.** Nothing in the pipeline had looked
+at them - the generator writes the `Fix:` slot in S1, `payload` publishes `detail` verbatim, and S5
+asked only whether the *claim* was true. They were caught by the operator asking, twice, by hand.
+
+- `structuredClone` on menu entries carrying `click` closures (it throws; a JSON round-trip silently
+  drops every handler - the fix would have caused the defect it was preventing)
+- a symbol that exists but is not exported from the package index, so the consumer cannot import it
+- "call it inside the memo, it is synchronous" - both halves true, but the memo's dependency array
+  does not include the state, so it recomputes no more often and fixes nothing
+- a move that is structurally right but drops the flex classes the element was carrying for layout
+- "key the cache on interface mode", where the cache is module-level and the mode comes from a hook
+
+Four of the five named a **real symbol that was real in the wrong place.** Reading that a symbol
+exists is not checking it is reachable from where the fix lands. Rulings:
+
+- **A claim is verified by observation; a fix is a proposal about code that does not exist yet.**
+  They get separate answers. The S5 reply carries `FIX_VERDICT` / `FIX_REASON` / `FIX_REWRITE`
+  alongside the claim verdict, answered per item - cluster siblings included, since a cluster shares
+  a fix *by definition* and that is exactly where answering once is most tempting and least safe.
+- **`validate` rejects a missing or unknown `fix_verdict`** on any item whose verdict is not
+  REFUTED. Prose alone does not hold: the `PENDING` verdict shipped for the same reason, and the gap
+  was closed the same way. REFUTED items are exempt because their fix text reaches no author.
+- **A refuter that finds a broken fix must supply the replacement**, not merely flag it. Flagging
+  leaves the orchestrator to invent one from less context than the refuter had, which is how the bad
+  fix arrived.
+- **"Never hedge the `Fix:` line" was amended, because it was manufacturing part of the problem.**
+  It demanded confidence the refuter may not have. The rule is now: unhedged about what you
+  verified, never prescribe what you did not - and where a concrete edit cannot be verified, state
+  the *constraint* any fix must satisfy, which is still imperative. `validate` lints the slot for a
+  tight set of hedge phrases; one of the six #2821 corrections was a hedged fix against the old
+  rule, which nothing enforced.
+- **The obligation table addresses re-review churn, which is a different failure.** A fix can work
+  and still draw a finding next round for omitting what the repo's own rules attach to that change.
+  S5 derives a trigger table from `.claude/rules/**` and the CLAUDE.md standards on every run
+  (per repo - these commands run against more than one, and a stale table asserts obligations that
+  no longer exist) and passes it to every refuter. Two of the six #2821 corrections were this class:
+  a locale key named in one file instead of all, and the hedged fix.
+- **Rejected: apply-the-fix-and-build as the gate.** It would have caught 2 of the 5 - the other
+  three compile clean. And `link-deps` symlinks the primary checkout's `node_modules` into `$WT`
+  (`pr-review-wt.sh:215`), which is the known cause of spurious `TS6200`/`TS2300` floods and
+  `import/no-unresolved` in workspace typecheck and lint, so a repo-wide check there reports the
+  setup, not the fix. Refuters are pointed at targeted checks instead: the one test file, one
+  project's typecheck, the linter on one file, a `node -e` probe. Reading plus probes caught 5 of 5.
+- **Rejected: a deterministic sweep of backticked symbols in `Fix:` lines.** Yield on the observed
+  data is zero - every one of those symbols existed. The failure is reachability, not existence.
+- **Known gap:** the hedge lint only fires when `detail` actually has a `**Fix:**` slot, so a
+  finding with no fix at all passes it. `fix_verdict` is still required for such an item, which is
+  the check that catches it, but the lint itself does not enforce the slot's presence.
+- *If wrong:* the fix audit reports a near-zero REWRITTEN rate across several real reviews, meaning
+  the stage is buying nothing; the S6 `Fix audit` line exists to make that visible rather than
+  assumed. Treat a 0-of-30 the way a 0% refutation rate would be treated.
+
 ## Cost of the pressure-test
 
 - **One refuter per cluster, one per unclustered item** - not one per item. A refuter pays the same

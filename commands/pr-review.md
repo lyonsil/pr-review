@@ -245,10 +245,17 @@ This sentence leads every inline comment and fills the triage table, so it has t
 
 Cap `detail` at about 120 words. If it needs more, you probably have two findings - go back to S2.
 
-### Four rules that keep the fix actionable
+### Five rules that keep the fix actionable
 
-1. **Never hedge the `Fix:` line.** Not "consider whether", not "you might want to". If two fixes
-   are viable, name both and say which this review recommends and why.
+1. **Be unhedged about what you verified; never prescribe what you did not.** A claim is verified by
+   observation; a fix is a proposal about code that does not exist yet, so it carries its own
+   evidence burden. Where a concrete edit has been verified, give it imperatively - not "consider
+   whether", not "you might want to". Where it has not, do not manufacture the confidence: state the
+   **constraint** any fix must satisfy - "must preserve the `click` closures, and must land at both
+   `:207` and `:220`" - which is still imperative and still actionable. A confident wrong
+   instruction is worse than a verified constraint: "deep-copy the entries" reads decisive and would
+   have silently dropped every menu handler. If two fixes are viable, name both and say which this
+   review recommends and why. `validate` rejects a hedged `Fix:` slot.
 2. **Explanatory never means vague.** `useBcvSyncScroll`, not "the hook". `z-index.ts:14`, not
    "the constants file". Every symbol, path and value exactly as it appears in the code - a fixer
    working from this text should never have to guess which site is meant.
@@ -258,6 +265,13 @@ Cap `detail` at about 120 words. If it needs more, you probably have two finding
    no refuters, no "the generator flagged", no severity revisions, no item numbers beyond the `#n`
    cross-references `payload` adds itself. The comment header already carries a plain-English
    status - the prose neither repeats nor explains it.
+5. **A fix must be complete under the rules the next review will apply.** Whatever the author
+   writes to satisfy this finding gets reviewed in turn - by this pipeline again, or by a human
+   reading the same rule files. A fix that works but omits an obligation those rules attach to it
+   buys a second round for nothing: the `// CUSTOM:` annotation on a shadcn edit, the catalog entry
+   for a new keyboard handler, every locale file for a new string, the test for a behaviour change.
+   Name each obligation the change triggers as part of the `Fix:` line. S5 derives the repo's
+   obligation table and hands it to every refuter.
 
 ### Worked example
 
@@ -300,7 +314,8 @@ at each site, leave the items unclustered and let them get their own refuters.
 Dispatch **one refuter subagent per cluster, and one per unclustered item**, in parallel batches,
 passing the Agent tool's `model: "sonnet"` override on each call (see Model below). Give each: every
 item it owns (id, claim, `detail`, `evidence`, `file:line`), the cluster's `shared_fix` where there
-is one, the worktree path `$WT`, `MERGE_BASE`, and the relevant CLAUDE.md paths.
+is one, the worktree path `$WT`, `MERGE_BASE`, the relevant CLAUDE.md paths, and the obligation
+table (below).
 
 Grouping by cluster, not by item, is what keeps this stage affordable. A refuter pays the same fixed
 cost - its own context, the repo's CLAUDE.md and rules, the files it reads - whether it answers one
@@ -332,6 +347,34 @@ would make "I ran it and it passed" worse than no answer. **Pass the result into
 prompt**: on `linked`, say that `npm run typecheck`, `npm run lint` and `npm test` are available in
 `$WT`; on `declined`, say so and name the reason. Never tell a refuter it cannot verify anything -
 `git`, `grep` and the full history are always available, and most claims are settled with those.
+
+### The obligation table
+
+Build this once, before dispatching, and paste it into every refuter prompt. It is what makes a fix
+survive the *next* review rather than merely working.
+
+Enumerate the rules this repo's reviewers actually read - `.claude/rules/**`, the standards table in
+`CLAUDE.md`, and any `AGENTS.md` - and reduce them to a table of *triggers*: the shape of a change,
+and what that shape obliges. Derive it per repo on every run rather than carrying one between runs:
+these commands are used against more than one repository, the rule sets differ, and a stale table is
+worse than none because it asserts obligations that no longer exist. A dozen rows is the right size;
+it is a lookup, not a summary of the standards.
+
+Shape it like this (the rows are illustrative - read the repo's own rules for the real ones):
+
+| If the fix ... | it must also ... | rule |
+| --- | --- | --- |
+| edits a vendored component | carry the annotation that convention requires | `shadcn-discipline.md` |
+| adds or changes a keyboard handler | update the shortcuts catalog | `keyboard-shortcuts-catalog.md` |
+| adds user-facing strings | land in every locale file | `localization-locale-files.md` |
+| changes behaviour | come with a test | `testing/tdd-discipline.md` |
+| suppresses a tool warning | justify why fixing the code is worse | `eslint-disable-discipline.md` |
+| adds a comment | be forward-facing, no PR or ticket narration | `forward-facing-comments.md` |
+| chooses among viable approaches | be recorded in the decisions log | `CLAUDE.md` |
+
+A fix that satisfies the claim but not the table is the cheapest kind of review churn there is: the
+author implements it, the next reviewer flags the omission, and a second round buys nothing that
+this one could not have said.
 
 ### The refuter's job
 
@@ -371,6 +414,60 @@ A refuter's task is to reach the truth, not to win. Instruct each one:
 > Give `file:line` evidence for the verdict either way. You may revise the severity; give your
 > reason. Also report whether the anchor sits on a line this PR changed.
 
+### The refuter's second job: the fix
+
+The block above settles whether the finding is **true**. It says nothing about whether its
+`**Fix:**` slot **works**, and nothing upstream has checked that either: the generator wrote the fix
+in S1 and it posts to the author verbatim. On paranext-core #2821, five of twenty fix lines were
+unworkable while every claim under them was sound - `structuredClone` on a menu entry carrying
+`click` closures (it throws), a symbol that exists but is not exported from the package index, a
+memo whose dependency array does not include the state the fix depends on, a moved element that was
+carrying the layout's flex sizing, and a hook named for a module-level call site. Four of those five
+named a **real symbol that was real in the wrong place**. Reading that a symbol exists is not
+checking that it is reachable from where the fix lands.
+
+Instruct each refuter, for every item it owns:
+
+> Answer separately whether this finding's `Fix:` line is something the author can actually carry
+> out, and whether carrying it out would survive the next review. Three properties:
+>
+> - **Evidenced.** The fix climbs the same ladder the claim does, and the same rule applies: naming
+>   a command you did not run is not evidence. Check that every symbol it names exists **and is
+>   reachable from the site the fix lands on** - exported from the package index, not merely present
+>   in the repo; in scope at that call site; importable under the repo's module restrictions. Check
+>   that the API it invokes accepts what is being handed to it. Check that the mechanism actually
+>   changes the behaviour in question - a memo that does not depend on the state, an effect that
+>   does not re-run, a cache keyed on something that does not vary, all compile clean and fix
+>   nothing. Check that the site is not carrying a responsibility the fix would drop. Where the
+>   question is settled by a probe, **run the probe**: one `node -e` line established that
+>   `structuredClone` refuses a closure.
+> - **Complete.** Apply the obligation table above. If the change trips a row, the fix must say so.
+> - **Honest.** If you cannot verify a concrete edit, do not rewrite it into a vaguer one. State the
+>   **constraint** any fix must satisfy - "must preserve the `click` closures, and must land at both
+>   `:207` and `:220`" - which is imperative, actionable, and cannot be wrong in the way a guessed
+>   prescription can.
+>
+> **Answer this separately for every item, exactly as you do the verdict.** A cluster shares a fix
+> *by definition*, so the pull to answer once and apply it to the rest is strongest here - and
+> "the same change at the other site" is precisely the assertion that keeps turning out to be
+> false. Go to each site.
+>
+> Where dependencies were linked, prefer a targeted check over a broad one: the single test file,
+> a type-check of the one project, the linter on the one file, a `node -e` probe. Do **not** judge a
+> fix by a repo-wide typecheck or lint in this worktree - `node_modules` is a symlink to another
+> checkout sitting on a different commit, so those runs produce duplicate-identifier and
+> unresolved-import errors that belong to the setup, not to the fix.
+>
+> Report one of three fix verdicts:
+>
+> - `SOUND` - the fix works as written, and is complete under the obligation table.
+> - `REWRITTEN` - it does not, or it omits an obligation. **Supply the replacement text**; flagging
+>   the problem without repairing it leaves the orchestrator to guess, which is how the bad fix got
+>   there. A replacement may be a constraint rather than a prescription.
+> - `UNVERIFIABLE` - you could not establish even the constraints. Say what you could not check.
+>   Rare: if you can name one thing a fix must not break, you have a constraint, and that is a
+>   `REWRITTEN`.
+
 Reply format, exactly and with nothing before it - **one block per finding, in the order they were
 given, with a blank line between blocks**. A block for every id you were given, even where several
 reach the same verdict:
@@ -381,7 +478,13 @@ VERDICT: CONFIRMED|DOWNGRADED|REFUTED|INCONCLUSIVE
 SEVERITY: blocker|high|medium|low
 ON_CHANGED_LINE: true|false
 REASON: <3-6 sentences with file:line evidence>
+FIX_VERDICT: SOUND|REWRITTEN|UNVERIFIABLE
+FIX_REASON: <what you checked about the fix, with file:line evidence>
+FIX_REWRITE: <the replacement Fix: text - required on REWRITTEN, omitted otherwise>
 ```
+
+The three `FIX_` lines may be omitted only on a `REFUTED` item, whose fix text reaches nobody.
+On every other verdict they are required, and `validate` rejects the ledger without them.
 
 Write `REASON` for the PR author, not for the pipeline. On a `CONFIRMED` verdict it publishes
 verbatim under **How this was checked**, and on `INCONCLUSIVE` under **What could not be checked**,
@@ -411,12 +514,22 @@ report which items ran on a cheaper model.
 
 ### Recording the result
 
-Record `verdict`, `verdict_reason`, and `on_changed_line` per item. Record the generator's severity
-as `severity_in` and the refuter's as `severity` - **never overwrite `severity_in`**. A refuter that
+Record `verdict`, `verdict_reason`, `on_changed_line`, `fix_verdict` and `fix_reason` per item.
+Record the generator's severity as `severity_in` and the refuter's as `severity` - **never overwrite
+`severity_in`**.
+
+**Apply every `FIX_REWRITE` into the item's `detail`**, replacing the text after `**Fix:**` and
+leaving the other two slots alone. Do this as you record, not later: `detail` is what posts, so a
+rewrite left sitting in a refuter reply is a rewrite that never reached the author. Where a refuter
+returned `REWRITTEN` with no replacement text, re-dispatch it once for the replacement rather than
+writing one yourself - it read the site and you did not. If it still will not supply one, record
+`UNVERIFIABLE` with that as the `fix_reason` and surface the item in S6. A refuter that
 downgrades and refutes in one step otherwise leaves a triage table where every dropped finding reads
 as low-severity noise, hiding that a `high` was dropped.
 
-**Every item must end S5 with one of the four verdicts.** Check each reply against the ids you
+**Every item must end S5 with one of the four verdicts, and - unless REFUTED - a fix verdict too.**
+A block that answers the claim and drops the `FIX_` lines has answered half the question; treat it
+exactly as you treat a missing block. Check each reply against the ids you
 dispatched: a cluster refuter that returns four blocks for a six-item cluster has silently dropped
 two findings, and an item nobody answered is indistinguishable from one nobody raised. A refuter
 that returns prose without a parseable `VERDICT:` line, or that omits ids, has not answered -
@@ -483,6 +596,12 @@ automatically.
          "evidence": ["src/bar.ts:88"],
          "verdict": "CONFIRMED|DOWNGRADED|REFUTED|INCONCLUSIVE",  // no placeholders; see S5
          "verdict_reason": "the S5 refuter's reasoning, whichever verdict it reached",
+         "fix_verdict": "SOUND|REWRITTEN|UNVERIFIABLE",  // the refuter's SEPARATE answer on the
+                                               // `**Fix:**` slot. Required unless `verdict` is
+                                               // REFUTED; `validate` rejects a missing or unknown
+                                               // value. A REWRITE is applied into `detail` before
+                                               // the ledger is written, never stored beside it.
+         "fix_reason": "what the refuter checked about the fix, with file:line evidence",
          "origin": "code-review|seed:<path>",
          "dedupe": null,                       // or {"prior_url": "...", "note": "..."} from S3
          "anchor_status": null,                 // ok|moved|dead - written by `reanchor` in /pr-review-post, not here
@@ -536,6 +655,13 @@ automatically.
    - a `Verdict summary` line: counts of CONFIRMED / DOWNGRADED / REFUTED / INCONCLUSIVE, and the
      refutation rate as `REFUTED / total`. State it plainly; it is the number that tells you
      whether the pressure-test is calibrated.
+   - a `Fix audit` line and section: counts of SOUND / REWRITTEN / UNVERIFIABLE, then every
+     REWRITTEN item - id, what was wrong with the generator's fix, and the replacement in one line -
+     and every UNVERIFIABLE item with what could not be established. The rate is the calibration
+     number for this stage, exactly as the refutation rate is for the verdicts: it was 5 in 20 on
+     the review that prompted the stage, and a run reporting 0 in 30 is a claim about the
+     generator that deserves the same suspicion as a 0% refutation rate. Say plainly that an
+     UNVERIFIABLE fix needs a human before it posts.
    - a `Downgraded` section: every DOWNGRADED item - id, `<severity_in> -> <severity>`, claim, and
      the refuter's reason. These post inline with `all` like any other anchorable finding; they are
      not dropped and need no `--include-refuted`. Say for each whether you folded its reason into
