@@ -181,6 +181,61 @@ exists is not checking it is reachable from where the fix lands. Rulings:
   the stage is buying nothing; the S6 `Fix audit` line exists to make that visible rather than
   assumed. Treat a 0-of-30 the way a 0% refutation rate would be treated.
 
+## Matching the claim, not just verifying it
+
+Measured on paranext-core PR #2825 (a 30-item review): **eight of thirty claims did not describe the
+defect their own evidence established, against two that were false.** The pipeline had three
+mechanisms aimed at whether a finding is *false* - refuter verdicts, `--include-refuted`, the
+refutation rate - and none aimed at whether it is *misdescribed*. The error nothing looked for was
+four times more common than the one three things looked for.
+
+- **The verdict cannot catch this, by construction.** A verdict answers "is this true", and a claim
+  NARROWER than the defect passes that test: verifying "this breaks in Simple mode" never requires
+  looking at Power mode. `DOWNGRADED` does not cover it either - it is about *severity*, and S5
+  routes its reasoning into `Why it matters:`, not the claim. So a refuter that narrows a claim while
+  verifying it has nowhere to put the correction, and every one of the eight had the narrowing
+  sitting in its `REASON` prose - collected, then dropped.
+- **`CLAIM_VERDICT: SOUND|REWRITTEN`, not a direction enum.** An earlier draft had
+  `ACCURATE|OVERSTATED|UNDERSTATED`. Rejected: a claim can be both at once in different dimensions -
+  #2825's item 5 understated *when* the throw happens (any failing definition read, not just
+  teardown) while overstating *what follows* (only a pane that never reports an area) - so a
+  direction enum forces a false choice on exactly the claims needing most care. Borrowing
+  `FIX_VERDICT`'s vocabulary also means a refuter learns one pattern, not two. Direction stays
+  recoverable from the rewrite; it is diagnostic colour, not a control.
+- **No `UNVERIFIABLE` member.** A claim the refuter could not settle is already `INCONCLUSIVE` at the
+  verdict level. A second way to say "I could not tell" would be used to dodge the scope question,
+  which is the one this field exists to force.
+- **The test is a match, not a hunt, and the mismatch must be sourced from evidence already
+  gathered.** Rejected: "name one adjacent case the claim excludes." That is a production quota - an
+  agent asked to find understatement will find some, and most would be "this could also bite if
+  someone writes a component that ...". The bar instead: if you have to go looking for a new case to
+  make the claim bigger, it is `SOUND`. That is where the real ones were - both understated claims on
+  #2825 sat inside checks the refuter was already running.
+  *What this deliberately gives up:* an understatement nobody tripped over during verification goes
+  unnoticed. Accepted - a false "this could be broader" costs an author's attention on every review;
+  a missed one costs nothing until someone hits it.
+- **The S6 grep sweep is one-directional and says so.** Quantifiers (`every`, `never`, `only`) are
+  greppable, so overstatement is; understatement is usually a narrowing noun phrase with no
+  quantifier at all ("in the Simple-mode Comments panel"), and the words that narrow a claim are the
+  same words that legitimately make it specific. A clean sweep therefore says nothing about
+  understated claims - `grep-safety-net.md` rule 5 applied to this tool's own output. That half
+  rests entirely on `claim_verdict`.
+- **Severity revision was one-sided too** - 4 lowered, 0 raised across 30 items - and the
+  `DOWNGRADED` wording actively invites lowering ("say what survives, and downgrade it") with no
+  symmetric sentence. Added one, and the S6 `Claim audit` line now reports `N lowered / M raised`
+  beside the claim-rewrite rate, so the ratchet is visible per run rather than invisible across many.
+- **Enforced in `validate`, not prose.** `claim_verdict`/`claim_reason` are required wherever
+  `fix_verdict` is - every item the payload can publish, i.e. not `REFUTED`. Prose alone does not
+  hold; the `PENDING` verdict and the unchecked `Fix:` slot both shipped for that reason. Seven
+  guards, each mutation-proven. One mutation (`CLAIM_VERDICTS` narrowed to `("SOUND",)`) caught a
+  non-falsifiable test of my own: it iterated the constant under test, so the loop shrank with it.
+  Pinned to literals. **`test_each_fix_verdict_is_accepted` has the same flaw** and is left alone
+  here rather than widened into an unrelated change.
+- *If wrong:* refuters rewrite claims that were already fine, and the `Claim audit` shows a high rate
+  whose entries are restyling rather than correction. The instruction "correct only the mismatch you
+  can evidence; do not restyle a sentence that is already accurate" is the guard; if it does not
+  hold, tighten to requiring a named case the original excludes or admits wrongly.
+
 ## Cost of the pressure-test
 
 - **One refuter per cluster, one per unclustered item** - not one per item. A refuter pays the same

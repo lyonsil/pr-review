@@ -9,6 +9,7 @@ def item(i, sev="high", f="a.ts", line=10, cluster=None, **kw):
     d = {"id": i, "severity": sev, "severity_in": sev, "file": f, "line": line,
          "line_end": line, "anchor_excerpt": "x", "claim": "c", "detail": "d",
          "cluster": cluster, "verdict": "CONFIRMED", "verdict_reason": "r",
+         "claim_verdict": "SOUND", "claim_reason": "matched at a.ts:10",
          "fix_verdict": "SOUND", "fix_reason": "checked at a.ts:10"}
     d.update(kw); return d
 
@@ -1198,6 +1199,56 @@ class TestFixVerdictRequired(unittest.TestCase):
             errs = anchor.validate(led)
             self.assertTrue(any("fix_verdict" in e for e in errs),
                             f"{v} publishes, so it must require a fix verdict; got {errs}")
+
+    def test_missing_claim_verdict_is_rejected(self):
+        led = {"items": [item(1)], "clusters": []}
+        del led["items"][0]["claim_verdict"]
+        errs = anchor.validate(led)
+        self.assertTrue(any("claim_verdict" in e for e in errs), errs)
+
+    def test_unknown_claim_verdict_is_rejected(self):
+        led = {"items": [item(1, claim_verdict="PENDING")], "clusters": []}
+        errs = anchor.validate(led)
+        self.assertTrue(any("claim_verdict" in e and "not one of" in e for e in errs), errs)
+
+    def test_each_claim_verdict_is_accepted(self):
+        """Literals, not `anchor.CLAIM_VERDICTS` - iterating the constant under
+        test makes the loop shrink with it, so narrowing the accepted set would
+        pass. Verified by mutation: dropping REWRITTEN fails this only as written."""
+        for v in ("SOUND", "REWRITTEN"):
+            led = {"items": [item(1, claim_verdict=v)], "clusters": []}
+            self.assertEqual(anchor.validate(led), [], f"{v} should be legal")
+
+    def test_claim_verdict_has_no_unverifiable_escape(self):
+        """A claim the refuter could not settle is INCONCLUSIVE at the verdict
+        level. A second way to say 'I could not tell' would be used to dodge the
+        scope question, which is the one this field exists to force."""
+        self.assertNotIn("UNVERIFIABLE", anchor.CLAIM_VERDICTS)
+        led = {"items": [item(1, claim_verdict="UNVERIFIABLE")], "clusters": []}
+        errs = anchor.validate(led)
+        self.assertTrue(any("claim_verdict" in e for e in errs), errs)
+
+    def test_blank_claim_reason_is_rejected(self):
+        led = {"items": [item(1, claim_reason="   ")], "clusters": []}
+        errs = anchor.validate(led)
+        self.assertTrue(any("claim_reason" in e for e in errs), errs)
+
+    def test_refuted_item_needs_no_claim_verdict(self):
+        """Same exemption as the fix: a REFUTED finding's claim reaches nobody."""
+        led = {"items": [item(1, verdict="REFUTED")], "clusters": []}
+        for k in ("claim_verdict", "claim_reason", "fix_verdict", "fix_reason"):
+            del led["items"][0][k]
+        self.assertEqual(anchor.validate(led), [])
+
+    def test_publishing_verdicts_all_require_a_claim_verdict(self):
+        """The claim leads the inline comment for DOWNGRADED and INCONCLUSIVE
+        findings exactly as it does for CONFIRMED ones."""
+        for v in ("CONFIRMED", "DOWNGRADED", "INCONCLUSIVE"):
+            led = {"items": [item(1, verdict=v)], "clusters": []}
+            del led["items"][0]["claim_verdict"]
+            errs = anchor.validate(led)
+            self.assertTrue(any("claim_verdict" in e for e in errs),
+                            f"{v} publishes, so it must require a claim verdict; got {errs}")
 
 
 class TestFixSlotHedges(unittest.TestCase):

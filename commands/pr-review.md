@@ -412,9 +412,48 @@ A refuter's task is to reach the truth, not to win. Instruct each one:
 >   settle it. Use this rather than defaulting to a verdict you cannot support.
 >
 > Give `file:line` evidence for the verdict either way. You may revise the severity; give your
-> reason. Also report whether the anchor sits on a line this PR changed.
+> reason - **in either direction.** Lowering one is the common move and the wording above invites
+> it; raising one is equally available, and equally expected when what you found is worse than the
+> finding says. Also report whether the anchor sits on a line this PR changed.
 
-### The refuter's second job: the fix
+### The refuter's second job: does the claim describe what you verified?
+
+The verdict settles whether the finding is **true**. It does not settle whether the `claim`
+sentence *describes* the defect - and that sentence leads every inline comment, fills the triage
+table, and is the first thing the author reads.
+
+A truth test catches only a claim that reaches too far, because a claim NARROWER than the defect
+passes it: verifying "this breaks in Simple mode" never requires looking at Power mode. So scope
+errors survive this stage in both directions, and the narrow one is both harder to see and worse to
+ship - an overstated claim starts an argument and gets corrected, while an understated one gets
+fixed at one of the two sites that needed it, which is the failure this whole pipeline exists to
+catch.
+
+Measured on paranext-core #2825: eight of thirty claims did not match their own evidence, against
+two that were false. One managed both errors at once - "a web view whose iframe finishes loading
+**during teardown** throws an uncaught error, and a pane whose definition read fails is **never
+zoomed at all**" understated *when* (any failing definition read does it) while overstating *what
+follows* (only a pane that never reports an area). So do not ask whether the claim is true. Ask
+whether it matches:
+
+> **Does the claim describe the defect you verified - no more and no less?** Both failures count: a
+> claim that reaches past what you established, and one that names a narrower case - one interface
+> mode, one view, one caller - than the mechanism you actually found.
+>
+> **The mismatch must come from evidence you already gathered while verifying.** If you have to go
+> looking for a new case in order to make the claim bigger, it is `SOUND`. This is not a hunt for
+> ways a finding could be broader - that only manufactures "this could also bite if someone writes
+> a component that ...". The real ones sit in what you already read: on #2825 both understated
+> claims were visible inside checks the refuter was already running - a pane-width check that never
+> asked about the other interface mode, and a code path already open on screen.
+>
+> - `SOUND` - the claim describes what you verified.
+> - `REWRITTEN` - it does not. **Supply the replacement sentence**, in the same observable terms the
+>   contract demands of the original: what goes wrong as a reader would experience it, present
+>   tense, specific enough to be false if the finding is wrong. Correct only the mismatch you can
+>   evidence; do not restyle a sentence that is already accurate.
+
+### The refuter's third job: the fix
 
 The block above settles whether the finding is **true**. It says nothing about whether its
 `**Fix:**` slot **works**, and nothing upstream has checked that either: the generator wrote the fix
@@ -478,12 +517,15 @@ VERDICT: CONFIRMED|DOWNGRADED|REFUTED|INCONCLUSIVE
 SEVERITY: blocker|high|medium|low
 ON_CHANGED_LINE: true|false
 REASON: <3-6 sentences with file:line evidence>
+CLAIM_VERDICT: SOUND|REWRITTEN
+CLAIM_REASON: <what you matched the claim against, with file:line evidence>
+CLAIM_REWRITE: <the replacement claim sentence - required on REWRITTEN, omitted otherwise>
 FIX_VERDICT: SOUND|REWRITTEN|UNVERIFIABLE
 FIX_REASON: <what you checked about the fix, with file:line evidence>
 FIX_REWRITE: <the replacement Fix: text - required on REWRITTEN, omitted otherwise>
 ```
 
-The three `FIX_` lines may be omitted only on a `REFUTED` item, whose fix text reaches nobody.
+The `CLAIM_` and `FIX_` lines may be omitted only on a `REFUTED` item, whose text reaches nobody.
 On every other verdict they are required, and `validate` rejects the ledger without them.
 
 Write `REASON` for the PR author, not for the pipeline. On a `CONFIRMED` verdict it publishes
@@ -514,9 +556,16 @@ report which items ran on a cheaper model.
 
 ### Recording the result
 
-Record `verdict`, `verdict_reason`, `on_changed_line`, `fix_verdict` and `fix_reason` per item.
-Record the generator's severity as `severity_in` and the refuter's as `severity` - **never overwrite
-`severity_in`**.
+Record `verdict`, `verdict_reason`, `on_changed_line`, `claim_verdict`, `claim_reason`,
+`fix_verdict` and `fix_reason` per item. Record the generator's severity as `severity_in` and the
+refuter's as `severity` - **never overwrite `severity_in`**.
+
+**Apply every `CLAIM_REWRITE` into the item's `claim`**, replacing the sentence outright. Do this
+as you record, for the same reason as the fix rewrite below: `claim` is what leads the inline
+comment, so a rewrite left in a refuter reply is a rewrite the author never sees. Where a refuter
+returned `REWRITTEN` with no replacement sentence, re-dispatch it once rather than writing one
+yourself. A rewritten claim does not change the finding's identity - keep its id, severity and
+`severity_in` exactly as they were; only the sentence changes.
 
 **Apply every `FIX_REWRITE` into the item's `detail`**, replacing the text after `**Fix:**` and
 leaving the other two slots alone. Do this as you record, not later: `detail` is what posts, so a
@@ -527,9 +576,9 @@ writing one yourself - it read the site and you did not. If it still will not su
 downgrades and refutes in one step otherwise leaves a triage table where every dropped finding reads
 as low-severity noise, hiding that a `high` was dropped.
 
-**Every item must end S5 with one of the four verdicts, and - unless REFUTED - a fix verdict too.**
-A block that answers the claim and drops the `FIX_` lines has answered half the question; treat it
-exactly as you treat a missing block. Check each reply against the ids you
+**Every item must end S5 with one of the four verdicts, and - unless REFUTED - a claim verdict and a
+fix verdict too.** A block that answers whether the finding is true and drops the `CLAIM_` or `FIX_`
+lines has answered part of the question; treat it exactly as you treat a missing block. Check each reply against the ids you
 dispatched: a cluster refuter that returns four blocks for a six-item cluster has silently dropped
 two findings, and an item nobody answered is indistinguishable from one nobody raised. A refuter
 that returns prose without a parseable `VERDICT:` line, or that omits ids, has not answered -
@@ -596,6 +645,13 @@ automatically.
          "evidence": ["src/bar.ts:88"],
          "verdict": "CONFIRMED|DOWNGRADED|REFUTED|INCONCLUSIVE",  // no placeholders; see S5
          "verdict_reason": "the S5 refuter's reasoning, whichever verdict it reached",
+         "claim_verdict": "SOUND|REWRITTEN",   // the refuter's SEPARATE answer on whether `claim`
+                                               // DESCRIBES the verified defect - overstated and
+                                               // understated both fail. Required unless `verdict`
+                                               // is REFUTED; `validate` rejects a missing or
+                                               // unknown value. A REWRITE is applied into `claim`
+                                               // before the ledger is written, never stored beside it.
+         "claim_reason": "what the refuter matched the claim against, with file:line evidence",
          "fix_verdict": "SOUND|REWRITTEN|UNVERIFIABLE",  // the refuter's SEPARATE answer on the
                                                // `**Fix:**` slot. Required unless `verdict` is
                                                // REFUTED; `validate` rejects a missing or unknown
@@ -630,6 +686,24 @@ automatically.
    refuter's other answers. (`/pr-review-post`'s `reanchor` does this too, but the ledger should
    not be wrong in the meantime.)
 
+2b. **Sweep the claims for unsupported quantifiers**, as the deterministic backstop to S5's claim
+   verdict - this repo's `grep-safety-net.md` rule applied to the review's own output:
+
+   ```bash
+   grep -nE '\b(every|all|any|always|never|only|whole|entire|cannot|no [a-z]+)\b' \
+     <(python3 -c "import json,sys;[print(i['id'],i['claim']) for i in json.load(open(sys.argv[1]))['items']]" <ledger>)
+   ```
+
+   For each hit, either cite the evidence that supports the quantifier or delete it. Most will be
+   fine; the point is that each one gets looked at rather than skimmed.
+
+   **This net is one-directional, and that is not a gap to paper over.** Overstatement needs a
+   quantifier, so it is greppable. Understatement usually has none - "in the Simple-mode Comments
+   panel" is a narrowing noun phrase, and no regex reliably finds those, because the words that
+   narrow a claim are the same words that legitimately make it specific. So a clean sweep says
+   nothing at all about understated claims; that half rests entirely on `claim_verdict`, and this
+   step must not be read as covering it.
+
 2. Validate it, and fix any error it reports before continuing - do not proceed on a failing
    validate:
    `python3 ~/.claude/pr-review/pr-review-anchor.py validate <ledger>`
@@ -655,6 +729,13 @@ automatically.
    - a `Verdict summary` line: counts of CONFIRMED / DOWNGRADED / REFUTED / INCONCLUSIVE, and the
      refutation rate as `REFUTED / total`. State it plainly; it is the number that tells you
      whether the pressure-test is calibrated.
+   - a `Claim audit` line and section: counts of SOUND / REWRITTEN, then every REWRITTEN item -
+     id, the sentence as the generator wrote it, and the replacement. Report the severity revisions
+     as `N lowered / M raised` on the same line. Both numbers are calibration, and both are
+     one-sided by construction: a run that rewrites no claims, or that lowers several severities and
+     raises none, is a claim about the generator that deserves the same suspicion as a 0 %
+     refutation rate. It was 8 in 30 on the review that prompted this stage, and 4 lowered / 0
+     raised.
    - a `Fix audit` line and section: counts of SOUND / REWRITTEN / UNVERIFIABLE, then every
      REWRITTEN item - id, what was wrong with the generator's fix, and the replacement in one line -
      and every UNVERIFIABLE item with what could not be established. The rate is the calibration

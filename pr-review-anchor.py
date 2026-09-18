@@ -21,6 +21,20 @@ VERDICTS = ("CONFIRMED", "DOWNGRADED", "REFUTED", "INCONCLUSIVE")
 # a checked one once it is in the ledger.
 FIX_VERDICTS = ("SOUND", "REWRITTEN", "UNVERIFIABLE")
 
+# The S5 refuter's verdict on whether the `claim` sentence DESCRIBES the defect
+# that was verified - separate again from whether the finding is true. A verdict
+# answers "is this true", which a claim narrower than the defect passes, so a
+# scope error survives verification in both directions: overstated (reaches past
+# the evidence) and understated (names one mode, view or caller when the
+# mechanism is general). The claim leads every inline comment, so it is the first
+# thing an author reads and the last thing anything checks. Required wherever a
+# fix verdict is, and for the same reason: it posts verbatim.
+#
+# No UNVERIFIABLE member - a claim the refuter could not settle is already
+# INCONCLUSIVE at the verdict level, and a second way to say "I could not tell"
+# invites using it to avoid the question.
+CLAIM_VERDICTS = ("SOUND", "REWRITTEN")
+
 # Phrases that turn a `Fix:` slot from a prescription into a suggestion. The
 # contract's rule is that a fix is unhedged about what was verified and silent
 # about what was not: where the refuter cannot verify a concrete edit, it states
@@ -187,6 +201,15 @@ def validate(ledger):
                 errs.append(f"item {iid!r} Fix: slot is hedged ({', '.join(repr(h) for h in hedged)}) "
                             "- state the concrete edit, or state the constraint any fix must "
                             "satisfy; do not offer the author a choice you have not made")
+            # The claim is answered separately again. Scoped to the same
+            # publishable items as the fix: a REFUTED claim reaches nobody.
+            if it.get("claim_verdict") not in CLAIM_VERDICTS:
+                errs.append(f"item {iid!r} claim_verdict {it.get('claim_verdict')!r} not one of "
+                            f"{CLAIM_VERDICTS} (the claim leads every inline comment, so whether it "
+                            "describes the verified defect needs its own answer)")
+            if not str(it.get("claim_reason") or "").strip():
+                errs.append(f"item {iid!r} is missing required field 'claim_reason' "
+                            "(what the claim was matched against, with file:line evidence)")
         for field in ("file", "claim", "anchor_excerpt"):
             if not it.get(field):
                 errs.append(f"item {iid!r} is missing required field '{field}'")
