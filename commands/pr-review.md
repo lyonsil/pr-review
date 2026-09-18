@@ -205,7 +205,7 @@ a hedge, and a hedge should not inflate a severity on its way to an author. Reco
 value as `severity_in` and say in the S6 report that you normalized.
 
 **Letter suffixes are forbidden.** Never produce `2a` or `30g`. If an item splits, every
-downstream number shifts. The validator (S6 step 2) enforces this and will reject the ledger
+downstream number shifts. The validator (S6 step 4) enforces this and will reject the ledger
 otherwise - along with duplicate ids, non-contiguous ids, and wrong severity ordering.
 
 ## How every finding is written
@@ -635,7 +635,7 @@ automatically.
          "line": 142,
          "line_end": 148,
          "anchor_excerpt": "verbatim source lines this finding sits on - survives head drift",
-         "on_changed_line": true,              // VERIFY against the diff - see step 2a. Not the
+         "on_changed_line": true,              // VERIFY against the diff - see step 2. Not the
                                                // refuter's word: false = body-only, and a wrong
                                                // true fails the WHOLE review, not just its comment.
                                                // Missing/null is treated as "not excluded", so
@@ -670,7 +670,7 @@ automatically.
    }
    ```
 
-2a. **Derive `on_changed_line` from the diff, overwriting what S5 recorded.** Refuters get this
+2. **Derive `on_changed_line` from the diff, overwriting what S5 recorded.** Refuters get this
    wrong in both directions, and one contradicting its own stated evidence is not unusual - it is a
    mechanical property of the diff, not a judgement, so the diff wins. A wrong `false` silently
    demotes a good finding to the body; a wrong `true` makes GitHub reject the **entire** review.
@@ -686,7 +686,7 @@ automatically.
    refuter's other answers. (`/pr-review-post`'s `reanchor` does this too, but the ledger should
    not be wrong in the meantime.)
 
-2b. **Sweep the claims for unsupported quantifiers**, as the deterministic backstop to S5's claim
+3. **Sweep the claims for unsupported quantifiers**, as the deterministic backstop to S5's claim
    verdict - this repo's `grep-safety-net.md` rule applied to the review's own output:
 
    ```bash
@@ -704,7 +704,7 @@ automatically.
    nothing at all about understated claims; that half rests entirely on `claim_verdict`, and this
    step must not be read as covering it.
 
-2. Validate it, and fix any error it reports before continuing - do not proceed on a failing
+4. Validate it, and fix any error it reports before continuing - do not proceed on a failing
    validate:
    `python3 ~/.claude/pr-review/pr-review-anchor.py validate <ledger>`
    Failures print `error: ...` lines to stderr and exit 1 (letter-suffixed ids, non-contiguous or
@@ -714,8 +714,8 @@ automatically.
    cluster key name like `items` instead of `item_ids` is NOT, since it just reads as an empty
    cluster). Fix the ledger and re-run
    validate; never report a ledger as ready while validate is failing.
-3. Write `report.md` alongside it.
-4. Print, in this order. **This goes to a terminal, not to GitHub. Emit plain text and
+5. Write `report.md` alongside it.
+6. Print, in this order. **This goes to a terminal, not to GitHub. Emit plain text and
    GitHub-flavoured markdown only - never raw HTML.** No `<details>`, `<summary>`, `<br>`, or entities:
    the terminal prints those literally as tags instead of rendering them. Use a plain heading and
    an indented or bulleted list wherever you want a section to read as secondary.
