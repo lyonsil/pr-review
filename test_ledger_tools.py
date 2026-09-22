@@ -149,6 +149,7 @@ class TestPrimitives(unittest.TestCase):
     def test_anchor_reexports_the_moved_primitives(self):
         self.assertIs(anchor.parse_changed_lines, lt.parse_changed_lines)
         self.assertIs(anchor.fix_slot, lt.fix_slot)
+        self.assertIs(anchor.demotion_reason, lt.demotion_reason)
         self.assertEqual(anchor.SEVERITIES, lt.SEVERITIES)
 
     def test_write_ledger_is_atomic_and_keeps_a_backup(self):
@@ -175,6 +176,34 @@ class TestPrimitives(unittest.TestCase):
             lt.read_lines(d, "gone.ts", 1, 1)
         with self.assertRaisesRegex(lt.LedgerError, "line_end 1 is before line 2"):
             lt.read_lines(d, "a.ts", 2, 1)
+
+
+class TestDemotionReason(unittest.TestCase):
+    def test_dead_anchor(self):
+        self.assertEqual(lt.demotion_reason(item(1, anchor_status="dead")), "dead anchor")
+
+    def test_off_diff_anchor_status(self):
+        self.assertEqual(lt.demotion_reason(item(1, anchor_status="off-diff")),
+                         "not on a changed line")
+
+    def test_on_changed_line_explicitly_false(self):
+        self.assertEqual(lt.demotion_reason(item(1, on_changed_line=False)),
+                         "not on a changed line")
+
+    def test_dead_anchor_wins_over_on_changed_line_true(self):
+        # #2 from the fix-round-1 repro: a dead anchor demotes even though
+        # on_changed_line still says True (reanchor leaves on_changed_line
+        # alone for a dead excerpt - see mark_changed_lines/reanchor_item).
+        self.assertEqual(lt.demotion_reason(item(1, anchor_status="dead",
+                                                  on_changed_line=True)), "dead anchor")
+
+    def test_missing_or_none_on_changed_line_is_postable(self):
+        it = item(1); it.pop("on_changed_line", None)
+        self.assertIsNone(lt.demotion_reason(it))
+        self.assertIsNone(lt.demotion_reason(item(1, on_changed_line=None)))
+
+    def test_on_changed_line_true_with_no_anchor_status_is_postable(self):
+        self.assertIsNone(lt.demotion_reason(item(1, on_changed_line=True)))
 
 
 class TestSchema(unittest.TestCase):
@@ -805,6 +834,25 @@ class TestReport(unittest.TestCase):
         text = lt.render_report(l, "/s/l.json")
         self.assertIn("warning: nothing was refuted", text)
         self.assertIn("warning: 1 lowered / 0 raised", text)
+
+    def test_inline_count_agrees_with_build_payload_for_a_never_reanchored_item(self):
+        # Fix round 1 repro #1: an item that never went through S5 or
+        # reanchor has neither anchor_status nor on_changed_line set.
+        # build_payload posts it inline (see demotion_reason's docstring),
+        # so the count must match rather than reading it as body-only.
+        it = item(1)
+        it.pop("on_changed_line", None)
+        text = lt.render_report(led(it), "/s/l.json")
+        self.assertIn("1 inline + 0 in the body", text)
+
+    def test_inline_count_agrees_with_build_payload_for_a_dead_anchor(self):
+        # Fix round 1 repro #2: on_changed_line: true but anchor_status:
+        # "dead" - build_payload demotes this to the review body (a dead
+        # anchor is checked before on_changed_line), so it must count as
+        # body, not inline.
+        text = lt.render_report(
+            led(item(1, anchor_status="dead", on_changed_line=True)), "/s/l.json")
+        self.assertIn("0 inline + 1 in the body", text)
 
     def test_no_raw_html(self):
         self.assertNotRegex(self.text, r"<(details|summary|br)\b")

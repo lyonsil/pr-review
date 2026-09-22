@@ -11,7 +11,8 @@ import ledger_tools as lt  # noqa: E402
 # the payload builder's exclusion is REFUTED-only, so an unrecorded verdict
 # would post as though it had been confirmed. validate() rejects anything
 # outside this tuple for exactly that reason.
-from ledger_tools import SEVERITIES, VERDICTS, fix_slot, parse_changed_lines  # noqa: E402,F401
+from ledger_tools import (  # noqa: E402,F401
+    SEVERITIES, VERDICTS, demotion_reason, fix_slot, parse_changed_lines)
 
 # The S5 refuter's verdict on the finding's `**Fix:**` slot, which is separate
 # from its verdict on the claim. A claim is verified by observation; a fix is a
@@ -566,8 +567,12 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
             secondary.append((it, it["verdict"]))
             continue
 
-        if it.get("anchor_status") == "dead":
-            demoted.append((it, "dead anchor", it.get("anchor_note")
+        # demotion_reason is the single source of truth for this routing
+        # rule - render_report's inline/body count uses the same function so
+        # the two never disagree about what actually posts inline.
+        reason = demotion_reason(it)
+        if reason == "dead anchor":
+            demoted.append((it, reason, it.get("anchor_note")
                              or "the code this finding pointed at has moved or gone "
                                 "since the review ran"))
         # The S5 refuter records on_changed_line, and reanchor records
@@ -575,12 +580,12 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
         # diff - either means the finding does not sit on a line this PR
         # touched, and GitHub rejects the ENTIRE review when any one comment
         # anchors off a changed line - demoted for the same reason as a dead
-        # anchor. Only an explicit False or "off-diff" demotes: a missing or
-        # null on_changed_line means the field was never filled in (a ledger
-        # that has not been through S5 or reanchor), which must stay postable
-        # rather than silently demoting every item.
-        elif it.get("anchor_status") == "off-diff" or it.get("on_changed_line") is False:
-            demoted.append((it, "not on a changed line", it.get("anchor_note")
+        # anchor. demotion_reason treats a missing or null on_changed_line as
+        # postable: the field was never filled in (a ledger that has not
+        # been through S5 or reanchor), which must stay postable rather than
+        # silently demoting every item.
+        elif reason == "not on a changed line":
+            demoted.append((it, reason, it.get("anchor_note")
                              or "this finding is not on a line the PR changed, so GitHub "
                                 "cannot attach a comment to it"))
         else:

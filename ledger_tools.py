@@ -30,6 +30,31 @@ def fix_slot(detail):
     return detail[marker.end():].strip()
 
 
+def demotion_reason(it):
+    """Read-only. Why `it` cannot be posted as an inline comment, judged
+    purely by anchoring: "dead anchor" when `anchor_status` is "dead", "not
+    on a changed line" when `anchor_status` is "off-diff" or
+    `on_changed_line` is explicitly `False`, or `None` when it can be posted
+    inline.
+
+    Verdict and the REFUTED exclusion are the caller's job, not this
+    function's - `build_payload` checks REFUTED before ever reaching this,
+    and `render_report`'s inline/body count is scoped to non-REFUTED items
+    by its caller. A missing/null `on_changed_line` is NOT a demotion, only
+    an explicit `False` is: a ledger that has never been through S5 or
+    reanchor has neither field set, and must stay postable rather than
+    silently demoting every item.
+
+    This is the one routing rule `build_payload`'s inline/demoted split and
+    `render_report`'s inline/body count both have to agree on, so it lives
+    here once instead of twice."""
+    if it.get("anchor_status") == "dead":
+        return "dead anchor"
+    if it.get("anchor_status") == "off-diff" or it.get("on_changed_line") is False:
+        return "not on a changed line"
+    return None
+
+
 def parse_changed_lines(diff_text):
     """Map file path -> set of new-side line numbers added or modified."""
     changed, path, newline = {}, None, None
@@ -617,7 +642,7 @@ def render_report(ledger, ledger_path):
     out += ["", "## Previously reported", ""]
     out += [f"- #{it['id']} - {it['dedupe'].get('prior_url')}" for it in dd] or ["none"]
     live = [it for it in items if it.get("verdict") != "REFUTED"]
-    inline = sum(it.get("on_changed_line") is True for it in live)
+    inline = sum(demotion_reason(it) is None for it in live)
     body = len(live) - inline
     owners = {}
     for it in items:
