@@ -510,3 +510,115 @@ class TestBriefCli(unittest.TestCase):
         with open(json_path, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh), {"key": "C1", "owns": [1, 2],
                                               "hash": lt.template_hash()})
+
+
+class TestExcerptAndChangedLines(unittest.TestCase):
+    def setUp(self):
+        self.wt = tmpdir()
+        write(os.path.join(self.wt, "a.ts"), "l1\nl2\nl3\nl4\nl5\n")
+
+    def test_excerpt_cuts_line_to_line_end(self):
+        l = led(item(1, line=2, line_end=4, anchor_excerpt="paraphrase ..."))
+        lt.fill_excerpts(l, self.wt)
+        self.assertEqual(l["items"][0]["anchor_excerpt"], "l2\nl3\nl4")
+
+    def test_excerpt_errors_name_the_id_and_leave_the_ledger_alone(self):
+        l = led(item(1, line=2, line_end=2), item(2, sev="low", line=4, line_end=9))
+        before = json.dumps(l, sort_keys=True)
+        with self.assertRaisesRegex(lt.LedgerError, r"item 2: .*beyond end of file"):
+            lt.fill_excerpts(l, self.wt)
+        self.assertEqual(json.dumps(l, sort_keys=True), before)
+
+    def test_first_line_changed_is_on_changed_line(self):
+        l = led(item(1, line=2, line_end=3, anchor_excerpt="l2\nl3"))
+        lt.mark_changed_lines(l, self.wt, {"a.ts": {2}})
+        self.assertIs(l["items"][0]["on_changed_line"], True)
+
+    def test_range_moves_onto_its_first_changed_line_and_recuts(self):
+        l = led(item(1, line=2, line_end=4, anchor_excerpt="l2\nl3\nl4"))
+        notes = lt.mark_changed_lines(l, self.wt, {"a.ts": {3, 4}})
+        it = l["items"][0]
+        self.assertEqual((it["line"], it["anchor_excerpt"], it["on_changed_line"]),
+                         (3, "l3\nl4", True))
+        self.assertTrue(any("#1" in n and "2 -> 3" in n for n in notes), notes)
+
+    def test_nothing_changed_in_range_is_off_diff_and_flip_is_reported(self):
+        l = led(item(1, line=2, line_end=3, anchor_excerpt="l2\nl3", on_changed_line=True))
+        notes = lt.mark_changed_lines(l, self.wt, {"a.ts": {5}})
+        self.assertIs(l["items"][0]["on_changed_line"], False)
+        self.assertTrue(any("True -> False" in n for n in notes), notes)
+
+    def test_file_absent_from_the_diff_is_off_diff(self):
+        l = led(item(1, line=2, anchor_excerpt="l2"))
+        lt.mark_changed_lines(l, self.wt, {})
+        self.assertIs(l["items"][0]["on_changed_line"], False)
+
+    def test_changed_lines_errors_name_the_id_and_leave_the_ledger_alone(self):
+        # Not in the brief's Step 1 list: closes the same "no traceback" gap
+        # Task 4's ingest() had for --inconclusive ids missing from by_id -
+        # here an item missing 'file' must raise a named LedgerError instead
+        # of a bare KeyError escaping mark_changed_lines uncaught.
+        l = led(item(1, line=2, line_end=3, anchor_excerpt="l2\nl3"))
+        del l["items"][0]["file"]
+        before = json.dumps(l, sort_keys=True)
+        with self.assertRaisesRegex(lt.LedgerError, r"item 1: .*'file'"):
+            lt.mark_changed_lines(l, self.wt, {"a.ts": {2}})
+        self.assertEqual(json.dumps(l, sort_keys=True), before)
+
+
+class TestExcerptAndChangedLinesCli(unittest.TestCase):
+    def test_cmd_excerpt_writes_the_ledger_and_a_backup_on_success_and_leaves_it_untouched_on_failure(self):
+        d = tmpdir()
+        write(os.path.join(d, "a.ts"), "l1\nl2\nl3\n")
+        l = led(item(1, line=1, line_end=2, anchor_excerpt="stale"))
+        ledger_path = write(os.path.join(d, "ledger.json"), json.dumps(l))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_excerpt(SimpleNamespace(ledger=ledger_path, worktree=d))
+        self.assertEqual(code, 0, err.getvalue())
+        written = json.load(open(ledger_path))
+        self.assertEqual(written["items"][0]["anchor_excerpt"], "l1\nl2")
+        self.assertTrue(os.path.isfile(ledger_path + ".bak-excerpt"))
+
+        d2 = tmpdir()
+        write(os.path.join(d2, "a.ts"), "l1\nl2\n")
+        bad = led(item(1, line=1, line_end=9, anchor_excerpt="stale"))
+        bad_path = write(os.path.join(d2, "ledger.json"), json.dumps(bad))
+        before = open(bad_path, "rb").read()
+        out2, err2 = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out2), contextlib.redirect_stderr(err2):
+            code2 = anchor.cmd_excerpt(SimpleNamespace(ledger=bad_path, worktree=d2))
+        self.assertEqual(code2, 1)
+        lines = err2.getvalue().splitlines()
+        self.assertTrue(lines)
+        self.assertTrue(all(line.startswith("error: ") for line in lines), lines)
+        self.assertEqual(open(bad_path, "rb").read(), before)
+        self.assertFalse(os.path.isfile(bad_path + ".bak-excerpt"))
+
+    def test_cmd_changed_lines_writes_the_ledger_and_a_backup_on_success_and_leaves_it_untouched_on_missing_diff(self):
+        d = tmpdir()
+        write(os.path.join(d, "a.ts"), "l1\nl2\nl3\n")
+        l = led(item(1, line=2, line_end=2, anchor_excerpt="l2"))
+        ledger_path = write(os.path.join(d, "ledger.json"), json.dumps(l))
+        diff_path = write(os.path.join(d, "head.diff"),
+                          "--- a/a.ts\n+++ b/a.ts\n@@ -1,3 +1,3 @@\n l1\n+l2\n l3\n")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_changed_lines(SimpleNamespace(ledger=ledger_path, diff=diff_path,
+                                                             worktree=d))
+        self.assertEqual(code, 0, err.getvalue())
+        written = json.load(open(ledger_path))
+        self.assertIs(written["items"][0]["on_changed_line"], True)
+        self.assertTrue(os.path.isfile(ledger_path + ".bak-changed-lines"))
+
+        before = open(ledger_path, "rb").read()
+        bak_before = open(ledger_path + ".bak-changed-lines", "rb").read()
+        out2, err2 = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out2), contextlib.redirect_stderr(err2):
+            code2 = anchor.cmd_changed_lines(SimpleNamespace(
+                ledger=ledger_path, diff=os.path.join(d, "no-such.diff"), worktree=d))
+        self.assertEqual(code2, 1)
+        lines = err2.getvalue().splitlines()
+        self.assertEqual(lines, [f"error: diff file not found: {os.path.join(d, 'no-such.diff')}"])
+        self.assertEqual(open(ledger_path, "rb").read(), before)
+        self.assertEqual(open(ledger_path + ".bak-changed-lines", "rb").read(), bak_before)

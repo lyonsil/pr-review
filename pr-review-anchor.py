@@ -821,6 +821,35 @@ def cmd_ingest(args):
     return 0
 
 
+def cmd_excerpt(args):
+    try:
+        led = lt.load_json(args.ledger)
+        lt.fill_excerpts(led, args.worktree)
+        lt.write_ledger(args.ledger, led, "excerpt")
+    except lt.LedgerError as exc:
+        return _lt_errors(exc)
+    print(f"excerpted {len(led.get('items', []))} item(s)")
+    return 0
+
+
+def cmd_changed_lines(args):
+    try:
+        led = lt.load_json(args.ledger)
+        try:
+            with open(args.diff, encoding="utf-8", errors="replace") as fh:
+                diff_text = fh.read()
+        except FileNotFoundError:
+            raise lt.LedgerError(f"diff file not found: {args.diff}")
+        except OSError as exc:
+            raise lt.LedgerError(f"could not read diff file {args.diff}: {exc}")
+        notes = lt.mark_changed_lines(led, args.worktree, parse_changed_lines(diff_text))
+        lt.write_ledger(args.ledger, led, "changed-lines")
+    except lt.LedgerError as exc:
+        return _lt_errors(exc)
+    print("\n".join(notes))
+    return 0
+
+
 def cmd_preview(args):
     try:
         payload = load(args.payload)
@@ -871,6 +900,12 @@ def main():
     g = sub.add_parser("ingest")
     g.add_argument("ledger"); g.add_argument("--inconclusive"); g.add_argument("--reason")
     g.set_defaults(fn=cmd_ingest)
+    e = sub.add_parser("excerpt")
+    e.add_argument("ledger"); e.add_argument("--worktree", required=True)
+    e.set_defaults(fn=cmd_excerpt)
+    c = sub.add_parser("changed-lines")
+    c.add_argument("ledger"); c.add_argument("--diff", required=True)
+    c.add_argument("--worktree", required=True); c.set_defaults(fn=cmd_changed_lines)
     args = p.parse_args()
     sys.exit(args.fn(args))
 

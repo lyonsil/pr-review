@@ -162,6 +162,67 @@ def excerpt_errors(ledger, worktree):
     return errs
 
 
+def _excerpt_for(worktree, it, start=None):
+    start = start or it["line"]
+    end = max(it.get("line_end") or it["line"], start)
+    return "\n".join(read_lines(worktree, it["file"], start, end))
+
+
+def fill_excerpts(ledger, worktree):
+    """Mutating: call inside the `excerpt` subcommand, before `write_ledger`.
+
+    Sets every item's `anchor_excerpt` to lines `line..line_end` read verbatim
+    from `worktree`. All-or-nothing: every item is read first, and `ledger` is
+    only mutated once none of them error, so a failed call leaves it
+    untouched."""
+    new, errors = {}, []
+    for it in ledger.get("items", []):
+        try:
+            new[it["id"]] = _excerpt_for(worktree, it)
+        except (LedgerError, KeyError, TypeError) as exc:
+            errors.append(f"item {it.get('id')}: {exc}")
+    if errors:
+        raise LedgerError("\n".join(errors))
+    for it in ledger["items"]:
+        it["anchor_excerpt"] = new[it["id"]]
+
+
+def mark_changed_lines(ledger, worktree, changed):
+    """Mutating: call inside the `changed-lines` subcommand, before
+    `write_ledger`.
+
+    Same rule reanchor applies: a finding is on the diff when its anchor line
+    is a `+` line; a range whose first line is unchanged moves onto the first
+    changed line inside [line, line_end]. Returns the notes to print - one per
+    move and one per on_changed_line flip. An item missing `file` or `line`,
+    or whose recut excerpt cannot be read, is named in a `LedgerError` instead
+    of raising a bare `KeyError`/`TypeError` past this function."""
+    notes, errors = [], []
+    for it in ledger.get("items", []):
+        try:
+            lines = changed.get(it["file"], set())
+            start, end = it["line"], it.get("line_end") or it["line"]
+            was = it.get("on_changed_line")
+            if start in lines:
+                now = True
+            else:
+                hit = min((n for n in lines if start < n <= end), default=None)
+                now = hit is not None
+                if hit:
+                    it["line"] = hit
+                    it["anchor_excerpt"] = _excerpt_for(worktree, it)
+                    notes.append(f"moved #{it['id']} {start} -> {hit} "
+                                 "(first changed line in its range)")
+            if was is not None and bool(was) != now:
+                notes.append(f"flipped #{it['id']} on_changed_line {bool(was)} -> {now}")
+            it["on_changed_line"] = now
+        except (LedgerError, KeyError, TypeError) as exc:
+            errors.append(f"item {it.get('id')}: {exc}")
+    if errors:
+        raise LedgerError("\n".join(errors))
+    return notes
+
+
 # --- Refuter brief -----------------------------------------------------
 
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "refuter-brief.tmpl.md")
