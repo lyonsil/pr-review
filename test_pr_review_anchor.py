@@ -16,40 +16,40 @@ def item(i, sev="high", f="a.ts", line=10, cluster=None, **kw):
 
 class TestValidate(unittest.TestCase):
     def test_minimal_valid_ledger_has_no_errors(self):
-        led = {"items": [item(1), item(2, sev="low")], "clusters": []}
+        led = {"schema": 2, "items": [item(1), item(2, sev="low")], "clusters": []}
         self.assertEqual(anchor.validate(led), [])
 
     def test_letter_suffix_id_is_rejected(self):
-        led = {"items": [item("2a")], "clusters": []}
+        led = {"schema": 2, "items": [item("2a")], "clusters": []}
         errs = anchor.validate(led)
         self.assertTrue(any("not an integer" in e for e in errs), errs)
 
     def test_non_contiguous_ids_are_rejected(self):
-        led = {"items": [item(1), item(3, sev="low")], "clusters": []}
+        led = {"schema": 2, "items": [item(1), item(3, sev="low")], "clusters": []}
         self.assertTrue(any("contiguous" in e for e in anchor.validate(led)))
 
     def test_duplicate_ids_are_rejected(self):
-        led = {"items": [item(1), item(1, sev="low")], "clusters": []}
+        led = {"schema": 2, "items": [item(1), item(1, sev="low")], "clusters": []}
         self.assertTrue(any("duplicate" in e for e in anchor.validate(led)))
 
     def test_items_must_be_ordered_by_severity_then_file(self):
-        led = {"items": [item(1, sev="low"), item(2, sev="blocker")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, sev="low"), item(2, sev="blocker")], "clusters": []}
         self.assertTrue(any("ordered" in e for e in anchor.validate(led)))
 
     def test_unknown_severity_is_rejected(self):
-        led = {"items": [item(1, sev="critical")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, sev="critical")], "clusters": []}
         self.assertTrue(any("severity" in e for e in anchor.validate(led)))
 
     def test_cluster_referencing_unknown_item_is_rejected(self):
-        led = {"items": [item(1)], "clusters": [{"id": "C1", "item_ids": [1, 99]}]}
+        led = {"schema": 2, "items": [item(1)], "clusters": [{"id": "C1", "item_ids": [1, 99]}]}
         self.assertTrue(any("unknown item" in e for e in anchor.validate(led)))
 
     def test_item_referencing_unknown_cluster_is_rejected(self):
-        led = {"items": [item(1, cluster="C9")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, cluster="C9")], "clusters": []}
         self.assertTrue(any("unknown cluster" in e for e in anchor.validate(led)))
 
     def test_bool_id_is_rejected_and_not_treated_as_duplicate_of_int_1(self):
-        led = {"items": [item(1), item(True, sev="low")], "clusters": []}
+        led = {"schema": 2, "items": [item(1), item(True, sev="low")], "clusters": []}
         errs = anchor.validate(led)
         self.assertTrue(any("not an integer" in e for e in errs), errs)
         self.assertFalse(any("duplicate" in e for e in errs), errs)
@@ -95,7 +95,7 @@ class TestCliErrorHandling(unittest.TestCase):
         self._assert_single_curated_error(code, out, err)
 
     def test_valid_ledger_still_exits_0_with_exact_ok_line(self):
-        led = {"items": [item(1), item(2, sev="low")], "clusters": []}
+        led = {"schema": 2, "items": [item(1), item(2, sev="low")], "clusters": []}
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
             json.dump(led, fh)
             path = fh.name
@@ -271,7 +271,7 @@ class TestReanchorFixesOnChangedLine(unittest.TestCase):
         d = tempfile.mkdtemp()
         with open(os.path.join(d, "a.ts"), "w") as fh:
             fh.write(content)
-        led = {"schema": 1, "items": items, "clusters": []}
+        led = {"schema": 2, "items": items, "clusters": []}
         lp = os.path.join(d, "ledger.json")
         dp = os.path.join(d, "d.diff")
         with open(lp, "w") as fh:
@@ -420,7 +420,7 @@ class TestReanchorCli(unittest.TestCase):
         self._assert_single_curated_error(code, out, err)
 
     def test_missing_diff_file_emits_single_curated_error(self):
-        ledger_path = self._write_json({"items": [], "clusters": []})
+        ledger_path = self._write_json({"schema": 2, "items": [], "clusters": []})
         try:
             code, out, err = self._run(ledger_path, tempfile.mkdtemp(), "/no/such/diff.txt")
         finally:
@@ -431,7 +431,7 @@ class TestReanchorCli(unittest.TestCase):
         d = tempfile.mkdtemp()
         with open(os.path.join(d, "a.ts"), "w") as fh:
             fh.write("one\ntwo\nthree\n")
-        led = {"items": [{"file": "a.ts", "line": 2, "anchor_excerpt": "two"}], "clusters": []}
+        led = {"schema": 2, "items": [{"file": "a.ts", "line": 2, "anchor_excerpt": "two"}], "clusters": []}
         ledger_path = self._write_json(led)
         diff_path = self._write_text(DIFF)
         try:
@@ -446,7 +446,7 @@ class TestReanchorCli(unittest.TestCase):
         d = tempfile.mkdtemp()
         with open(os.path.join(d, "a.ts"), "w") as fh:
             fh.write("zero\none\ntwo\nthree\n")
-        led = {"items": [item(1, line=2, anchor_excerpt="two")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, line=2, anchor_excerpt="two")], "clusters": []}
         ledger_path = self._write_json(led)
         diff_path = self._write_text(
             "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n"
@@ -467,7 +467,7 @@ class TestReanchorCli(unittest.TestCase):
 
 class TestPayload(unittest.TestCase):
     def led(self):
-        return {"items": [
+        return {"schema": 2, "items": [
             item(1, sev="blocker", f="a.ts", line=10, cluster="C1", claim="alpha"),
             item(2, sev="blocker", f="a.ts", line=10, cluster=None, claim="beta"),
             item(3, sev="high", f="b.ts", line=20, cluster="C1", claim="gamma"),
@@ -486,7 +486,7 @@ class TestPayload(unittest.TestCase):
         self.assertIn("Similar fix as #1", b)
 
     def test_cluster_on_a_single_site_gets_no_cross_reference(self):
-        led = {"items": [item(1, cluster="C2")], "clusters": [{"id": "C2", "item_ids": [1]}]}
+        led = {"schema": 2, "items": [item(1, cluster="C2")], "clusters": [{"id": "C2", "item_ids": [1]}]}
         p = anchor.build_payload(led, ["all"], "intro")
         self.assertNotIn("Similar fix as", p["comments"][0]["body"])
 
@@ -541,7 +541,7 @@ class TestPayload(unittest.TestCase):
         self.assertIn("REFUTED", err.getvalue())
 
     def test_cluster_spanning_three_sites_cross_references_both_other_sites(self):
-        led = {"items": [
+        led = {"schema": 2, "items": [
             item(1, f="a.ts", line=1, cluster="C1"),
             item(2, f="b.ts", line=2, cluster="C1"),
             item(3, f="c.ts", line=3, cluster="C1"),
@@ -560,13 +560,13 @@ class TestPayload(unittest.TestCase):
         self.assertEqual(p["body"].count(anchor.ATTRIBUTION), 1)
 
     def test_item_with_null_line_raises_payload_error_naming_the_id(self):
-        led = {"items": [item(1, line=None)], "clusters": []}
+        led = {"schema": 2, "items": [item(1, line=None)], "clusters": []}
         with self.assertRaises(anchor.PayloadError) as ctx:
             anchor.build_payload(led, ["all"], "intro")
         self.assertIn("#1", str(ctx.exception))
 
     def test_item_missing_file_raises_payload_error_naming_the_id(self):
-        led = {"items": [item(1)], "clusters": []}
+        led = {"schema": 2, "items": [item(1)], "clusters": []}
         del led["items"][0]["file"]
         with self.assertRaises(anchor.PayloadError) as ctx:
             anchor.build_payload(led, ["all"], "intro")
@@ -576,7 +576,7 @@ class TestPayload(unittest.TestCase):
         # Mirrors the direct-digit case: --select 99 already errors when 99
         # isn't in the ledger, so a cluster whose item_ids include a
         # nonexistent id must error the same way, not silently expand short.
-        led = {"items": [item(1, cluster="C1")],
+        led = {"schema": 2, "items": [item(1, cluster="C1")],
                "clusters": [{"id": "C1", "item_ids": [1, 99]}]}
         with self.assertRaises(anchor.SelectionError):
             anchor.resolve_selection(led, ["C1"])
@@ -586,7 +586,7 @@ class TestIncludeRefuted(unittest.TestCase):
     def led(self):
         # Two independently REFUTED items (1 and 3) at different sites, plus
         # a plain CONFIRMED item (4) to use as a "not actually REFUTED" id.
-        led = {"items": [
+        led = {"schema": 2, "items": [
             item(1, sev="blocker", f="a.ts", line=10, cluster=None, claim="alpha"),
             item(2, sev="blocker", f="a.ts", line=10, cluster=None, claim="beta"),
             item(3, sev="high", f="b.ts", line=20, cluster=None, claim="gamma"),
@@ -620,7 +620,7 @@ class TestIncludeRefuted(unittest.TestCase):
     def test_include_refuted_does_not_resurrect_a_dead_anchor(self):
         # #2 is postable and only keeps the payload non-empty, so the dead #1
         # is proven absent rather than the whole build failing for being empty.
-        led = {"items": [item(1, f="a.ts"), item(2, f="b.ts", claim="live")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, f="a.ts"), item(2, f="b.ts", claim="live")], "clusters": []}
         led["items"][0]["verdict"] = "REFUTED"
         led["items"][0]["anchor_status"] = "dead"
         p = anchor.build_payload(led, ["all"], "intro", include_refuted=["1"])
@@ -654,7 +654,7 @@ class TestOnChangedLineExclusion(unittest.TestCase):
     instead (see TestDemotedFindings), demoted rather than excluded."""
 
     def led(self):
-        return {"items": [
+        return {"schema": 2, "items": [
             item(1, f="a.ts", line=10, claim="offline", on_changed_line=False),
             item(2, f="b.ts", line=20, claim="online", on_changed_line=True),
         ], "clusters": []}
@@ -677,7 +677,7 @@ class TestOnChangedLineExclusion(unittest.TestCase):
     def test_missing_or_none_on_changed_line_is_not_excluded(self):
         # A ledger that never went through S5/reanchor has no such field; it
         # must stay postable, not silently lose every item.
-        led = {"items": [item(1, f="a.ts"), item(2, f="b.ts", on_changed_line=None)],
+        led = {"schema": 2, "items": [item(1, f="a.ts"), item(2, f="b.ts", on_changed_line=None)],
                "clusters": []}
         p = anchor.build_payload(led, ["all"], "intro")
         self.assertEqual(sorted(c["path"] for c in p["comments"]), ["a.ts", "b.ts"])
@@ -698,7 +698,7 @@ class TestDemotedFindings(unittest.TestCase):
     rather than demoted even when it is also dead, unless re-admitted."""
 
     def test_dead_item_is_demoted_to_body_not_comments(self):
-        led = {"items": [item(1, claim="alpha", anchor_status="dead",
+        led = {"schema": 2, "items": [item(1, claim="alpha", anchor_status="dead",
                                anchor_note="anchor excerpt no longer present")],
                "clusters": []}
         with contextlib.redirect_stderr(io.StringIO()):
@@ -710,7 +710,7 @@ class TestDemotedFindings(unittest.TestCase):
         self.assertIn("anchor excerpt no longer present", p["body"])
 
     def test_on_changed_line_false_item_is_demoted_to_body_not_comments(self):
-        led = {"items": [item(1, claim="beta", on_changed_line=False)], "clusters": []}
+        led = {"schema": 2, "items": [item(1, claim="beta", on_changed_line=False)], "clusters": []}
         with contextlib.redirect_stderr(io.StringIO()):
             p = anchor.build_payload(led, ["1"], "intro")
         self.assertEqual(p["comments"], [])
@@ -718,7 +718,7 @@ class TestDemotedFindings(unittest.TestCase):
         self.assertIn("Findings that could not be attached to a line in this diff", p["body"])
 
     def test_demoted_section_includes_id_severity_location_claim_and_detail(self):
-        led = {"items": [item(1, sev="high", f="a.ts", line=42, claim="alpha claim",
+        led = {"schema": 2, "items": [item(1, sev="high", f="a.ts", line=42, claim="alpha claim",
                                detail="alpha detail", anchor_status="dead")],
                "clusters": []}
         with contextlib.redirect_stderr(io.StringIO()):
@@ -729,7 +729,7 @@ class TestDemotedFindings(unittest.TestCase):
         self.assertIn("alpha claim", body); self.assertIn("alpha detail", body)
 
     def test_refuted_item_is_never_demoted_even_if_dead(self):
-        led = {"items": [
+        led = {"schema": 2, "items": [
             item(1, claim="alpha", verdict="REFUTED", anchor_status="dead"),
             item(2, claim="beta"),  # keeps the payload non-empty
         ], "clusters": []}
@@ -739,7 +739,7 @@ class TestDemotedFindings(unittest.TestCase):
         self.assertNotIn("alpha", " ".join(c["body"] for c in p["comments"]))
 
     def test_readmitted_refuted_dead_item_lands_in_body_not_comments(self):
-        led = {"items": [item(1, claim="alpha", verdict="REFUTED", anchor_status="dead")],
+        led = {"schema": 2, "items": [item(1, claim="alpha", verdict="REFUTED", anchor_status="dead")],
                "clusters": []}
         with contextlib.redirect_stderr(io.StringIO()):
             p = anchor.build_payload(led, ["1"], "intro", include_refuted=["1"])
@@ -748,7 +748,7 @@ class TestDemotedFindings(unittest.TestCase):
         self.assertIn("Findings that could not be attached to a line in this diff", p["body"])
 
     def test_attribution_is_last_after_demoted_section(self):
-        led = {"items": [item(1, anchor_status="dead")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, anchor_status="dead")], "clusters": []}
         with contextlib.redirect_stderr(io.StringIO()):
             p = anchor.build_payload(led, ["1"], "intro")
         body = p["body"]
@@ -757,7 +757,7 @@ class TestDemotedFindings(unittest.TestCase):
         self.assertLess(body.index("Findings that could not be attached"), body.index(anchor.ATTRIBUTION))
 
     def test_attribution_stays_last_even_if_intro_already_ends_with_it(self):
-        led = {"items": [item(1, anchor_status="dead")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, anchor_status="dead")], "clusters": []}
         intro = f"Review intro.\n\n{anchor.ATTRIBUTION}"
         with contextlib.redirect_stderr(io.StringIO()):
             p = anchor.build_payload(led, ["1"], intro)
@@ -766,7 +766,7 @@ class TestDemotedFindings(unittest.TestCase):
         self.assertTrue(body.rstrip().endswith(anchor.ATTRIBUTION))
 
     def test_demotion_warning_distinguishes_from_exclusion(self):
-        led = {"items": [
+        led = {"schema": 2, "items": [
             item(1, claim="alpha", anchor_status="dead"),
             item(2, claim="beta", verdict="REFUTED"),
             item(3, claim="gamma"),  # keeps the payload non-empty
@@ -783,7 +783,7 @@ class TestDemotedFindings(unittest.TestCase):
 
 class TestIncludeRefutedNotSelected(unittest.TestCase):
     def led(self):
-        return {"items": [
+        return {"schema": 2, "items": [
             item(1, f="a.ts", claim="alpha", verdict="REFUTED"),
             item(2, f="b.ts", claim="beta"),
         ], "clusters": []}
@@ -815,7 +815,7 @@ class TestEmptyPayloadIsFatal(unittest.TestCase):
     findings are still in the body, just not anchored inline."""
 
     def test_selecting_only_a_refuted_id_raises_instead_of_building_empty(self):
-        led = {"items": [item(1, verdict="REFUTED")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, verdict="REFUTED")], "clusters": []}
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(anchor.PayloadError) as ctx:
                 anchor.build_payload(led, ["1"], "intro")
@@ -825,14 +825,14 @@ class TestEmptyPayloadIsFatal(unittest.TestCase):
     def test_selecting_only_a_dead_anchor_no_longer_raises(self):
         # A dead anchor is still a real, verified finding - it demotes into
         # the review body instead of failing the whole payload.
-        led = {"items": [item(1, claim="alpha", anchor_status="dead")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, claim="alpha", anchor_status="dead")], "clusters": []}
         with contextlib.redirect_stderr(io.StringIO()):
             p = anchor.build_payload(led, ["1"], "intro")
         self.assertEqual(p["comments"], [])
         self.assertIn("alpha", p["body"])
 
     def test_all_dead_selection_is_zero_comments_but_valid(self):
-        led = {"items": [item(1, claim="alpha", f="a.ts", anchor_status="dead"),
+        led = {"schema": 2, "items": [item(1, claim="alpha", f="a.ts", anchor_status="dead"),
                           item(2, claim="beta", f="b.ts", anchor_status="dead")],
                "clusters": []}
         with contextlib.redirect_stderr(io.StringIO()):
@@ -842,14 +842,14 @@ class TestEmptyPayloadIsFatal(unittest.TestCase):
 
     def test_a_cluster_with_no_working_item_ids_raises(self):
         # The `items:`-instead-of-`item_ids:` typo validate() cannot catch.
-        led = {"items": [item(1)], "clusters": [{"id": "C1", "items": [1]}]}
+        led = {"schema": 2, "items": [item(1)], "clusters": [{"id": "C1", "items": [1]}]}
         with self.assertRaises(anchor.PayloadError) as ctx:
             anchor.build_payload(led, ["C1"], "intro")
         self.assertIn("no items", str(ctx.exception))
 
     def test_an_empty_ledger_raises(self):
         with self.assertRaises(anchor.PayloadError):
-            anchor.build_payload({"items": [], "clusters": []}, ["all"], "intro")
+            anchor.build_payload({"schema": 2, "items": [], "clusters": []}, ["all"], "intro")
 
 
 class TestPayloadCli(unittest.TestCase):
@@ -879,7 +879,7 @@ class TestPayloadCli(unittest.TestCase):
             return fh.name
 
     def test_missing_ledger_malformed_json_and_missing_body_file_emit_curated_errors(self):
-        good_ledger = self._write_json({"items": [item(1)], "clusters": []})
+        good_ledger = self._write_json({"schema": 2, "items": [item(1)], "clusters": []})
         bad_ledger = self._write_text("{not valid json")
         body_file = self._write_text("intro")
         try:
@@ -895,7 +895,7 @@ class TestPayloadCli(unittest.TestCase):
             os.remove(good_ledger); os.remove(bad_ledger); os.remove(body_file)
 
     def test_unanchored_item_via_cli_emits_curated_error_not_a_traceback(self):
-        led = {"items": [item(1, line=None)], "clusters": []}
+        led = {"schema": 2, "items": [item(1, line=None)], "clusters": []}
         del led["items"][0]["anchor_excerpt"]  # not relevant to payload; keep item minimal
         ledger_path = self._write_json(led)
         body_file = self._write_text("intro")
@@ -908,7 +908,7 @@ class TestPayloadCli(unittest.TestCase):
     def test_empty_payload_via_cli_exits_1_with_a_curated_error(self):
         # Not _assert_single_curated_error: the REFUTED exclusion warning is a
         # second, legitimate stderr line alongside the fatal error.
-        led = {"items": [item(1, verdict="REFUTED")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, verdict="REFUTED")], "clusters": []}
         ledger_path = self._write_json(led)
         body_file = self._write_text("intro")
         try:
@@ -922,7 +922,7 @@ class TestPayloadCli(unittest.TestCase):
                             for line in err.splitlines()), err)
 
     def test_unrecognized_select_token_via_cli_emits_curated_error(self):
-        ledger_path = self._write_json({"items": [item(1)], "clusters": []})
+        ledger_path = self._write_json({"schema": 2, "items": [item(1)], "clusters": []})
         body_file = self._write_text("intro")
         try:
             code, out, err = self._run(ledger_path, ["bogus"], body_file)
@@ -931,7 +931,7 @@ class TestPayloadCli(unittest.TestCase):
         self._assert_single_curated_error(code, out, err)
 
     def test_end_to_end_cli_writes_valid_comment_event_json_to_stdout(self):
-        ledger_path = self._write_json({"items": [item(1, claim="alpha")], "clusters": []})
+        ledger_path = self._write_json({"schema": 2, "items": [item(1, claim="alpha")], "clusters": []})
         body_file = self._write_text("Review intro")
         try:
             code, out, err = self._run(ledger_path, None, body_file)
@@ -946,7 +946,7 @@ class TestPayloadCli(unittest.TestCase):
         self.assertIn("alpha", payload["comments"][0]["body"])
 
     def test_include_refuted_unknown_id_via_cli_emits_curated_error(self):
-        ledger_path = self._write_json({"items": [item(1)], "clusters": []})
+        ledger_path = self._write_json({"schema": 2, "items": [item(1)], "clusters": []})
         body_file = self._write_text("intro")
         try:
             code, out, err = self._run(ledger_path, None, body_file, include_refuted=["99"])
@@ -955,7 +955,7 @@ class TestPayloadCli(unittest.TestCase):
         self._assert_single_curated_error(code, out, err)
 
     def test_include_refuted_end_to_end_posts_the_overridden_item(self):
-        led = {"items": [item(1, claim="alpha")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, claim="alpha")], "clusters": []}
         led["items"][0]["verdict"] = "REFUTED"
         ledger_path = self._write_json(led)
         body_file = self._write_text("Review intro")
@@ -970,7 +970,7 @@ class TestPayloadCli(unittest.TestCase):
         self.assertIn("alpha", payload["comments"][0]["body"])
 
     def test_all_dead_selection_via_cli_exits_0_with_zero_comments_and_demoted_body(self):
-        led = {"items": [item(1, claim="alpha", anchor_status="dead")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, claim="alpha", anchor_status="dead")], "clusters": []}
         ledger_path = self._write_json(led)
         body_file = self._write_text("Review intro")
         try:
@@ -1030,7 +1030,7 @@ class TestRenderPreview(unittest.TestCase):
             self.assertNotIn(tag, out)
 
     def test_demoted_section_renders_verbatim_and_is_not_truncated(self):
-        led = {"items": [item(1, claim="alpha claim", detail="alpha detail " + "z" * 500,
+        led = {"schema": 2, "items": [item(1, claim="alpha claim", detail="alpha detail " + "z" * 500,
                                anchor_status="dead",
                                anchor_note="anchor excerpt no longer present")],
                "clusters": []}
@@ -1126,31 +1126,35 @@ class TestTerminalVerdictRequired(unittest.TestCase):
     though the finding had been confirmed."""
 
     def test_placeholder_verdict_is_rejected(self):
-        led = {"items": [item(1, verdict="PENDING")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, verdict="PENDING")], "clusters": []}
         self.assertTrue(any("not one of" in e and "verdict" in e
                             for e in anchor.validate(led)), anchor.validate(led))
 
     def test_missing_verdict_is_rejected(self):
-        led = {"items": [item(1)], "clusters": []}
+        led = {"schema": 2, "items": [item(1)], "clusters": []}
         del led["items"][0]["verdict"]
         self.assertTrue(any("verdict" in e for e in anchor.validate(led)))
 
     def test_each_terminal_verdict_is_accepted(self):
-        for v in anchor.VERDICTS:
-            led = {"items": [item(1, verdict=v)], "clusters": []}
+        """Literals, not anchor.VERDICTS: iterating the constant under test
+        shrinks with it, so narrowing the accepted set would still pass."""
+        for v, extra in (("CONFIRMED", {}), ("REFUTED", {}), ("INCONCLUSIVE", {}),
+                         ("DOWNGRADED", {"severity": "low", "severity_in": "high",
+                                         "fold_note": "folded"})):
+            led = {"schema": 2, "items": [item(1, verdict=v, **extra)], "clusters": []}
             self.assertEqual(anchor.validate(led), [], f"{v} should be legal")
 
     def test_blank_verdict_reason_is_rejected(self):
-        led = {"items": [item(1, verdict_reason="   ")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, verdict_reason="   ")], "clusters": []}
         self.assertTrue(any("verdict_reason" in e for e in anchor.validate(led)))
 
     def test_missing_severity_in_is_rejected(self):
-        led = {"items": [item(1)], "clusters": []}
+        led = {"schema": 2, "items": [item(1)], "clusters": []}
         del led["items"][0]["severity_in"]
         self.assertTrue(any("severity_in" in e for e in anchor.validate(led)))
 
     def test_unknown_severity_in_is_rejected(self):
-        led = {"items": [item(1, severity_in="critical")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, severity_in="critical")], "clusters": []}
         self.assertTrue(any("severity_in" in e for e in anchor.validate(led)))
 
 
@@ -1162,30 +1166,31 @@ class TestFixVerdictRequired(unittest.TestCase):
     written while every claim under them was sound."""
 
     def test_missing_fix_verdict_is_rejected(self):
-        led = {"items": [item(1)], "clusters": []}
+        led = {"schema": 2, "items": [item(1)], "clusters": []}
         del led["items"][0]["fix_verdict"]
         errs = anchor.validate(led)
         self.assertTrue(any("fix_verdict" in e for e in errs), errs)
 
     def test_unknown_fix_verdict_is_rejected(self):
-        led = {"items": [item(1, fix_verdict="PENDING")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, fix_verdict="PENDING")], "clusters": []}
         errs = anchor.validate(led)
         self.assertTrue(any("fix_verdict" in e and "not one of" in e for e in errs), errs)
 
     def test_each_fix_verdict_is_accepted(self):
-        for v in anchor.FIX_VERDICTS:
-            led = {"items": [item(1, fix_verdict=v)], "clusters": []}
+        """Literals, not anchor.FIX_VERDICTS - see test_each_claim_verdict_is_accepted."""
+        for v in ("SOUND", "REWRITTEN", "UNVERIFIABLE"):
+            led = {"schema": 2, "items": [item(1, fix_verdict=v)], "clusters": []}
             self.assertEqual(anchor.validate(led), [], f"{v} should be legal")
 
     def test_blank_fix_reason_is_rejected(self):
-        led = {"items": [item(1, fix_reason="   ")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, fix_reason="   ")], "clusters": []}
         errs = anchor.validate(led)
         self.assertTrue(any("fix_reason" in e for e in errs), errs)
 
     def test_refuted_item_needs_no_fix_verdict(self):
         """A REFUTED finding posts nowhere, so its fix text reaches no author.
         Holding it to this bar would block ledgers over text nobody reads."""
-        led = {"items": [item(1, verdict="REFUTED")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, verdict="REFUTED")], "clusters": []}
         del led["items"][0]["fix_verdict"]
         del led["items"][0]["fix_reason"]
         self.assertEqual(anchor.validate(led), [])
@@ -1194,20 +1199,20 @@ class TestFixVerdictRequired(unittest.TestCase):
         """DOWNGRADED and INCONCLUSIVE post inline whenever they anchor, so the
         exemption is REFUTED-only and must not widen to every non-CONFIRMED."""
         for v in ("CONFIRMED", "DOWNGRADED", "INCONCLUSIVE"):
-            led = {"items": [item(1, verdict=v)], "clusters": []}
+            led = {"schema": 2, "items": [item(1, verdict=v)], "clusters": []}
             del led["items"][0]["fix_verdict"]
             errs = anchor.validate(led)
             self.assertTrue(any("fix_verdict" in e for e in errs),
                             f"{v} publishes, so it must require a fix verdict; got {errs}")
 
     def test_missing_claim_verdict_is_rejected(self):
-        led = {"items": [item(1)], "clusters": []}
+        led = {"schema": 2, "items": [item(1)], "clusters": []}
         del led["items"][0]["claim_verdict"]
         errs = anchor.validate(led)
         self.assertTrue(any("claim_verdict" in e for e in errs), errs)
 
     def test_unknown_claim_verdict_is_rejected(self):
-        led = {"items": [item(1, claim_verdict="PENDING")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, claim_verdict="PENDING")], "clusters": []}
         errs = anchor.validate(led)
         self.assertTrue(any("claim_verdict" in e and "not one of" in e for e in errs), errs)
 
@@ -1216,7 +1221,7 @@ class TestFixVerdictRequired(unittest.TestCase):
         test makes the loop shrink with it, so narrowing the accepted set would
         pass. Verified by mutation: dropping REWRITTEN fails this only as written."""
         for v in ("SOUND", "REWRITTEN"):
-            led = {"items": [item(1, claim_verdict=v)], "clusters": []}
+            led = {"schema": 2, "items": [item(1, claim_verdict=v)], "clusters": []}
             self.assertEqual(anchor.validate(led), [], f"{v} should be legal")
 
     def test_claim_verdict_has_no_unverifiable_escape(self):
@@ -1224,18 +1229,18 @@ class TestFixVerdictRequired(unittest.TestCase):
         level. A second way to say 'I could not tell' would be used to dodge the
         scope question, which is the one this field exists to force."""
         self.assertNotIn("UNVERIFIABLE", anchor.CLAIM_VERDICTS)
-        led = {"items": [item(1, claim_verdict="UNVERIFIABLE")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, claim_verdict="UNVERIFIABLE")], "clusters": []}
         errs = anchor.validate(led)
         self.assertTrue(any("claim_verdict" in e for e in errs), errs)
 
     def test_blank_claim_reason_is_rejected(self):
-        led = {"items": [item(1, claim_reason="   ")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, claim_reason="   ")], "clusters": []}
         errs = anchor.validate(led)
         self.assertTrue(any("claim_reason" in e for e in errs), errs)
 
     def test_refuted_item_needs_no_claim_verdict(self):
         """Same exemption as the fix: a REFUTED finding's claim reaches nobody."""
-        led = {"items": [item(1, verdict="REFUTED")], "clusters": []}
+        led = {"schema": 2, "items": [item(1, verdict="REFUTED")], "clusters": []}
         for k in ("claim_verdict", "claim_reason", "fix_verdict", "fix_reason"):
             del led["items"][0][k]
         self.assertEqual(anchor.validate(led), [])
@@ -1244,7 +1249,7 @@ class TestFixVerdictRequired(unittest.TestCase):
         """The claim leads the inline comment for DOWNGRADED and INCONCLUSIVE
         findings exactly as it does for CONFIRMED ones."""
         for v in ("CONFIRMED", "DOWNGRADED", "INCONCLUSIVE"):
-            led = {"items": [item(1, verdict=v)], "clusters": []}
+            led = {"schema": 2, "items": [item(1, verdict=v)], "clusters": []}
             del led["items"][0]["claim_verdict"]
             errs = anchor.validate(led)
             self.assertTrue(any("claim_verdict" in e for e in errs),
@@ -1260,20 +1265,20 @@ class TestFixSlotHedges(unittest.TestCase):
         return f"**What happens:** x\n\n**Why it matters:** y\n\n**Fix:** {fix}"
 
     def test_hedged_fix_is_rejected_and_names_the_phrase(self):
-        led = {"items": [item(1, detail=self._detail(
+        led = {"schema": 2, "items": [item(1, detail=self._detail(
             "consider whether the entries should be copied"))], "clusters": []}
         errs = anchor.validate(led)
         self.assertTrue(any("hedged" in e for e in errs), errs)
         self.assertTrue(any("consider whether" in e for e in errs), errs)
 
     def test_imperative_fix_passes(self):
-        led = {"items": [item(1, detail=self._detail(
+        led = {"schema": 2, "items": [item(1, detail=self._detail(
             "Copy each entry with a spread and a fresh `submenu` array in "
             "`menu.service.ts:220`, preserving the `click` closures."))], "clusters": []}
         self.assertEqual(anchor.validate(led), [])
 
     def test_hedge_is_matched_case_insensitively(self):
-        led = {"items": [item(1, detail=self._detail("Perhaps widen the guard."))],
+        led = {"schema": 2, "items": [item(1, detail=self._detail("Perhaps widen the guard."))],
                "clusters": []}
         self.assertTrue(any("hedged" in e for e in anchor.validate(led)))
 
@@ -1283,25 +1288,25 @@ class TestFixSlotHedges(unittest.TestCase):
         detail = ("**What happens:** x\n\n**Why it matters:** a reader may want "
                   "to consider whether this path is hot.\n\n**Fix:** Widen the "
                   "guard at `a.ts:10`.")
-        led = {"items": [item(1, detail=detail)], "clusters": []}
+        led = {"schema": 2, "items": [item(1, detail=detail)], "clusters": []}
         self.assertEqual(anchor.validate(led), [])
 
     def test_detail_without_a_fix_slot_is_not_linted(self):
         """This is a lint over the fix text, not an enforcement of the slot's
         presence - a ledger predating the slots still validates."""
-        led = {"items": [item(1, detail="consider whether to do something")],
+        led = {"schema": 2, "items": [item(1, detail="consider whether to do something")],
                "clusters": []}
         self.assertEqual(anchor.validate(led), [])
 
     def test_refuted_item_may_carry_a_hedged_fix(self):
-        led = {"items": [item(1, verdict="REFUTED",
+        led = {"schema": 2, "items": [item(1, verdict="REFUTED",
                               detail=self._detail("perhaps revisit this"))], "clusters": []}
         self.assertEqual(anchor.validate(led), [])
 
     def test_no_fix_is_needed_is_a_hedge(self):
         """The real case: a Fix slot reading 'none is needed if the trade
         stands' asserts a decision the author still has to make."""
-        led = {"items": [item(1, detail=self._detail(
+        led = {"schema": 2, "items": [item(1, detail=self._detail(
             "none is needed if the trade stands"))], "clusters": []}
         self.assertTrue(any("hedged" in e for e in anchor.validate(led)))
 
@@ -1326,7 +1331,7 @@ class TestBodyOnlyVerdicts(unittest.TestCase):
     opt-in that restores the old verdict-based routing."""
 
     def _led(self, verdict):
-        return {"items": [
+        return {"schema": 2, "items": [
             item(1, sev="blocker", f="a.ts", line=10, claim="real one"),
             item(2, sev="low", f="b.ts", line=20, claim="smaller one",
                  verdict=verdict, verdict_reason="unreachable in production"),
@@ -1452,7 +1457,7 @@ class TestBodyOnlyVerdicts(unittest.TestCase):
     def test_same_file_findings_cross_reference_each_other(self):
         """The payoff for anchoring-based placement: a reader in one file sees
         what else lands in it without reading the whole review."""
-        led = {"items": [
+        led = {"schema": 2, "items": [
             item(1, sev="high", f="a.ts", line=10, claim="first"),
             item(2, sev="low", f="a.ts", line=20, claim="second"),
             item(3, sev="low", f="b.ts", line=30, claim="elsewhere"),

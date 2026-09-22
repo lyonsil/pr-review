@@ -3,7 +3,9 @@
 for the PR review pipeline. Standard library only."""
 import argparse, json, os, re, sys
 
-SEVERITIES = ("blocker", "high", "medium", "low")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ledger_tools as lt  # noqa: E402
+from ledger_tools import SEVERITIES, fix_slot, parse_changed_lines  # noqa: E402,F401
 
 # The S5 refuter's four terminal verdicts. Every item must carry one: a
 # placeholder like "PENDING" means a refuter's answer was never recorded, and
@@ -133,22 +135,6 @@ class IncludeRefutedError(ValueError):
     """An --include-refuted token doesn't name a REFUTED item in this ledger."""
 
 
-def fix_slot(detail):
-    """The text of a finding's `**Fix:**` slot, or "" when `detail` has none.
-
-    The slot is always last by contract, so everything after the label is the
-    fix. Returns "" rather than raising on a `detail` shaped some other way:
-    this is a lint over the fix text, not an enforcement of the slot's
-    presence, and a ledger written before the slots existed still validates.
-    """
-    if not detail:
-        return ""
-    marker = re.search(r"\*\*Fix:\*\*", detail)
-    if not marker:
-        return ""
-    return detail[marker.end():].strip()
-
-
 def hedges_in(text):
     """Every hedge phrase present in `text`, as matched, in pattern order."""
     found = []
@@ -162,6 +148,9 @@ def hedges_in(text):
 def validate(ledger):
     if not isinstance(ledger, dict):
         return [f"ledger root must be a JSON object, got {type(ledger).__name__}"]
+    if ledger.get("schema") != lt.SCHEMA:
+        return [f"ledger schema {ledger.get('schema')!r} is not supported - this is schema "
+                f"{ledger.get('schema')} and {lt.SCHEMA} is required; re-run /pr-review"]
     errs = []
     items = ledger.get("items", [])
     clusters = ledger.get("clusters", [])
@@ -262,27 +251,6 @@ def cmd_validate(args):
         return 1
     print(f"ledger ok: {len(led.get('items', []))} items, {len(led.get('clusters', []))} clusters")
     return 0
-
-
-def parse_changed_lines(diff_text):
-    """Map file path -> set of new-side line numbers added or modified."""
-    changed, path, newline = {}, None, None
-    for line in diff_text.splitlines():
-        if line.startswith("+++ "):
-            raw = line[4:].strip()
-            path = None if raw == "/dev/null" else (raw[2:] if raw.startswith("b/") else raw)
-            if path:
-                changed.setdefault(path, set())
-            newline = None
-        elif line.startswith("@@"):
-            m = re.search(r"\+(\d+)", line)
-            newline = int(m.group(1)) if m else None
-        elif path and newline is not None:
-            if line.startswith("+"):
-                changed[path].add(newline); newline += 1
-            elif line.startswith(" "):
-                newline += 1
-    return changed
 
 
 def reanchor_item(item, worktree, changed):
