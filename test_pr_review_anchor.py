@@ -145,12 +145,17 @@ class TestReanchor(unittest.TestCase):
         it = item(1, line=2, anchor_excerpt="two")
         self.assertEqual(anchor.reanchor_item(it, wt, {"a.ts": {1}})[0], "dead")
 
-    def test_anchor_not_on_a_changed_line_is_dead(self):
+    def test_anchor_not_on_a_changed_line_is_off_diff_not_dead(self):
         wt = self._wt("one\ntwo\nthree\n")
         it = item(1, line=2, anchor_excerpt="two")
-        status, _, why = anchor.reanchor_item(it, wt, {"a.ts": {99}})
-        self.assertEqual(status, "dead")
+        status, line, why = anchor.reanchor_item(it, wt, {"a.ts": {99}})
+        self.assertEqual((status, line), ("off-diff", 2))
         self.assertIn("changed line", why)
+
+    def test_a_range_moves_onto_its_first_changed_line(self):
+        wt = self._wt("one\ntwo\nthree\nfour\n")
+        it = item(1, line=2, line_end=4, anchor_excerpt="two\nthree\nfour")
+        self.assertEqual(anchor.reanchor_item(it, wt, {"a.ts": {3}})[:2], ("moved", 3))
 
     def test_missing_file_is_dead(self):
         it = item(1, line=2, anchor_excerpt="two", f="gone.ts")
@@ -296,11 +301,13 @@ class TestReanchorFixesOnChangedLine(unittest.TestCase):
                               on_changed_line=True)], {"a.ts": {99}})
         self.assertIs(out[1]["on_changed_line"], False)
 
-    def test_a_dead_anchor_is_off_diff_by_definition(self):
+    def test_a_dead_excerpt_leaves_on_changed_line_alone(self):
+        """A vanished excerpt says nothing about the diff: flipping the field here
+        is what made a bad excerpt look like a refuter's mistake."""
         out = self._run([item(1, line=2, anchor_excerpt="nowhere",
                               on_changed_line=True)], {"a.ts": {2}})
         self.assertEqual(out[1]["anchor_status"], "dead")
-        self.assertIs(out[1]["on_changed_line"], False)
+        self.assertIs(out[1]["on_changed_line"], True)
 
     def test_a_moved_anchor_is_judged_at_its_new_line(self):
         out = self._run([item(1, line=1, anchor_excerpt="three",
@@ -460,9 +467,58 @@ class TestReanchorCli(unittest.TestCase):
             os.remove(ledger_path); os.remove(diff_path)
         self.assertEqual(code, 0)
         self.assertEqual(err, "")
-        self.assertIn("ok=0 moved=1 dead=0", out)
+        self.assertIn("ok=0 moved=1 off-diff=0 dead=0", out)
         self.assertEqual(rewritten["items"][0]["anchor_status"], "moved")
         self.assertEqual(rewritten["items"][0]["line"], 3)
+
+    def test_head_is_recorded_and_dry_run_writes_nothing(self):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "a.ts"), "w") as fh:
+            fh.write("one\ntwo\nthree\nfour\n")
+        lp = self._write_json({"schema": 2, "items": [item(1, line=2, anchor_excerpt="two")],
+                               "clusters": []})
+        dp = self._write_text(DIFF)
+        before = open(lp).read()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            anchor.cmd_reanchor(SimpleNamespace(ledger=lp, worktree=d, diff=dp,
+                                                head="abc123", dry_run=True))
+        self.assertEqual(open(lp).read(), before)
+        self.assertIn("dry run", out.getvalue())
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            anchor.cmd_reanchor(SimpleNamespace(ledger=lp, worktree=d, diff=dp,
+                                                head="abc123", dry_run=False))
+        self.assertEqual(json.load(open(lp))["anchored_sha"], "abc123")
+
+    def test_range_line_end_past_eof_after_move_is_dead(self):
+        """A range whose anchor moves forward far enough that its recut span
+        runs past the end of the file cannot be re-excerpted; reanchor must
+        report it dead (via the wrapped lt.read_lines call) rather than crash
+        or silently truncate the excerpt."""
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "a.ts"), "w") as fh:
+            fh.write("one\ntwo\nthree\nfour\n")
+        led = {"schema": 2, "items": [item(1, line=2, line_end=4,
+                                           anchor_excerpt="two\nthree\nfour")],
+               "clusters": []}
+        ledger_path = self._write_json(led)
+        # Line 2 (the recorded anchor) is untouched; line 3 is the only
+        # changed line in range, so the anchor moves 2 -> 3 and the recut
+        # keeps the original 3-line span, asking for lines 3..5 of a 4-line
+        # file.
+        diff_path = self._write_text(
+            "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n"
+            "@@ -1,4 +1,4 @@\n one\n two\n-three\n+THREE\n four\n"
+        )
+        try:
+            code, out, err = self._run(ledger_path, d, diff_path)
+            with open(ledger_path) as fh:
+                rewritten = json.load(fh)
+        finally:
+            os.remove(ledger_path); os.remove(diff_path)
+        self.assertEqual(code, 0)
+        self.assertEqual(rewritten["items"][0]["anchor_status"], "dead")
+        self.assertIn("beyond end of file", rewritten["items"][0]["anchor_note"])
 
 
 class TestPayload(unittest.TestCase):

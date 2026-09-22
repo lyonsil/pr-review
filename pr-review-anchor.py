@@ -319,13 +319,18 @@ def reanchor_item(item, worktree, changed):
     if len(hits) > 1:
         others = [h for h in hits if h != new_line]
         note = f"ambiguous: excerpt also matches at line(s) {others}; nearest to {old} chosen"
-    if new_line not in changed.get(item["file"], set()):
-        dead_reason = "no longer on a changed line; cannot be posted inline"
-        return "dead", new_line, f"{dead_reason} ({note})" if note else dead_reason
-    if new_line == item.get("line"):
-        return "ok", new_line, note
-    moved_reason = f"moved {item.get('line')} -> {new_line}"
-    return "moved", new_line, f"{moved_reason} ({note})" if note else moved_reason
+    span = max((item.get("line_end") or item.get("line") or new_line)
+               - (item.get("line") or new_line), 0)
+    file_changed = changed.get(item["file"], set())
+    target = new_line if new_line in file_changed else min(
+        (n for n in file_changed if new_line < n <= new_line + span), default=None)
+    if target is None:
+        reason = "not on a changed line; cannot be posted inline"
+        return "off-diff", new_line, f"{reason} ({note})" if note else reason
+    if target == item.get("line"):
+        return "ok", target, note
+    moved_reason = f"moved {item.get('line')} -> {target}"
+    return "moved", target, f"{moved_reason} ({note})" if note else moved_reason
 
 
 def cmd_reanchor(args):
@@ -354,41 +359,55 @@ def cmd_reanchor(args):
         print(f"error: could not read diff file {args.diff}: {exc}", file=sys.stderr)
         return 1
 
-    counts = {"ok": 0, "moved": 0, "dead": 0}
+    counts = {"ok": 0, "moved": 0, "off-diff": 0, "dead": 0}
     corrected = []
     for it in led.get("items", []):
         status, new_line, why = reanchor_item(it, args.worktree, changed)
-        it["anchor_status"], it["anchor_note"] = status, why
-        if new_line and status != "dead":
+        if status in ("ok", "moved") and new_line != it.get("line"):
+            span_end = (it.get("line_end") or it.get("line")) - it.get("line") + new_line
+            new_end = max(span_end, new_line)
+            try:
+                excerpt = lt.read_lines(args.worktree, it["file"], new_line, new_end)
+            except lt.LedgerError as exc:
+                status, why = "dead", str(exc)
+            else:
+                it["line"], it["line_end"] = new_line, new_end
+                it["anchor_excerpt"] = "\n".join(excerpt)
+        elif status == "off-diff" and new_line:
             it["line"] = new_line
-        # Derive on_changed_line from the diff rather than trusting the S5
-        # refuter's answer. Refuters get this wrong in both directions - and a
-        # wrong `true` is the one error that fails the ENTIRE review POST, not
-        # just its own comment, so the mechanical answer must win over the
-        # judged one. A dead anchor is off-diff by definition.
-        was = it.get("on_changed_line")
-        now = status != "dead" and (it.get("line") in changed.get(it.get("file"), set()))
-        it["on_changed_line"] = now
-        if was is not None and bool(was) != now:
-            corrected.append((it.get("id"), bool(was), now))
+        it["anchor_status"], it["anchor_note"] = status, why
+        # on_changed_line is a property of the diff. A dead excerpt tells us
+        # nothing about the diff, so it leaves the recorded value alone.
+        if status != "dead":
+            was = it.get("on_changed_line")
+            now = status in ("ok", "moved")
+            it["on_changed_line"] = now
+            if was is not None and bool(was) != now:
+                corrected.append((it.get("id"), bool(was), now))
         counts[status] += 1
         print(f"{status:6} #{it.get('id')!s:<3} {it.get('file')}:{new_line or it.get('line')} {why}")
 
-    try:
-        with open(args.ledger, "w", encoding="utf-8") as fh:
-            json.dump(led, fh, indent=2)
-    except OSError as exc:
-        print(f"error: could not write ledger file {args.ledger}: {exc}", file=sys.stderr)
-        return 1
+    if getattr(args, "head", None):
+        led["anchored_sha"] = args.head
+    if getattr(args, "dry_run", False):
+        print("dry run: ledger not written")
+    else:
+        try:
+            lt.write_ledger(args.ledger, led, "reanchor")
+        except OSError as exc:
+            print(f"error: could not write ledger file {args.ledger}: {exc}", file=sys.stderr)
+            return 1
 
     if corrected:
-        # Say so loudly: the refuter asserted something the diff contradicts,
-        # which is worth knowing about that refuter's other answers too.
+        # on_changed_line is derived from the diff, not trusted from the
+        # ledger, so any change here means the recorded value no longer
+        # matches - worth knowing about the ledger's other answers too.
         detail = ", ".join(f"#{iid} {was} -> {now}" for iid, was, now in corrected)
-        print(f"\nnotice: corrected on_changed_line against the diff for "
+        print(f"\nnotice: on_changed_line changed against the diff for "
               f"{len(corrected)} item(s) - {detail}", file=sys.stderr)
 
-    print(f"\nok={counts['ok']} moved={counts['moved']} dead={counts['dead']}")
+    print(f"\nok={counts['ok']} moved={counts['moved']} off-diff={counts['off-diff']} "
+          f"dead={counts['dead']}")
     return 0
 
 
@@ -917,7 +936,10 @@ def main():
     v.add_argument("--worktree"); v.set_defaults(fn=cmd_validate)
     r = sub.add_parser("reanchor")
     r.add_argument("ledger"); r.add_argument("--worktree", required=True)
-    r.add_argument("--diff", required=True); r.set_defaults(fn=cmd_reanchor)
+    r.add_argument("--diff", required=True)
+    r.add_argument("--head", help="Record this SHA as the ledger's anchored_sha")
+    r.add_argument("--dry-run", action="store_true", help="Report status without writing the ledger")
+    r.set_defaults(fn=cmd_reanchor)
     y = sub.add_parser("payload")
     y.add_argument("ledger"); y.add_argument("--select", nargs="*")
     y.add_argument("--include-refuted", nargs="*",
