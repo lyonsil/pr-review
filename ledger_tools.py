@@ -354,6 +354,10 @@ def ingest(ledger, briefs_dir, verdicts_dir, expected_hash, inconclusive=(), rea
     inconclusive = {int(i) for i in inconclusive}
     if inconclusive and not reason.strip():
         raise LedgerError("--inconclusive needs --reason")
+    unknown = sorted(inconclusive - set(by_id))
+    if unknown:
+        raise LedgerError("\n".join(
+            f"--inconclusive names item {iid}, which is not in this ledger" for iid in unknown))
     metas = []
     if os.path.isdir(briefs_dir):
         for f in sorted(os.listdir(briefs_dir)):

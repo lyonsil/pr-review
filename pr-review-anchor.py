@@ -806,7 +806,12 @@ def cmd_ingest(args):
     try:
         led = lt.load_json(args.ledger)
         ldir = os.path.dirname(os.path.abspath(args.ledger))
-        ids = [int(t) for t in re.split(r"[,\s]+", args.inconclusive or "") if t]
+        tokens = [t for t in re.split(r"[,\s]+", args.inconclusive or "") if t]
+        try:
+            ids = [int(t) for t in tokens]
+        except ValueError:
+            raise lt.LedgerError(f"--inconclusive must be a list of integer ids, "
+                                 f"got {args.inconclusive!r}")
         notes = lt.ingest(led, os.path.join(ldir, "briefs"), os.path.join(ldir, "verdicts"),
                           lt.template_hash(), inconclusive=ids, reason=args.reason or "")
         lt.write_ledger(args.ledger, led, "ingest")

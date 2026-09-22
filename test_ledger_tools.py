@@ -384,6 +384,20 @@ class TestIngest(unittest.TestCase):
                                "CLAIM_VERDICT 'MAYBE' not one of")
         self.assertIngestFails(GOOD.replace("CLAIM_REASON: matched at a.ts:3", "CLAIM_REASON:"),
                                "item 1: CLAIM_REASON is empty")
+        self.assertIngestFails(GOOD.replace("KEY: C1", "KEY: C9"), "KEY header is")
+        self.assertIngestFails(GOOD.replace("ITEM: 2", "ITEM: two"), "is not an integer id")
+        self.assertIngestFails(None, "--inconclusive needs --reason", inconclusive=[1])
+        # 1 and 2 are real (and cover C1's whole `owns`, so no verdict file is
+        # needed for them); 9 is not - without the id check, 9 would survive
+        # all the way to the apply loop and crash on `by_id[9]`.
+        self.assertIngestFails(None, r"--inconclusive names item 9, which is not in this ledger",
+                               inconclusive=[1, 2, 9], reason="stalled")
+
+    def test_no_briefs_is_rejected(self):
+        d = tmpdir()
+        l = led(item(1))
+        with self.assertRaisesRegex(lt.LedgerError, "no briefs in"):
+            lt.ingest(l, os.path.join(d, "briefs"), os.path.join(d, "verdicts"), "abc")
 
     def test_fix_rewrite_without_a_fix_slot_in_detail_is_rejected_before_any_mutation(self):
         # replace_fix_slot() has its own "no **Fix:** slot" guard too, so a
@@ -458,6 +472,22 @@ class TestIngestCli(unittest.TestCase):
         self.assertTrue(all(line.startswith("error: ") for line in lines), lines)
         self.assertEqual(open(bad_path, "rb").read(), before)
         self.assertFalse(os.path.isfile(bad_path + ".bak-ingest"))
+
+    def test_cmd_ingest_rejects_a_non_integer_inconclusive_token_without_a_traceback(self):
+        good = GOOD.replace("BRIEF: abc", f"BRIEF: {lt.template_hash()}")
+        d, l = ingest_env(good)
+        ledger_path = write(os.path.join(d, "ledger.json"), json.dumps(l))
+        before = open(ledger_path, "rb").read()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_ingest(SimpleNamespace(ledger=ledger_path, inconclusive="abc",
+                                                      reason="whatever"))
+        self.assertEqual(code, 1)
+        lines = err.getvalue().splitlines()
+        self.assertTrue(lines)
+        self.assertTrue(all(line.startswith("error: ") for line in lines), lines)
+        self.assertEqual(open(ledger_path, "rb").read(), before)
+        self.assertFalse(os.path.isfile(ledger_path + ".bak-ingest"))
 
 
 class TestBriefCli(unittest.TestCase):
