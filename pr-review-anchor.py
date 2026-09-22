@@ -5,14 +5,13 @@ import argparse, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ledger_tools as lt  # noqa: E402
-from ledger_tools import SEVERITIES, fix_slot, parse_changed_lines  # noqa: E402,F401
 
 # The S5 refuter's four terminal verdicts. Every item must carry one: a
 # placeholder like "PENDING" means a refuter's answer was never recorded, and
 # the payload builder's exclusion is REFUTED-only, so an unrecorded verdict
 # would post as though it had been confirmed. validate() rejects anything
 # outside this tuple for exactly that reason.
-VERDICTS = ("CONFIRMED", "DOWNGRADED", "REFUTED", "INCONCLUSIVE")
+from ledger_tools import SEVERITIES, VERDICTS, fix_slot, parse_changed_lines  # noqa: E402,F401
 
 # The S5 refuter's verdict on the finding's `**Fix:**` slot, which is separate
 # from its verdict on the claim. A claim is verified by observation; a fix is a
@@ -803,6 +802,20 @@ def cmd_brief(args):
     return 0
 
 
+def cmd_ingest(args):
+    try:
+        led = lt.load_json(args.ledger)
+        ldir = os.path.dirname(os.path.abspath(args.ledger))
+        ids = [int(t) for t in re.split(r"[,\s]+", args.inconclusive or "") if t]
+        notes = lt.ingest(led, os.path.join(ldir, "briefs"), os.path.join(ldir, "verdicts"),
+                          lt.template_hash(), inconclusive=ids, reason=args.reason or "")
+        lt.write_ledger(args.ledger, led, "ingest")
+    except lt.LedgerError as exc:
+        return _lt_errors(exc)
+    print("\n".join(notes))
+    return 0
+
+
 def cmd_preview(args):
     try:
         payload = load(args.payload)
@@ -850,6 +863,9 @@ def main():
     b = sub.add_parser("brief")
     b.add_argument("ledger"); b.add_argument("--key", required=True)
     b.add_argument("--context", required=True); b.set_defaults(fn=cmd_brief)
+    g = sub.add_parser("ingest")
+    g.add_argument("ledger"); g.add_argument("--inconclusive"); g.add_argument("--reason")
+    g.set_defaults(fn=cmd_ingest)
     args = p.parse_args()
     sys.exit(args.fn(args))
 

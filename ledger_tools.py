@@ -294,3 +294,132 @@ def parse_verdict_file(text):
         for k in b:
             b[k] = b[k].strip()
     return header, blocks
+
+
+# --- Ingest --------------------------------------------------------------
+
+VERDICTS = ("CONFIRMED", "DOWNGRADED", "REFUTED", "INCONCLUSIVE")
+
+
+def replace_fix_slot(detail, text):
+    m = re.search(r"\*\*Fix:\*\*", detail or "")
+    if not m:
+        raise LedgerError("detail has no **Fix:** slot to rewrite")
+    text = re.sub(r"^\s*\*\*Fix:\*\*\s*", "", text)
+    return detail[:m.end()] + " " + text.strip()
+
+
+def _block_errors(b, it):
+    iid, v = b["ITEM"], b.get("VERDICT")
+    e = []
+    if v not in VERDICTS:
+        e.append(f"item {iid}: VERDICT {v!r} not one of {VERDICTS}")
+    if b.get("SEVERITY") not in SEVERITIES:
+        e.append(f"item {iid}: SEVERITY {b.get('SEVERITY')!r} not one of {SEVERITIES}")
+    if b.get("ON_CHANGED_LINE", "").lower() not in ("true", "false"):
+        e.append(f"item {iid}: ON_CHANGED_LINE must be true or false")
+    if not b.get("REASON"):
+        e.append(f"item {iid}: REASON is empty")
+    if v == "REFUTED":
+        extra = [k for k in b if k.startswith(("CLAIM_", "FIX_"))]
+        if extra:
+            e.append(f"item {iid}: REFUTED must omit {', '.join(extra)}")
+        return e
+    for slot, allowed in (("CLAIM", ("SOUND", "REWRITTEN")),
+                          ("FIX", ("SOUND", "REWRITTEN", "UNVERIFIABLE"))):
+        sv = b.get(f"{slot}_VERDICT")
+        if sv not in allowed:
+            e.append(f"item {iid}: {slot}_VERDICT {sv!r} not one of {allowed}")
+        if not b.get(f"{slot}_REASON"):
+            e.append(f"item {iid}: {slot}_REASON is empty")
+        if sv == "REWRITTEN" and not b.get(f"{slot}_REWRITE"):
+            e.append(f"item {iid}: {slot}_VERDICT REWRITTEN without {slot}_REWRITE")
+        if sv != "REWRITTEN" and b.get(f"{slot}_REWRITE"):
+            e.append(f"item {iid}: {slot}_REWRITE given with {slot}_VERDICT {sv}")
+    if b.get("FIX_VERDICT") == "REWRITTEN" and not re.search(r"\*\*Fix:\*\*", it.get("detail") or ""):
+        e.append(f"item {iid}: detail has no **Fix:** slot to rewrite")
+    if v == "DOWNGRADED" and b.get("SEVERITY") in SEV_RANK and \
+            SEV_RANK[b["SEVERITY"]] <= SEV_RANK.get(it.get("severity_in"), 99):
+        e.append(f"item {iid}: DOWNGRADED but SEVERITY {b['SEVERITY']} is not lower than "
+                 f"severity_in {it.get('severity_in')}")
+    return e
+
+
+def ingest(ledger, briefs_dir, verdicts_dir, expected_hash, inconclusive=(), reason=""):
+    """Merge refuter verdict files into `ledger` in place and apply the
+    mechanical claim/fix rewrites. Raises `LedgerError` listing every problem
+    found across all briefs/verdicts at once, and only mutates `ledger` once
+    no problems remain, so a failed call leaves it untouched."""
+    by_id = {it["id"]: it for it in ledger.get("items", [])}
+    inconclusive = {int(i) for i in inconclusive}
+    if inconclusive and not reason.strip():
+        raise LedgerError("--inconclusive needs --reason")
+    metas = []
+    if os.path.isdir(briefs_dir):
+        for f in sorted(os.listdir(briefs_dir)):
+            if f.endswith(".json"):
+                metas.append(load_json(os.path.join(briefs_dir, f), what="brief meta"))
+    if not metas:
+        raise LedgerError(f"no briefs in {briefs_dir} - render them with `brief` before dispatch")
+    errors, answers = [], {}
+    dispatched = {i for m in metas for i in m["owns"]}
+    for iid in sorted(set(by_id) - dispatched):
+        errors.append(f"item {iid} was never dispatched")
+    for m in metas:
+        key, owns = m["key"], set(m["owns"])
+        path = os.path.join(verdicts_dir, f"{key}.txt")
+        if not os.path.isfile(path):
+            if not owns <= inconclusive:
+                errors.append(f"{key}: no verdict file at {path} (owns {sorted(owns)})")
+            continue
+        with open(path, encoding="utf-8") as fh:
+            try:
+                header, blocks = parse_verdict_file(fh.read())
+            except LedgerError as exc:
+                errors.append(f"{key}: {exc}"); continue
+        if header.get("BRIEF") != expected_hash:
+            errors.append(f"{key}: BRIEF {header.get('BRIEF')!r} does not match the current "
+                          f"template ({expected_hash}) - render the brief with `brief`")
+        if header.get("KEY") != key:
+            errors.append(f"{key}: KEY header is {header.get('KEY')!r}")
+        seen = set()
+        for b in blocks:
+            try:
+                iid = int(b["ITEM"])
+            except ValueError:
+                errors.append(f"{key}: ITEM {b['ITEM']!r} is not an integer id"); continue
+            if iid in seen:
+                errors.append(f"{key}: item {iid} answered twice"); continue
+            seen.add(iid)
+            if iid not in owns:
+                errors.append(f"{key}: does not own item {iid}"); continue
+            errs = _block_errors(b, by_id[iid])
+            errors.extend(f"{key}: {x}" for x in errs)
+            if not errs:
+                answers[iid] = (key, b)
+        for iid in sorted(owns - seen - inconclusive):
+            errors.append(f"{key}: no answer for item {iid}")
+    if errors:
+        raise LedgerError("\n".join(errors))
+
+    for iid, (key, b) in answers.items():
+        it = by_id[iid]
+        it.update(verdict=b["VERDICT"], severity=b["SEVERITY"], verdict_reason=b["REASON"],
+                  on_changed_line=b["ON_CHANGED_LINE"].lower() == "true", refuter_key=key)
+        if b["VERDICT"] != "REFUTED":
+            it.update(claim_verdict=b["CLAIM_VERDICT"], claim_reason=b["CLAIM_REASON"],
+                      fix_verdict=b["FIX_VERDICT"], fix_reason=b["FIX_REASON"])
+            if b["CLAIM_VERDICT"] == "REWRITTEN":
+                it["claim_original"], it["claim"] = it["claim"], b["CLAIM_REWRITE"]
+            if b["FIX_VERDICT"] == "REWRITTEN":
+                it["fix_original"] = fix_slot(it["detail"])
+                it["detail"] = replace_fix_slot(it["detail"], b["FIX_REWRITE"])
+    for iid in inconclusive - set(answers):
+        it = by_id[iid]
+        it.update(verdict="INCONCLUSIVE", verdict_reason=reason, unanswered=True,
+                  fix_verdict="UNVERIFIABLE", fix_reason=reason, claim_reason=reason,
+                  refuter_key="none")
+    for it in by_id.values():
+        it.pop("refuter_note", None)
+    return [f"ingested {len(answers)} answer(s) from {len(metas)} refuter(s)"
+            + (f"; {len(inconclusive - set(answers))} closed INCONCLUSIVE" if inconclusive else "")]

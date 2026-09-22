@@ -310,6 +310,156 @@ class TestParseVerdictFile(unittest.TestCase):
             lt.parse_verdict_file(GOOD + "KEY: C2\n")
 
 
+def ingest_env(verdict_text, owns=(1, 2), key="C1"):
+    d = tmpdir()
+    write(os.path.join(d, "briefs", f"{key}.json"),
+          json.dumps({"key": key, "owns": list(owns), "hash": "abc"}))
+    if verdict_text is not None:
+        write(os.path.join(d, "verdicts", f"{key}.txt"), verdict_text)
+    l = led(item(1, cluster="C1", detail="**What happens:** x\n\n**Fix:** old fix",
+                 refuter_note="hint"),
+            item(2, cluster="C1", sev="low"),
+            clusters=[{"id": "C1", "title": "t", "shared_fix": "s", "item_ids": [1, 2]}])
+    for it in l["items"]:
+        for k in ("verdict", "verdict_reason", "claim_verdict", "claim_reason",
+                  "fix_verdict", "fix_reason"):
+            it.pop(k, None)
+    return d, l
+
+
+class TestIngest(unittest.TestCase):
+    def run_ingest(self, text, **kw):
+        d, l = ingest_env(text, **{k: v for k, v in kw.items() if k in ("owns", "key")})
+        extra = {k: v for k, v in kw.items() if k in ("inconclusive", "reason")}
+        lt.ingest(l, os.path.join(d, "briefs"), os.path.join(d, "verdicts"), "abc", **extra)
+        return {it["id"]: it for it in l["items"]}
+
+    def test_applies_verdicts_and_the_fix_rewrite_keeping_the_original(self):
+        out = self.run_ingest(GOOD)
+        self.assertEqual(out[1]["verdict"], "CONFIRMED")
+        self.assertEqual(out[1]["fix_original"], "old fix")
+        self.assertTrue(out[1]["detail"].endswith("**Fix:** call `b()` instead"))
+        self.assertIn("**What happens:** x", out[1]["detail"])
+        self.assertEqual(out[1]["refuter_key"], "C1")
+        self.assertNotIn("refuter_note", out[1])
+        self.assertEqual(out[2]["verdict"], "REFUTED")
+
+    def test_never_touches_severity_in(self):
+        out = self.run_ingest(GOOD.replace("SEVERITY: high", "SEVERITY: medium"))
+        self.assertEqual((out[1]["severity_in"], out[1]["severity"]), ("high", "medium"))
+
+    def test_claim_rewrite_saves_the_original(self):
+        text = GOOD.replace("CLAIM_VERDICT: SOUND", "CLAIM_VERDICT: REWRITTEN\n"
+                            "CLAIM_REWRITE: The pane goes blank on resize.")
+        out = self.run_ingest(text)
+        self.assertEqual((out[1]["claim_original"], out[1]["claim"]),
+                         ("c", "The pane goes blank on resize."))
+
+    def assertIngestFails(self, text, pattern, **kw):
+        with self.assertRaisesRegex(lt.LedgerError, pattern):
+            self.run_ingest(text, **kw)
+
+    def test_failures_are_named(self):
+        self.assertIngestFails(None, "C1: no verdict file")
+        self.assertIngestFails(GOOD.replace("BRIEF: abc", "BRIEF: zzz"), "does not match")
+        self.assertIngestFails(GOOD.split("ITEM: 2")[0], "no answer for item 2")
+        self.assertIngestFails(GOOD.replace("ITEM: 2", "ITEM: 1"), "answered twice")
+        self.assertIngestFails(GOOD.replace("ITEM: 2", "ITEM: 7"), "does not own item 7")
+        self.assertIngestFails(GOOD.replace("VERDICT: CONFIRMED", "VERDICT: PENDING"), "VERDICT")
+        self.assertIngestFails(GOOD.replace("FIX_VERDICT: REWRITTEN", "FIX_VERDICT: SOUND"),
+                               "FIX_REWRITE given with FIX_VERDICT SOUND")
+        self.assertIngestFails(GOOD.replace("FIX_REWRITE: call `b()` instead\n", ""),
+                               "FIX_VERDICT REWRITTEN without FIX_REWRITE")
+        self.assertIngestFails(GOOD.replace("REASON: nothing produces it",
+                                            "REASON: x\nCLAIM_VERDICT: REWRITTEN\n"
+                                            "CLAIM_REWRITE: y"), "REFUTED")
+        self.assertIngestFails(GOOD.replace("VERDICT: CONFIRMED", "VERDICT: DOWNGRADED"),
+                               "not lower than severity_in")
+        self.assertIngestFails(GOOD.replace("ON_CHANGED_LINE: true", "ON_CHANGED_LINE: maybe"),
+                               "ON_CHANGED_LINE must be true or false")
+        self.assertIngestFails(
+            GOOD.replace("REASON: line one\nline two mentions VERDICT: inline, which is fine\n",
+                        "REASON:\n"), "item 1: REASON is empty")
+        self.assertIngestFails(GOOD.replace("CLAIM_VERDICT: SOUND", "CLAIM_VERDICT: MAYBE"),
+                               "CLAIM_VERDICT 'MAYBE' not one of")
+        self.assertIngestFails(GOOD.replace("CLAIM_REASON: matched at a.ts:3", "CLAIM_REASON:"),
+                               "item 1: CLAIM_REASON is empty")
+
+    def test_fix_rewrite_without_a_fix_slot_in_detail_is_rejected_before_any_mutation(self):
+        # replace_fix_slot() has its own "no **Fix:** slot" guard too, so a
+        # LedgerError with matching text alone would pass even if the
+        # _block_errors check that is meant to catch this up front (before any
+        # item is mutated) were deleted - replace_fix_slot's guard would still
+        # fire, just after item 1 was already partly rewritten. Asserting the
+        # ledger is byte-for-byte unchanged is what actually pins the
+        # _block_errors guard down.
+        d, l = ingest_env(GOOD)
+        l["items"][0]["detail"] = "**What happens:** x"  # no **Fix:** slot
+        before = json.dumps(l, sort_keys=True)
+        with self.assertRaisesRegex(lt.LedgerError, r"detail has no \*\*Fix:\*\* slot to rewrite"):
+            lt.ingest(l, os.path.join(d, "briefs"), os.path.join(d, "verdicts"), "abc")
+        self.assertEqual(json.dumps(l, sort_keys=True), before)
+
+    def test_every_problem_is_reported_at_once(self):
+        bad = GOOD.replace("VERDICT: CONFIRMED", "VERDICT: PENDING").replace(
+            "SEVERITY: low", "SEVERITY: huge")
+        with self.assertRaises(lt.LedgerError) as cm:
+            self.run_ingest(bad)
+        self.assertGreaterEqual(len(str(cm.exception).splitlines()), 2)
+
+    def test_a_failed_ingest_changes_nothing(self):
+        d, l = ingest_env(GOOD.replace("VERDICT: CONFIRMED", "VERDICT: PENDING"))
+        before = json.dumps(l, sort_keys=True)
+        with self.assertRaises(lt.LedgerError):
+            lt.ingest(l, os.path.join(d, "briefs"), os.path.join(d, "verdicts"), "abc")
+        self.assertEqual(json.dumps(l, sort_keys=True), before)
+
+    def test_inconclusive_closes_unanswered_ids(self):
+        out = self.run_ingest(None, inconclusive=[1, 2], reason="refuter stalled")
+        self.assertEqual(out[1]["verdict"], "INCONCLUSIVE")
+        self.assertTrue(out[1]["unanswered"])
+        self.assertEqual(out[1]["fix_verdict"], "UNVERIFIABLE")
+        self.assertEqual(out[1]["verdict_reason"], "refuter stalled")
+
+    def test_an_item_no_brief_owns_is_an_error(self):
+        d, l = ingest_env(GOOD)
+        l["items"].append(item(3, sev="low"))
+        with self.assertRaisesRegex(lt.LedgerError, "item 3 was never dispatched"):
+            lt.ingest(l, os.path.join(d, "briefs"), os.path.join(d, "verdicts"), "abc")
+
+
+class TestIngestCli(unittest.TestCase):
+    def test_cmd_ingest_writes_the_ledger_and_a_backup_on_success_and_leaves_it_untouched_on_failure(self):
+        # cmd_ingest hashes the real template (unlike lt.ingest() in the tests
+        # above, which is given "abc" directly), so the verdict file's BRIEF
+        # header has to match that real hash here.
+        good = GOOD.replace("BRIEF: abc", f"BRIEF: {lt.template_hash()}")
+        d, l = ingest_env(good)
+        ledger_path = write(os.path.join(d, "ledger.json"), json.dumps(l))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_ingest(SimpleNamespace(ledger=ledger_path, inconclusive=None,
+                                                      reason=None))
+        self.assertEqual(code, 0, err.getvalue())
+        written = {it["id"]: it for it in json.load(open(ledger_path))["items"]}
+        self.assertEqual(written[1]["verdict"], "CONFIRMED")
+        self.assertTrue(os.path.isfile(ledger_path + ".bak-ingest"))
+
+        d2, l2 = ingest_env(good.replace("VERDICT: CONFIRMED", "VERDICT: PENDING"))
+        bad_path = write(os.path.join(d2, "ledger.json"), json.dumps(l2))
+        before = open(bad_path, "rb").read()
+        out2, err2 = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out2), contextlib.redirect_stderr(err2):
+            code2 = anchor.cmd_ingest(SimpleNamespace(ledger=bad_path, inconclusive=None,
+                                                       reason=None))
+        self.assertEqual(code2, 1)
+        lines = err2.getvalue().splitlines()
+        self.assertTrue(lines)
+        self.assertTrue(all(line.startswith("error: ") for line in lines), lines)
+        self.assertEqual(open(bad_path, "rb").read(), before)
+        self.assertFalse(os.path.isfile(bad_path + ".bak-ingest"))
+
+
 class TestBriefCli(unittest.TestCase):
     def test_cmd_brief_writes_md_and_json_and_prints_the_md_path(self):
         d = tmpdir()
