@@ -52,6 +52,10 @@ HEDGE_PATTERNS = (
     r"\bperhaps\b",
     r"\bif\s+you\s+(?:prefer|like)\b",
     r"\bno(?:ne)?\s+(?:fix|change)?\s*is\s+needed\b",
+    r"\bno\s+code\s+change\b",
+    r"\bnot\s+required\s+(?:for|in)\s+this\s+(?:PR|change|pull\s+request)\b",
+    r"\bshould\s+be\s+(?:downgraded|closed|dropped)\b",
+    r"\bif\b.{0,120}?\bthen\s+(?:downgrade|close|drop)\b",
 )
 
 # Sections for verdicts routed to the review body instead of posting inline.
@@ -145,7 +149,7 @@ def hedges_in(text):
     return found
 
 
-def validate(ledger):
+def validate(ledger, worktree=None):
     if not isinstance(ledger, dict):
         return [f"ledger root must be a JSON object, got {type(ledger).__name__}"]
     if ledger.get("schema") != lt.SCHEMA:
@@ -192,13 +196,46 @@ def validate(ledger):
                             "satisfy; do not offer the author a choice you have not made")
             # The claim is answered separately again. Scoped to the same
             # publishable items as the fix: a REFUTED claim reaches nobody.
-            if it.get("claim_verdict") not in CLAIM_VERDICTS:
+            # An unanswered INCONCLUSIVE item is exempt too: there was nothing
+            # for a refuter to verify the claim against.
+            unanswered = it.get("unanswered") is True and it.get("verdict") == "INCONCLUSIVE"
+            if not unanswered and it.get("claim_verdict") not in CLAIM_VERDICTS:
                 errs.append(f"item {iid!r} claim_verdict {it.get('claim_verdict')!r} not one of "
                             f"{CLAIM_VERDICTS} (the claim leads every inline comment, so whether it "
                             "describes the verified defect needs its own answer)")
-            if not str(it.get("claim_reason") or "").strip():
+            if not unanswered and not str(it.get("claim_reason") or "").strip():
                 errs.append(f"item {iid!r} is missing required field 'claim_reason' "
                             "(what the claim was matched against, with file:line evidence)")
+            for msg in lt.claim_shape_errors(it.get("claim")):
+                errs.append(f"item {iid!r} {msg}")
+            if it.get("claim_verdict") == "REWRITTEN" and (
+                    not it.get("claim_original") or it.get("claim_original") == it.get("claim")):
+                errs.append(f"item {iid!r} claim_verdict is REWRITTEN but claim_original is "
+                            "missing or identical to claim - the rewrite was not applied")
+            if it.get("fix_verdict") == "REWRITTEN" and (
+                    not it.get("fix_original")
+                    or it.get("fix_original") == fix_slot(it.get("detail"))):
+                errs.append(f"item {iid!r} fix_verdict is REWRITTEN but fix_original is "
+                            "missing or identical to the Fix: slot - the rewrite was not applied")
+            for field in ("claim", "detail"):
+                for phrase in lt.process_vocabulary_in(it.get(field)):
+                    errs.append(f"item {iid!r} {field} contains review-process wording "
+                                f"{phrase!r} - the author never saw this pipeline")
+        if it.get("verdict") == "DOWNGRADED":
+            if lt.SEV_RANK.get(it.get("severity"), -1) <= lt.SEV_RANK.get(it.get("severity_in"), 99):
+                errs.append(f"item {iid!r} is DOWNGRADED but severity {it.get('severity')!r} is "
+                            f"not lower than severity_in {it.get('severity_in')!r} - a narrowed "
+                            "claim at the same severity is CONFIRMED with a rewritten claim")
+            if it.get("fold_note") not in ("folded", "bookkeeping"):
+                errs.append(f"item {iid!r} is DOWNGRADED without fold_note 'folded' or "
+                            "'bookkeeping'")
+        if it.get("verdict") == "REFUTED" and (
+                "REWRITTEN" in (it.get("claim_verdict"), it.get("fix_verdict"))
+                or it.get("claim_original") or it.get("fix_original")):
+            errs.append(f"item {iid!r} is REFUTED but carries a rewrite - a refuted claim has "
+                        "nothing to rewrite; if something true survives it is DOWNGRADED")
+        if any(lt.is_ellipsis_line(l) for l in (it.get("anchor_excerpt") or "").splitlines()):
+            errs.append(f"item {iid!r} anchor_excerpt contains an ellipsis line - run `excerpt`")
         for field in ("file", "claim", "anchor_excerpt"):
             if not it.get(field):
                 errs.append(f"item {iid!r} is missing required field '{field}'")
@@ -224,6 +261,9 @@ def validate(ledger):
         cl = it.get("cluster")
         if cl and cl not in known_clusters:
             errs.append(f"item {it.get('id')} references unknown cluster {cl}")
+
+    if worktree:
+        errs.extend(lt.excerpt_errors(ledger, worktree))
     return errs
 
 
@@ -244,7 +284,7 @@ def cmd_validate(args):
     except json.JSONDecodeError as exc:
         print(f"error: ledger file {args.ledger} is not valid JSON: {exc}", file=sys.stderr)
         return 1
-    errs = validate(led)
+    errs = validate(led, getattr(args, "worktree", None))
     if errs:
         for e in errs:
             print(f"error: {e}", file=sys.stderr)
@@ -766,7 +806,8 @@ def cmd_preview(args):
 def main():
     p = argparse.ArgumentParser(prog="pr-review-anchor.py")
     sub = p.add_subparsers(dest="cmd", required=True)
-    v = sub.add_parser("validate"); v.add_argument("ledger"); v.set_defaults(fn=cmd_validate)
+    v = sub.add_parser("validate"); v.add_argument("ledger")
+    v.add_argument("--worktree"); v.set_defaults(fn=cmd_validate)
     r = sub.add_parser("reanchor")
     r.add_argument("ledger"); r.add_argument("--worktree", required=True)
     r.add_argument("--diff", required=True); r.set_defaults(fn=cmd_reanchor)

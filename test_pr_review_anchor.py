@@ -1179,7 +1179,8 @@ class TestFixVerdictRequired(unittest.TestCase):
     def test_each_fix_verdict_is_accepted(self):
         """Literals, not anchor.FIX_VERDICTS - see test_each_claim_verdict_is_accepted."""
         for v in ("SOUND", "REWRITTEN", "UNVERIFIABLE"):
-            led = {"schema": 2, "items": [item(1, fix_verdict=v)], "clusters": []}
+            extra = {"fix_original": "older fix"} if v == "REWRITTEN" else {}
+            led = {"schema": 2, "items": [item(1, fix_verdict=v, **extra)], "clusters": []}
             self.assertEqual(anchor.validate(led), [], f"{v} should be legal")
 
     def test_blank_fix_reason_is_rejected(self):
@@ -1220,8 +1221,8 @@ class TestFixVerdictRequired(unittest.TestCase):
         """Literals, not `anchor.CLAIM_VERDICTS` - iterating the constant under
         test makes the loop shrink with it, so narrowing the accepted set would
         pass. Verified by mutation: dropping REWRITTEN fails this only as written."""
-        for v in ("SOUND", "REWRITTEN"):
-            led = {"schema": 2, "items": [item(1, claim_verdict=v)], "clusters": []}
+        for v, extra in (("SOUND", {}), ("REWRITTEN", {"claim_original": "older claim"})):
+            led = {"schema": 2, "items": [item(1, claim_verdict=v, **extra)], "clusters": []}
             self.assertEqual(anchor.validate(led), [], f"{v} should be legal")
 
     def test_claim_verdict_has_no_unverifiable_escape(self):

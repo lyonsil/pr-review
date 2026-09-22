@@ -98,3 +98,65 @@ def read_lines(worktree, file, start, end):
     if end > len(content):
         raise LedgerError(f"{file}: line {end} is beyond end of file ({len(content)} lines)")
     return content[start - 1:end]
+
+
+_CODE_SPAN = re.compile(r"`[^`\n]*`")
+PROCESS_PATTERNS = (
+    r"\brefuters?\b",
+    r"\bpressure-test",
+    r"\bNote for the\b",
+    r"\bthis batch\b",
+    r"\bitems?\s+#\d+",
+    r"(?<![\w{])#\d+\b(?!\}\})",
+)
+_ABBREV = re.compile(r"\b(?:e\.g|i\.e|etc|vs|cf)\.", re.IGNORECASE)
+_ELLIPSIS_LINE = re.compile(r"^\s*(?://\s*|#\s*|/\*\s*)?(?:\.\.\.|…)(?:\s*\*/)?\s*$")
+
+
+def strip_code_spans(text):
+    return _CODE_SPAN.sub("``", text or "")
+
+
+def process_vocabulary_in(text):
+    """Review-process wording that must never reach a PR author. `{{#n}}` tokens
+    and code spans are exempt."""
+    plain = strip_code_spans(text)
+    found = []
+    for pat in PROCESS_PATTERNS:
+        m = re.search(pat, plain, re.IGNORECASE)
+        if m:
+            found.append(m.group(0))
+    return found
+
+
+def claim_shape_errors(claim):
+    plain = _ABBREV.sub("abbr", strip_code_spans(claim))
+    errs = []
+    if len(plain.split()) > 40:
+        errs.append(f"claim is {len(plain.split())} words; the limit is 40")
+    if len(re.findall(r"[.!?]\s+(?=[A-Z])", plain)) > 0:
+        errs.append("claim is more than one sentence")
+    return errs
+
+
+def is_ellipsis_line(line):
+    return bool(_ELLIPSIS_LINE.match(line))
+
+
+def excerpt_errors(ledger, worktree):
+    """Each item's anchor_excerpt must equal lines line..line_end of its file,
+    compared with trailing whitespace ignored (reanchor's own rule)."""
+    errs = []
+    for it in ledger.get("items", []):
+        iid, line = it.get("id"), it.get("line")
+        end = it.get("line_end") or line
+        try:
+            want = read_lines(worktree, it.get("file") or "", line, end)
+        except (LedgerError, TypeError) as exc:
+            errs.append(f"item {iid!r}: cannot read anchor lines - {exc}")
+            continue
+        got = (it.get("anchor_excerpt") or "").splitlines()
+        if [l.rstrip() for l in got] != [l.rstrip() for l in want]:
+            errs.append(f"item {iid!r}: anchor_excerpt is not verbatim at "
+                        f"{it.get('file')}:{line}-{end} - run `excerpt`, never retype it")
+    return errs
