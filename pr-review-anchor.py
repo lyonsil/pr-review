@@ -374,7 +374,13 @@ def cmd_reanchor(args):
                 it["line"], it["line_end"] = new_line, new_end
                 it["anchor_excerpt"] = "\n".join(excerpt)
         elif status == "off-diff" and new_line:
-            it["line"] = new_line
+            # The matched excerpt is unchanged (it matched verbatim at
+            # new_line), so line_end must move with line by the same
+            # span-preserving math as the ok/moved branch - leaving it
+            # behind silently shrinks the range a later pass searches, and
+            # can miss a changed line that is still inside the true span.
+            span_end = (it.get("line_end") or it.get("line")) - it.get("line") + new_line
+            it["line"], it["line_end"] = new_line, max(span_end, new_line)
         it["anchor_status"], it["anchor_note"] = status, why
         # on_changed_line is a property of the diff. A dead excerpt tells us
         # nothing about the diff, so it leaves the recorded value alone.
