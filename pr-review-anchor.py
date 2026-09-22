@@ -850,6 +850,40 @@ def cmd_changed_lines(args):
     return 0
 
 
+def cmd_renumber(args):
+    try:
+        led = lt.load_json(args.ledger)
+        mapping = lt.renumber(led)
+        lt.write_ledger(args.ledger, led, "renumber")
+    except lt.LedgerError as exc:
+        return _lt_errors(exc)
+    for old in sorted(old for old, new in mapping.items() if old != new):
+        print(f"{old} -> {mapping[old]}")
+    return 0
+
+
+def cmd_edit(args):
+    try:
+        led = lt.load_json(args.ledger)
+        try:
+            iid = int(args.id)
+        except ValueError:
+            raise lt.LedgerError(f"id must be an integer, got {args.id!r}")
+        try:
+            with open(args.text_file, encoding="utf-8") as fh:
+                text = fh.read()
+        except FileNotFoundError:
+            raise lt.LedgerError(f"text file not found: {args.text_file}")
+        except OSError as exc:
+            raise lt.LedgerError(f"could not read text file {args.text_file}: {exc}")
+        lt.edit_field(led, iid, args.field, text)
+        lt.write_ledger(args.ledger, led, "edit")
+    except lt.LedgerError as exc:
+        return _lt_errors(exc)
+    print(f"item {iid} {args.field} updated")
+    return 0
+
+
 def cmd_preview(args):
     try:
         payload = load(args.payload)
@@ -906,6 +940,12 @@ def main():
     c = sub.add_parser("changed-lines")
     c.add_argument("ledger"); c.add_argument("--diff", required=True)
     c.add_argument("--worktree", required=True); c.set_defaults(fn=cmd_changed_lines)
+    n = sub.add_parser("renumber")
+    n.add_argument("ledger"); n.set_defaults(fn=cmd_renumber)
+    ed = sub.add_parser("edit")
+    ed.add_argument("ledger"); ed.add_argument("id")
+    ed.add_argument("--field", required=True); ed.add_argument("--text-file", required=True)
+    ed.set_defaults(fn=cmd_edit)
     args = p.parse_args()
     sys.exit(args.fn(args))
 

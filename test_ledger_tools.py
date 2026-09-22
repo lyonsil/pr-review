@@ -622,3 +622,120 @@ class TestExcerptAndChangedLinesCli(unittest.TestCase):
         self.assertEqual(lines, [f"error: diff file not found: {os.path.join(d, 'no-such.diff')}"])
         self.assertEqual(open(ledger_path, "rb").read(), before)
         self.assertEqual(open(ledger_path + ".bak-changed-lines", "rb").read(), bak_before)
+
+
+class TestRenumber(unittest.TestCase):
+    def test_sorts_maps_tokens_clusters_and_keeps_old_id(self):
+        l = led(item(1, sev="low", f="b.ts", detail="see {{#2}}"),
+                item(2, sev="high", f="a.ts", cluster="C1"),
+                clusters=[{"id": "C1", "title": "t", "shared_fix": "s", "item_ids": [2]}])
+        mapping = lt.renumber(l)
+        self.assertEqual(mapping, {2: 1, 1: 2})
+        by_new = {it["id"]: it for it in l["items"]}
+        self.assertEqual(by_new[2]["detail"], "see {{#1}}")
+        self.assertEqual(by_new[2]["old_id"], 1)
+        self.assertEqual(l["clusters"][0]["item_ids"], [1])
+        self.assertEqual(anchor.validate(l), [])
+
+    def test_running_twice_keeps_the_first_old_id(self):
+        l = led(item(1, sev="low"), item(2, sev="high"))
+        lt.renumber(l); lt.renumber(l)
+        self.assertEqual(sorted(it["old_id"] for it in l["items"]), [1, 2])
+        self.assertEqual({it["id"]: it["old_id"] for it in l["items"]}, {1: 2, 2: 1})
+
+    def test_unknown_token_fails_before_any_change(self):
+        l = led(item(1, detail="see {{#9}}"))
+        before = json.dumps(l, sort_keys=True)
+        with self.assertRaisesRegex(lt.LedgerError, r"item 1 references \{\{#9\}\}"):
+            lt.renumber(l)
+        self.assertEqual(json.dumps(l, sort_keys=True), before)
+
+
+class TestEdit(unittest.TestCase):
+    def test_replaces_text_byte_for_byte(self):
+        l = led(item(1))
+        lt.edit_field(l, 1, "detail", "don't touch `a`'s \"b\"\n")
+        self.assertEqual(l["items"][0]["detail"], "don't touch `a`'s \"b\"")
+
+    def test_refuses_non_text_fields_and_unknown_ids(self):
+        for field in ("verdict", "severity", "severity_in", "id", "line"):
+            with self.assertRaisesRegex(lt.LedgerError, "not editable"):
+                lt.edit_field(led(item(1)), 1, field, "x")
+        with self.assertRaisesRegex(lt.LedgerError, "no item 5"):
+            lt.edit_field(led(item(1)), 5, "claim", "x")
+
+
+class TestRenumberCli(unittest.TestCase):
+    def test_cmd_renumber_writes_the_ledger_and_a_backup_on_success_and_leaves_it_untouched_on_failure(self):
+        l = led(item(1, sev="low", f="b.ts", detail="see {{#2}}"), item(2, sev="high", f="a.ts"))
+        d = tmpdir()
+        ledger_path = write(os.path.join(d, "ledger.json"), json.dumps(l))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_renumber(SimpleNamespace(ledger=ledger_path))
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(out.getvalue().strip().splitlines(), ["1 -> 2", "2 -> 1"])
+        written = json.load(open(ledger_path))
+        by_new = {it["id"]: it for it in written["items"]}
+        self.assertEqual(by_new[2]["detail"], "see {{#1}}")
+        self.assertTrue(os.path.isfile(ledger_path + ".bak-renumber"))
+
+        bad = led(item(1, detail="see {{#9}}"))
+        bad_path = write(os.path.join(d, "bad.json"), json.dumps(bad))
+        before = open(bad_path, "rb").read()
+        out2, err2 = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out2), contextlib.redirect_stderr(err2):
+            code2 = anchor.cmd_renumber(SimpleNamespace(ledger=bad_path))
+        self.assertEqual(code2, 1)
+        lines = err2.getvalue().splitlines()
+        self.assertTrue(lines)
+        self.assertTrue(all(line.startswith("error: ") for line in lines), lines)
+        self.assertEqual(open(bad_path, "rb").read(), before)
+        self.assertFalse(os.path.isfile(bad_path + ".bak-renumber"))
+
+
+class TestEditCli(unittest.TestCase):
+    def test_cmd_edit_writes_the_ledger_and_a_backup_on_success_and_leaves_it_untouched_on_failure(self):
+        l = led(item(1))
+        d = tmpdir()
+        ledger_path = write(os.path.join(d, "ledger.json"), json.dumps(l))
+        text_path = write(os.path.join(d, "text.txt"), "don't touch `a`'s \"b\"\n")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_edit(SimpleNamespace(ledger=ledger_path, id="1", field="detail",
+                                                    text_file=text_path))
+        self.assertEqual(code, 0, err.getvalue())
+        written = json.load(open(ledger_path))
+        self.assertEqual(written["items"][0]["detail"], "don't touch `a`'s \"b\"")
+        self.assertTrue(os.path.isfile(ledger_path + ".bak-edit"))
+
+        bad_path = write(os.path.join(d, "bad.json"), json.dumps(led(item(1))))
+        before = open(bad_path, "rb").read()
+        out2, err2 = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out2), contextlib.redirect_stderr(err2):
+            code2 = anchor.cmd_edit(SimpleNamespace(ledger=bad_path, id="1", field="severity",
+                                                     text_file=text_path))
+        self.assertEqual(code2, 1)
+        lines = err2.getvalue().splitlines()
+        self.assertTrue(lines)
+        self.assertTrue(all(line.startswith("error: ") for line in lines), lines)
+        self.assertIn("not editable", lines[0])
+        self.assertEqual(open(bad_path, "rb").read(), before)
+        self.assertFalse(os.path.isfile(bad_path + ".bak-edit"))
+
+    def test_cmd_edit_rejects_a_non_integer_id_without_a_traceback(self):
+        l = led(item(1))
+        d = tmpdir()
+        ledger_path = write(os.path.join(d, "ledger.json"), json.dumps(l))
+        text_path = write(os.path.join(d, "text.txt"), "x")
+        before = open(ledger_path, "rb").read()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_edit(SimpleNamespace(ledger=ledger_path, id="abc", field="detail",
+                                                    text_file=text_path))
+        self.assertEqual(code, 1)
+        lines = err.getvalue().splitlines()
+        self.assertTrue(lines)
+        self.assertTrue(all(line.startswith("error: ") for line in lines), lines)
+        self.assertEqual(open(ledger_path, "rb").read(), before)
+        self.assertFalse(os.path.isfile(ledger_path + ".bak-edit"))

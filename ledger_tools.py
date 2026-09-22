@@ -223,6 +223,59 @@ def mark_changed_lines(ledger, worktree, changed):
     return notes
 
 
+TOKEN = re.compile(r"\{\{#(\d+)\}\}")
+EDITABLE_FIELDS = ("claim", "detail", "fold_note")
+
+
+def renumber(ledger):
+    """Mutating: call inside the `renumber` subcommand, before `write_ledger`.
+
+    Re-sorts `items` by (severity, file, id) - the same order `validate`
+    requires - and remaps every id to its new 1..N position, rewriting
+    `{{#n}}` cross-references in `claim`/`detail` and cluster `item_ids` to
+    match. Each item's `old_id` records its id from before the *first* time
+    it was renumbered, so re-running `renumber` after a further edit still
+    traces back to the original id. All-or-nothing: every `{{#n}}` token is
+    checked against the current ids first, and `ledger` is only mutated once
+    none of them are unknown, so a failed call leaves it untouched."""
+    items = ledger.get("items", [])
+    ids = {it["id"] for it in items}
+    bad = [f"item {it['id']} references {{{{#{m}}}}}, which is not in this ledger"
+           for it in items for f in ("claim", "detail")
+           for m in TOKEN.findall(it.get(f) or "") if int(m) not in ids]
+    if bad:
+        raise LedgerError("\n".join(bad))
+    order = sorted(items, key=lambda it: (SEV_RANK.get(it.get("severity"), 99),
+                                          it.get("file", ""), it["id"]))
+    mapping = {it["id"]: n for n, it in enumerate(order, start=1)}
+    sub = lambda text: TOKEN.sub(lambda m: "{{#%d}}" % mapping[int(m.group(1))], text or "")
+    for it in order:
+        it.setdefault("old_id", it["id"])
+        it["id"] = mapping[it["id"]]
+        for f in ("claim", "detail"):
+            if it.get(f):
+                it[f] = sub(it[f])
+    ledger["items"] = order
+    for c in ledger.get("clusters", []):
+        c["item_ids"] = sorted(mapping[i] for i in c.get("item_ids", []) if i in mapping)
+    return mapping
+
+
+def edit_field(ledger, iid, field, text):
+    """Mutating: call inside the `edit` subcommand, before `write_ledger`.
+
+    Replaces one editable text field of item `iid` verbatim (a single
+    trailing newline is trimmed; nothing else is touched, so apostrophes,
+    quotes and backticks survive byte-for-byte) - the safe alternative to an
+    inline `python -c` edit, which has corrupted this text before."""
+    if field not in EDITABLE_FIELDS:
+        raise LedgerError(f"field {field!r} is not editable; only {EDITABLE_FIELDS}")
+    it = next((x for x in ledger.get("items", []) if x.get("id") == iid), None)
+    if it is None:
+        raise LedgerError(f"no item {iid} in this ledger")
+    it[field] = text.rstrip("\n")
+
+
 # --- Refuter brief -----------------------------------------------------
 
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "refuter-brief.tmpl.md")
