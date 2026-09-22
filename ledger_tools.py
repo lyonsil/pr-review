@@ -160,3 +160,137 @@ def excerpt_errors(ledger, worktree):
             errs.append(f"item {iid!r}: anchor_excerpt is not verbatim at "
                         f"{it.get('file')}:{line}-{end} - run `excerpt`, never retype it")
     return errs
+
+
+# --- Refuter brief -----------------------------------------------------
+
+TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "refuter-brief.tmpl.md")
+VERDICT_FIELDS = ("ITEM", "VERDICT", "SEVERITY", "ON_CHANGED_LINE", "REASON", "CLAIM_VERDICT",
+                  "CLAIM_REASON", "CLAIM_REWRITE", "FIX_VERDICT", "FIX_REASON", "FIX_REWRITE")
+HEADER_FIELDS = ("BRIEF", "KEY", "OWNS")
+_LABEL = re.compile(r"^(%s):[ \t]?(.*)$" % "|".join(HEADER_FIELDS + VERDICT_FIELDS))
+# Fields a refuter sees. Verdict fields are deliberately absent: a refuter must
+# not be primed by an earlier answer.
+BRIEF_ITEM_FIELDS = ("id", "severity_in", "cluster", "file", "line", "line_end", "claim",
+                     "detail", "evidence", "refuter_note")
+CONTEXT_KEYS = ("link_deps", "commands", "obligations", "claude_md_paths", "scratch")
+_REPO_FILE = re.compile(r"[\w./-]+\.(?:md|mdc|txt|json|ya?ml|toml)\b|CLAUDE\.md|AGENTS\.md")
+
+
+def template_hash(path=TEMPLATE_PATH):
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()[:12]
+
+
+def refuter_units(ledger):
+    units = {c["id"]: sorted(c.get("item_ids", [])) for c in ledger.get("clusters", [])}
+    for it in ledger.get("items", []):
+        if not it.get("cluster"):
+            units[f"i{it['id']}"] = [it["id"]]
+    return units
+
+
+def _table_cells(row):
+    return [c.strip() for c in row.strip().strip("|").split("|")]
+
+
+def _is_separator_row(row):
+    """A `| --- | --- |` divider row: every cell is made up only of `-`, `:`
+    and spaces, and the row is not blank (an empty joined string is
+    vacuously a subset of that character set, so it must be excluded
+    explicitly or a blank line would be misread as a divider)."""
+    if not row.strip().startswith("|"):
+        return False
+    joined = "".join(_table_cells(row))
+    return bool(joined) and set(joined) <= set("-: ")
+
+
+def _check_obligations(table):
+    """Every data row of the obligation table must cite a repo file in its
+    last cell. The header row - identified as the row immediately BEFORE a
+    `| --- |` separator row, per this table's actual shape, rather than by
+    guessing at its wording - is exempt, and so is the separator itself."""
+    rows = table.splitlines()
+    for i, row in enumerate(rows):
+        if not row.strip().startswith("|") or _is_separator_row(row):
+            continue
+        nxt = rows[i + 1] if i + 1 < len(rows) else ""
+        if _is_separator_row(nxt):
+            continue  # header row: the separator right after it says so
+        cells = _table_cells(row)
+        if not _REPO_FILE.search(cells[-1] if cells else ""):
+            raise LedgerError(f"obligation row does not cite a repo file: {row.strip()} - "
+                              "a personal preference is not a repo obligation")
+
+
+def render_brief(ledger, key, context, ledger_dir, template_path=TEMPLATE_PATH):
+    units = refuter_units(ledger)
+    if key not in units:
+        raise LedgerError(f"unknown refuter key {key!r}: expected one of {sorted(units)} "
+                          "(one cluster, or one unclustered item as i<id>)")
+    missing = [k for k in CONTEXT_KEYS if k not in context]
+    if missing:
+        raise LedgerError(f"context file is missing {', '.join(missing)}")
+    _check_obligations(context["obligations"])
+    owns = units[key]
+    by_id = {it["id"]: it for it in ledger.get("items", [])}
+    payload = [{k: by_id[i][k] for k in BRIEF_ITEM_FIELDS if k in by_id[i]} for i in owns]
+    cluster = next((c for c in ledger.get("clusters", []) if c["id"] == key), None)
+    if cluster:
+        payload = {"cluster": {k: cluster.get(k) for k in ("id", "title", "shared_fix")},
+                   "items": payload}
+    target = ledger.get("target", {})
+    n = target.get("number", "local")
+    scratch = context["scratch"].rstrip("/")
+    h = template_hash(template_path)
+    values = {
+        "BRIEF_HASH": h, "KEY": key, "OWNS": ", ".join(str(i) for i in owns),
+        "WT": ledger.get("worktree", ""), "HEAD_SHA": ledger.get("head_sha", ""),
+        "MERGE_BASE": ledger.get("merge_base", ""),
+        "LINK_DEPS": context["link_deps"], "COMMANDS": context["commands"],
+        "OBLIGATIONS": context["obligations"],
+        "CLAUDE_MD_PATHS": ", ".join(f"`{p}`" for p in context["claude_md_paths"]),
+        "ITEMS": "```json\n" + json.dumps(payload, indent=2) + "\n```",
+        "VERDICT_PATH": os.path.join(ledger_dir, "verdicts", f"{key}.txt"),
+        "PROBE_DIR": f"{scratch}/probes/{key}",
+        "REFUTER_WT": f"{scratch}/wt-pr{n}-r{key.lower()}",
+    }
+    with open(template_path, encoding="utf-8") as fh:
+        text = fh.read()
+    for k, v in values.items():
+        text = text.replace("{{" + k + "}}", str(v))
+    left = sorted(set(re.findall(r"\{\{[A-Z_]+\}\}", text)))
+    if left:
+        raise LedgerError(f"template placeholders left unfilled: {', '.join(left)}")
+    return text, {"key": key, "owns": owns, "hash": h}
+
+
+def parse_verdict_file(text):
+    header, blocks, cur, field = {}, [], None, None
+    for raw in text.splitlines():
+        m = _LABEL.match(raw)
+        if m:
+            name, val = m.group(1), m.group(2)
+            if name in HEADER_FIELDS:
+                if cur is not None:
+                    raise LedgerError(f"{name}: header line after the first ITEM block")
+                header[name] = val.strip(); field = None
+                continue
+            if name == "ITEM":
+                cur = {"ITEM": val.strip()}; blocks.append(cur); field = None
+                continue
+            if cur is None:
+                raise LedgerError(f"{name}: field before any ITEM line")
+            if name in cur:
+                raise LedgerError(f"item {cur['ITEM']}: {name} given twice")
+            cur[name] = val; field = name
+            continue
+        if field is not None:
+            cur[field] += "\n" + raw
+        elif raw.strip():
+            where = "header" if cur is None else f"item {cur['ITEM']}"
+            raise LedgerError(f"{where}: unrecognized line {raw.strip()[:60]!r}")
+    for b in blocks:
+        for k in b:
+            b[k] = b[k].strip()
+    return header, blocks

@@ -185,3 +185,148 @@ class TestSchema(unittest.TestCase):
     def test_missing_schema_is_rejected(self):
         errs = anchor.validate({"items": [], "clusters": []})
         self.assertTrue(any("schema" in e for e in errs), errs)
+
+
+CTX = {"link_deps": "linked /wt/node_modules", "commands": "`pnpm nx test <proj>`",
+       "obligations": "| If the fix ... | it must also ... | rule |\n| --- | --- | --- |\n"
+                      "| changes behavior | come with a test | `CLAUDE.md` |",
+       "claude_md_paths": ["/wt/CLAUDE.md"], "scratch": "/s"}
+
+
+def brief_ledger():
+    return led(item(1, cluster="C1", refuter_note="check the second site"),
+               item(2, cluster="C1"), item(3, sev="low"),
+               clusters=[{"id": "C1", "title": "t", "shared_fix": "sf", "item_ids": [1, 2]}],
+               target={"kind": "pr", "repo": "o/r", "number": 13},
+               head_sha="h" * 40, merge_base="m" * 40, worktree="/wt")
+
+
+class TestBrief(unittest.TestCase):
+    def test_units_are_clusters_and_unclustered_items(self):
+        self.assertEqual(lt.refuter_units(brief_ledger()), {"C1": [1, 2], "i3": [3]})
+
+    def test_renders_every_placeholder(self):
+        text, meta = lt.render_brief(brief_ledger(), "C1", CTX, "/s/pr-review/pr13")
+        self.assertNotRegex(text, r"\{\{[A-Z_]+\}\}")
+        self.assertIn("/s/pr-review/pr13/verdicts/C1.txt", text)
+        self.assertIn("/s/wt-pr13-rc1", text)
+        self.assertIn("check the second site", text)
+        self.assertIn('"shared_fix": "sf"', text)
+        self.assertEqual(meta, {"key": "C1", "owns": [1, 2], "hash": lt.template_hash()})
+        self.assertIn(f"BRIEF: {lt.template_hash()}", text)
+
+    def test_an_unknown_key_cannot_batch_unrelated_items(self):
+        with self.assertRaisesRegex(lt.LedgerError, "unknown refuter key"):
+            lt.render_brief(brief_ledger(), "i1", CTX, "/s")   # 1 is clustered
+        with self.assertRaisesRegex(lt.LedgerError, "unknown refuter key"):
+            lt.render_brief(brief_ledger(), "i3,4", CTX, "/s")
+
+    def test_an_obligation_row_without_a_repo_file_is_rejected(self):
+        # R1: the header row is whichever row sits immediately before the
+        # `| --- |` separator, regardless of its wording - so this header
+        # ("| a | b | c |") is exempt even though it does not start "If the
+        # fix", and it is the DATA row below it that must be the one that
+        # fails. Asserting on "user convention" (only in the data row) proves
+        # that: a header-row false positive would trip on "c" or "rule"
+        # instead and could not satisfy this assertion.
+        ctx = dict(CTX, obligations="| a | b | c |\n| --- | --- | --- |\n"
+                                    "| adds prose | American spelling | user convention |")
+        with self.assertRaises(lt.LedgerError) as cm:
+            lt.render_brief(brief_ledger(), "C1", ctx, "/s")
+        self.assertIn("does not cite a repo file", str(cm.exception))
+        self.assertIn("user convention", str(cm.exception))
+
+    def test_a_header_row_without_a_file_cell_is_exempt_when_data_rows_cite_one(self):
+        ctx = dict(CTX, obligations="| a | b | c |\n| --- | --- | --- |\n"
+                                    "| adds prose | American spelling | `CLAUDE.md` |")
+        text, _ = lt.render_brief(brief_ledger(), "C1", ctx, "/s")
+        self.assertIn("adds prose", text)
+
+    def test_a_missing_context_key_is_named(self):
+        ctx = dict(CTX); del ctx["commands"]
+        with self.assertRaisesRegex(lt.LedgerError, "commands"):
+            lt.render_brief(brief_ledger(), "C1", ctx, "/s")
+
+    def test_verdict_fields_are_not_leaked_into_items(self):
+        l = brief_ledger(); l["items"][0]["verdict_reason"] = "SECRET"
+        text, _ = lt.render_brief(l, "C1", CTX, "/s")
+        self.assertNotIn("SECRET", text)
+
+    def test_a_leftover_placeholder_is_rejected(self):
+        # Every placeholder the real template uses has a matching key in
+        # render_brief's values dict, so this path is never exercised by the
+        # shipped template - it only guards against a future template that
+        # introduces a placeholder nothing fills. Point at a stand-in
+        # template that does that, so the guard has a test that can fail it.
+        d = tmpdir()
+        bogus = write(os.path.join(d, "bogus.tmpl.md"), "brief-version: {{BRIEF_HASH}}\n{{NOPE}}\n")
+        with self.assertRaisesRegex(lt.LedgerError, "NOPE"):
+            lt.render_brief(brief_ledger(), "C1", CTX, "/s", template_path=bogus)
+
+
+GOOD = """BRIEF: abc
+KEY: C1
+OWNS: 1, 2
+
+ITEM: 1
+VERDICT: CONFIRMED
+SEVERITY: high
+ON_CHANGED_LINE: true
+REASON: line one
+line two mentions VERDICT: inline, which is fine
+CLAIM_VERDICT: SOUND
+CLAIM_REASON: matched at a.ts:3
+FIX_VERDICT: REWRITTEN
+FIX_REASON: probe at a.ts:4
+FIX_REWRITE: call `b()` instead
+
+ITEM: 2
+VERDICT: REFUTED
+SEVERITY: low
+ON_CHANGED_LINE: false
+REASON: nothing produces it
+"""
+
+
+class TestParseVerdictFile(unittest.TestCase):
+    def test_parses_header_blocks_and_multiline_values(self):
+        header, blocks = lt.parse_verdict_file(GOOD)
+        self.assertEqual(header, {"BRIEF": "abc", "KEY": "C1", "OWNS": "1, 2"})
+        self.assertEqual([b["ITEM"] for b in blocks], ["1", "2"])
+        self.assertEqual(blocks[0]["REASON"],
+                         "line one\nline two mentions VERDICT: inline, which is fine")
+        self.assertEqual(blocks[0]["FIX_REWRITE"], "call `b()` instead")
+
+    def test_prose_before_the_header_is_rejected(self):
+        with self.assertRaisesRegex(lt.LedgerError, "unrecognized line"):
+            lt.parse_verdict_file("Here is my summary.\n" + GOOD)
+
+    def test_a_field_given_twice_is_rejected(self):
+        with self.assertRaisesRegex(lt.LedgerError, "given twice"):
+            lt.parse_verdict_file(GOOD.replace("SEVERITY: low", "SEVERITY: low\nSEVERITY: high"))
+
+    def test_a_header_after_a_block_is_rejected(self):
+        with self.assertRaisesRegex(lt.LedgerError, "header line after"):
+            lt.parse_verdict_file(GOOD + "KEY: C2\n")
+
+
+class TestBriefCli(unittest.TestCase):
+    def test_cmd_brief_writes_md_and_json_and_prints_the_md_path(self):
+        d = tmpdir()
+        ledger_path = write(os.path.join(d, "ledger.json"), json.dumps(brief_ledger()))
+        context_path = write(os.path.join(d, "context.json"), json.dumps(CTX))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_brief(SimpleNamespace(ledger=ledger_path, key="C1",
+                                                     context=context_path))
+        self.assertEqual(code, 0, err.getvalue())
+        md_path = os.path.join(d, "briefs", "C1.md")
+        json_path = os.path.join(d, "briefs", "C1.json")
+        self.assertTrue(os.path.isfile(md_path))
+        self.assertTrue(os.path.isfile(json_path))
+        self.assertEqual(out.getvalue().strip(), md_path)
+        with open(md_path, encoding="utf-8") as fh:
+            self.assertIn("check the second site", fh.read())
+        with open(json_path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"key": "C1", "owns": [1, 2],
+                                              "hash": lt.template_hash()})

@@ -779,6 +779,30 @@ def render_preview(payload):
     return "\n".join(lines)
 
 
+def _lt_errors(exc):
+    for line in str(exc).splitlines():
+        print(f"error: {line}", file=sys.stderr)
+    return 1
+
+
+def cmd_brief(args):
+    try:
+        led = lt.load_json(args.ledger)
+        ctx = lt.load_json(args.context, what="context")
+        ldir = os.path.dirname(os.path.abspath(args.ledger))
+        text, meta = lt.render_brief(led, args.key, ctx, ldir)
+    except lt.LedgerError as exc:
+        return _lt_errors(exc)
+    bdir = os.path.join(ldir, "briefs"); os.makedirs(bdir, exist_ok=True)
+    md = os.path.join(bdir, f"{args.key}.md")
+    with open(md, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    with open(os.path.join(bdir, f"{args.key}.json"), "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+    print(md)
+    return 0
+
+
 def cmd_preview(args):
     try:
         payload = load(args.payload)
@@ -823,6 +847,9 @@ def main():
     y.add_argument("--body-file", required=True); y.set_defaults(fn=cmd_payload)
     w = sub.add_parser("preview")
     w.add_argument("payload"); w.set_defaults(fn=cmd_preview)
+    b = sub.add_parser("brief")
+    b.add_argument("ledger"); b.add_argument("--key", required=True)
+    b.add_argument("--context", required=True); b.set_defaults(fn=cmd_brief)
     args = p.parse_args()
     sys.exit(args.fn(args))
 
