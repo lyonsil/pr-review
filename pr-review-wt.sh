@@ -86,8 +86,16 @@ consider() {
   # (confirmed on git 2.52.0) - it does not refuse the way an unclean removal
   # without --force does. This guard must run before the age check, and
   # before any removal call, or a dirty-but-aged worktree is destroyed.
-  local d; d=$(dirty_count "$wt")
-  if [ "$d" -gt 0 ]; then echo "kept $wt dirty-${d}-changes"; return 0; fi
+  #
+  # A refuter's private worktree exists only to hold throwaway probes, so its
+  # dirt is disposable by construction. Every other review path keeps the guard.
+  case "$wt" in
+    */scratchpad/wt-pr*-r[ci][0-9]*) ;;
+    *)
+      local d; d=$(dirty_count "$wt")
+      if [ "$d" -gt 0 ]; then echo "kept $wt dirty-${d}-changes"; return 0; fi
+      ;;
+  esac
 
   local a; a=$(age_hours "$wt")
   if [ "$a" -lt "$MAX_AGE_HOURS" ]; then echo "kept $wt age-${a}h"; return 0; fi
@@ -170,6 +178,30 @@ cmd_remove() {
   return 0
 }
 
+cmd_remove_refuters() {
+  local scratch="${1:-}" n="${2:-}"
+  if [ -z "$scratch" ] || [ -z "$n" ]; then
+    echo "usage: pr-review-wt.sh remove-refuters <scratchpad> <pr-number>" >&2; return 2
+  fi
+  local d
+  for d in "$scratch"/wt-pr"$n"-r[ci][0-9]*; do
+    [ -e "$d" ] || continue
+    cmd_remove "$d"; echo "removed $d"
+  done
+  git worktree prune >/dev/null 2>&1
+  return 0
+}
+
+cmd_primary_status() {
+  local wt="${1:-}"
+  [ -n "$wt" ] || { echo "usage: pr-review-wt.sh primary-status <worktree>" >&2; return 2; }
+  local common
+  common=$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null) || {
+    echo "error: not a git worktree: $wt" >&2; return 1; }
+  case "$common" in /*) ;; *) common="$wt/$common" ;; esac
+  git -C "$common/.." status --porcelain
+}
+
 # Make the primary checkout's installed dependencies visible inside a review
 # worktree, so a refuter can actually run typecheck/lint/tests instead of
 # reasoning from source and calling the result unverifiable.
@@ -203,7 +235,7 @@ cmd_link_deps() {
   # than one (this repo has release/app's alongside the root's), and a change
   # to any of them makes the primary checkout's tree the wrong tree.
   local locks
-  locks=$(git -C "$wt" ls-files -- '*package-lock.json' 'package-lock.json' 2>/dev/null | sort -u)
+  locks=$(git -C "$wt" ls-files -- '*package-lock.json' '*pnpm-lock.yaml' '*yarn.lock' '*bun.lockb' 2>/dev/null | sort -u)
   if [ -n "$locks" ]; then
     local changed
     changed=$(git -C "$wt" diff --name-only "$base" HEAD -- $locks 2>/dev/null)
@@ -214,7 +246,15 @@ cmd_link_deps() {
 
   ln -s "$main_repo/node_modules" "$wt/node_modules" || {
     echo "error: could not link node_modules into $wt" >&2; return 1; }
-  echo "linked $wt/node_modules"
+
+  local extra=0 pkg
+  while IFS= read -r pkg; do
+    pkg=$(dirname "$pkg"); [ "$pkg" = "." ] && continue
+    if [ -d "$main_repo/$pkg/node_modules" ] && [ ! -e "$wt/$pkg/node_modules" ]; then
+      ln -s "$main_repo/$pkg/node_modules" "$wt/$pkg/node_modules" && extra=$((extra+1))
+    fi
+  done < <(git -C "$wt" ls-files -- '*package.json')
+  echo "linked $wt/node_modules (+$extra package node_modules)"
 }
 
 cmd_scratchpad() {
@@ -225,10 +265,12 @@ cmd_scratchpad() {
 }
 
 case "${1:-}" in
-  reap)       shift; cmd_reap "$@" ;;
-  create)     shift; cmd_create "$@" ;;
-  remove)     shift; cmd_remove "$@" ;;
-  scratchpad) shift; cmd_scratchpad "$@" ;;
-  link-deps)  shift; cmd_link_deps "$@" ;;
-  *) echo "usage: pr-review-wt.sh {reap [-v]|create <path> <committish>|remove <path>|scratchpad|link-deps <path> <merge-base>}" >&2; exit 2 ;;
+  reap)             shift; cmd_reap "$@" ;;
+  create)           shift; cmd_create "$@" ;;
+  remove)           shift; cmd_remove "$@" ;;
+  remove-refuters)  shift; cmd_remove_refuters "$@" ;;
+  primary-status)   shift; cmd_primary_status "$@" ;;
+  scratchpad)       shift; cmd_scratchpad "$@" ;;
+  link-deps)        shift; cmd_link_deps "$@" ;;
+  *) echo "usage: pr-review-wt.sh {reap [-v]|create <path> <committish>|remove <path>|remove-refuters <scratchpad> <pr-number>|primary-status <worktree>|scratchpad|link-deps <path> <merge-base>}" >&2; exit 2 ;;
 esac

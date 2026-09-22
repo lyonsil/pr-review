@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test harness for pr-review-wt.sh. Creates throwaway git repos under $TMPDIR.
-# Expected: passed=60 failed=0
+# Expected: passed=70 failed=0
 set -uo pipefail
 # Resolve to an absolute path before any test cd's into a throwaway repo dir.
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/pr-review-wt.sh"
@@ -244,5 +244,65 @@ echo "== link-deps: refuses without both arguments =="
 setup_repo
 "$SCRIPT" link-deps >/dev/null 2>&1; RC=$?
 check "usage exit code"        "$RC" "2"
+
+echo "== reap: a stale dirty refuter worktree is disposable =="
+setup_repo
+R=$(mktemp -d); mkdir -p "$R/other-session/scratchpad"
+SP="$R/other-session/scratchpad"
+"$SCRIPT" create "$SP/wt-pr5-rc3" HEAD >/dev/null
+"$SCRIPT" create "$SP/wt-pr5" HEAD >/dev/null
+# create records this test shell's pid, which is alive - unlock so the dirty
+# rule, not the live-lock rule, is what decides.
+git worktree unlock "$SP/wt-pr5-rc3"; git worktree unlock "$SP/wt-pr5"
+echo dirt > "$SP/wt-pr5-rc3/probe.txt"; echo dirt > "$SP/wt-pr5/probe.txt"
+age_dir "$SP/wt-pr5-rc3" 30; age_dir "$SP/wt-pr5" 30
+OUT=$(CLAUDE_SCRATCHPAD=/elsewhere/scratchpad "$SCRIPT" reap 2>&1)
+check "dirty refuter wt reaped"   "$(git worktree list | grep -c wt-pr5-rc3)" "0"
+check "dirty main wt kept"        "$(echo "$OUT" | grep -c "kept $SP/wt-pr5 dirty-")" "1"
+
+echo "== reap: current-session refuter worktree is kept even when dirty =="
+setup_repo
+SP=$(mktemp -d)/scratchpad; mkdir -p "$SP"
+"$SCRIPT" create "$SP/wt-pr5-ri12" HEAD >/dev/null
+git worktree unlock "$SP/wt-pr5-ri12"
+echo dirt > "$SP/wt-pr5-ri12/probe.txt"; age_dir "$SP/wt-pr5-ri12" 30
+OUT=$(CLAUDE_SCRATCHPAD="$SP" "$SCRIPT" reap 2>&1)
+check "current-session kept"      "$(git worktree list | grep -c wt-pr5-ri12)" "1"
+
+echo "== remove-refuters removes every refuter worktree for the PR only =="
+setup_repo
+SP=$(mktemp -d)/scratchpad; mkdir -p "$SP"
+for w in wt-pr5-rc1 wt-pr5-ri2 wt-pr5 wt-pr6-rc1; do "$SCRIPT" create "$SP/$w" HEAD >/dev/null; done
+echo dirt > "$SP/wt-pr5-rc1/x"
+"$SCRIPT" remove-refuters "$SP" 5 >/dev/null
+check "rc1 gone"   "$([ -d "$SP/wt-pr5-rc1" ] && echo yes || echo no)" "no"
+check "ri2 gone"   "$([ -d "$SP/wt-pr5-ri2" ] && echo yes || echo no)" "no"
+check "main kept"  "$([ -d "$SP/wt-pr5" ] && echo yes || echo no)" "yes"
+check "other PR kept" "$([ -d "$SP/wt-pr6-rc1" ] && echo yes || echo no)" "yes"
+
+echo "== primary-status reports the primary checkout, not the worktree =="
+setup_repo
+echo change >> f.txt
+WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
+check "primary dirt shown" "$("$SCRIPT" primary-status "$WT" | grep -c 'f.txt')" "1"
+
+echo "== link-deps: declines when pnpm-lock.yaml changed =="
+setup_repo
+mkdir -p node_modules && echo x > node_modules/marker
+echo 'a: 1' > pnpm-lock.yaml; git add pnpm-lock.yaml; git commit -qm lock
+BASE=$(git rev-parse HEAD)
+echo 'a: 2' > pnpm-lock.yaml; git add pnpm-lock.yaml; git commit -qm bump
+WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
+check "pnpm lock declines" "$("$SCRIPT" link-deps "$WT" "$BASE" | grep -c '^declined lockfile-changed:pnpm-lock.yaml')" "1"
+
+echo "== link-deps: links per-package node_modules too =="
+setup_repo
+mkdir -p node_modules libs/a/node_modules && echo x > libs/a/node_modules/m
+echo node_modules > .gitignore
+echo '{}' > libs/a/package.json; git add libs/a/package.json; git commit -qm pkg
+BASE=$(git rev-parse HEAD)
+WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
+"$SCRIPT" link-deps "$WT" "$BASE" >/dev/null
+check "package node_modules linked" "$([ -f "$WT/libs/a/node_modules/m" ] && echo yes || echo no)" "yes"
 
 echo; echo "passed=$PASS failed=$FAIL"; [ "$FAIL" -eq 0 ]
