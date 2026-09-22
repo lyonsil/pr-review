@@ -981,6 +981,23 @@ def cmd_edit(args):
     return 0
 
 
+def cmd_report(args):
+    try:
+        led = lt.load_json(args.ledger)
+        text = lt.render_report(led, args.ledger)
+    except lt.LedgerError as exc:
+        return _lt_errors(exc)
+    path = os.path.join(os.path.dirname(os.path.abspath(args.ledger)), "report.md")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    except OSError as exc:
+        print(f"error: could not write report file {path}: {exc}", file=sys.stderr)
+        return 1
+    print(text, end="")
+    return 0
+
+
 def cmd_preview(args):
     try:
         payload = load(args.payload)
@@ -1064,6 +1081,8 @@ def main():
     ed.add_argument("ledger"); ed.add_argument("id")
     ed.add_argument("--field", required=True); ed.add_argument("--text-file", required=True)
     ed.set_defaults(fn=cmd_edit)
+    rp = sub.add_parser("report")
+    rp.add_argument("ledger"); rp.set_defaults(fn=cmd_report)
     args = p.parse_args()
     sys.exit(args.fn(args))
 

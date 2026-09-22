@@ -552,3 +552,89 @@ def ingest(ledger, briefs_dir, verdicts_dir, expected_hash, inconclusive=(), rea
         it.pop("refuter_note", None)
     return [f"ingested {len(answers)} answer(s) from {len(metas)} refuter(s)"
             + (f"; {len(inconclusive - set(answers))} closed INCONCLUSIVE" if inconclusive else "")]
+
+
+# --- Report ----------------------------------------------------------------
+
+
+def _esc_cell(text):
+    """A table cell's text with `|` escaped so a claim or reason containing one
+    cannot be misread as a new column by a Markdown table renderer."""
+    return str(text).replace("|", "\\|")
+
+
+def render_report(ledger, ledger_path):
+    """Read-only. Render the S6 terminal report and `report.md` content from
+    `ledger` - plain text and GitHub-flavored markdown only, no raw HTML,
+    since this is printed straight to a terminal as well as written to disk."""
+    items = ledger.get("items", [])
+    ldir = os.path.dirname(os.path.abspath(ledger_path))
+    by_v = {v: [it for it in items if it.get("verdict") == v] for v in VERDICTS}
+    sev = lambda it: (it.get("severity") if it.get("severity") == it.get("severity_in")
+                      else f"{it.get('severity_in')} -> {it.get('severity')}")
+    lowered = sum(SEV_RANK.get(it.get("severity"), 0) > SEV_RANK.get(it.get("severity_in"), 0)
+                  for it in items)
+    raised = sum(SEV_RANK.get(it.get("severity"), 0) < SEV_RANK.get(it.get("severity_in"), 0)
+                 for it in items)
+    out = ["## Triage", "", "| id | severity | verdict | cluster | location | claim |",
+           "| --- | --- | --- | --- | --- | --- |"]
+    for it in items:
+        out.append(f"| {it['id']} | {sev(it)} | {it.get('verdict')} | {it.get('cluster') or ''} | "
+                   f"`{it.get('file')}:{it.get('line')}` | {_esc_cell(it.get('claim'))} |")
+    n = len(items)
+    out += ["", "## Verdict summary", "",
+            " / ".join(f"{v} {len(by_v[v])}" for v in VERDICTS)
+            + f"; refuted {len(by_v['REFUTED'])}/{n}"]
+    if n and not by_v["REFUTED"]:
+        out.append("warning: nothing was refuted - treat the pressure-test as uncalibrated "
+                   "until you have looked at why")
+    if lowered and not raised:
+        out.append(f"warning: {lowered} lowered / 0 raised - a one-sided revision is itself a "
+                   "claim about the generator")
+    rc = [it for it in items if it.get("claim_verdict") == "REWRITTEN"]
+    out += ["", "## Claim audit", "",
+            f"SOUND {sum(it.get('claim_verdict') == 'SOUND' for it in items)} / REWRITTEN {len(rc)}; "
+            f"severity {lowered} lowered / {raised} raised"]
+    out += [f"- #{it['id']}: {it.get('claim_original')} -> {it.get('claim')}" for it in rc]
+    rf = [it for it in items if it.get("fix_verdict") == "REWRITTEN"]
+    uf = [it for it in items if it.get("fix_verdict") == "UNVERIFIABLE"]
+    out += ["", "## Fix audit", "",
+            f"SOUND {sum(it.get('fix_verdict') == 'SOUND' for it in items)} / REWRITTEN {len(rf)} / "
+            f"UNVERIFIABLE {len(uf)}"]
+    out += [f"- #{it['id']}: {it.get('fix_original')} -> {fix_slot(it.get('detail'))}" for it in rf]
+    out += [f"- #{it['id']} UNVERIFIABLE (needs a human before it posts): {it.get('fix_reason')}"
+            for it in uf]
+    out += ["", "## Downgraded", ""]
+    out += [f"- #{it['id']} {sev(it)} - {it.get('claim')} - {it.get('verdict_reason')} "
+            f"[{it.get('fold_note')}]" for it in by_v["DOWNGRADED"]] or ["none"]
+    out += ["", "## Unresolved", ""]
+    out += [f"- #{it['id']} - {it.get('claim')} - {it.get('verdict_reason')} (needs a human call)"
+            for it in by_v["INCONCLUSIVE"]] or ["none"]
+    out += ["", "## Refuted (not posted unless you name them)", ""]
+    out += [f"- #{it['id']} - {it.get('claim')} - {it.get('verdict_reason')}"
+            for it in by_v["REFUTED"]] or ["none"]
+    dd = [it for it in items if it.get("dedupe")]
+    out += ["", "## Previously reported", ""]
+    out += [f"- #{it['id']} - {it['dedupe'].get('prior_url')}" for it in dd] or ["none"]
+    live = [it for it in items if it.get("verdict") != "REFUTED"]
+    inline = sum(it.get("on_changed_line") is True for it in live)
+    body = len(live) - inline
+    owners = {}
+    for it in items:
+        owners.setdefault(it.get("refuter_key"), []).append(it["id"])
+    largest = max((len(v) for k, v in owners.items() if k not in (None, "none")), default=0)
+    real = [k for k in owners if k not in (None, "none")]
+    out += ["", "## Pressure-test dispatch", "",
+            f"{len(real)} refuters for {n} items, largest owned {largest}",
+            "", "## Files", "",
+            f"    Ledger:   {os.path.abspath(ledger_path)}",
+            f"    Report:   {os.path.join(ldir, 'report.md')}",
+            f"    Worktree: {ledger.get('worktree')}",
+            "", "## To post", "",
+            f"    /pr-review-post all          # {inline} inline + {body} in the body; "
+            f"{len(by_v['REFUTED'])} refuted excluded",
+            "    /pr-review-post 1 3-7        # a chosen subset (ranges allowed)",
+            "    /pr-review-post all --include-refuted <id>   # also post a refuted finding",
+            "", "Placement follows anchoring, not verdict: every selected finding on a changed "
+            "line posts inline whatever its verdict; the rest go in the review body."]
+    return "\n".join(out) + "\n"

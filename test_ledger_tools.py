@@ -759,3 +759,107 @@ class TestEditCli(unittest.TestCase):
         self.assertIn("not valid UTF-8", lines[0])
         self.assertEqual(open(ledger_path, "rb").read(), before)
         self.assertFalse(os.path.isfile(ledger_path + ".bak-edit"))
+
+
+def report_ledger():
+    return led(
+        item(1, verdict="CONFIRMED", claim_verdict="REWRITTEN", claim_original="Old claim.",
+             refuter_key="C1", cluster="C1", on_changed_line=True),
+        item(2, sev="medium", severity_in="high", verdict="DOWNGRADED", fold_note="folded",
+             refuter_key="C1", cluster="C1", on_changed_line=True,
+             fix_verdict="REWRITTEN", fix_original="old fix", detail="**Fix:** new fix"),
+        item(3, sev="low", verdict="INCONCLUSIVE", fix_verdict="UNVERIFIABLE",
+             refuter_key="i3", on_changed_line=False),
+        item(4, sev="low", verdict="REFUTED", refuter_key="i4", on_changed_line=True),
+        clusters=[{"id": "C1", "title": "t", "shared_fix": "s", "item_ids": [1, 2]}],
+        target={"kind": "pr", "repo": "o/r", "number": 13}, worktree="/wt")
+
+
+class TestReport(unittest.TestCase):
+    def setUp(self):
+        self.text = lt.render_report(report_ledger(), "/s/pr-review/pr13/ledger.json")
+
+    def test_has_every_section(self):
+        for heading in ("Triage", "Verdict summary", "Claim audit", "Fix audit", "Downgraded",
+                        "Unresolved", "Refuted (not posted unless you name them)",
+                        "Previously reported", "Pressure-test dispatch", "Files", "To post"):
+            self.assertIn(heading, self.text, heading)
+
+    def test_triage_shows_verdict_and_severity_arrow(self):
+        self.assertRegex(self.text, r"\| 2 \| high -> medium \| DOWNGRADED \|")
+
+    def test_audits_show_originals(self):
+        self.assertIn("Old claim.", self.text)
+        self.assertIn("old fix", self.text)
+        self.assertIn("folded", self.text)
+
+    def test_counts_and_dispatch(self):
+        self.assertIn("CONFIRMED 1 / DOWNGRADED 1 / REFUTED 1 / INCONCLUSIVE 1", self.text)
+        self.assertIn("3 refuters for 4 items, largest owned 2", self.text)
+        self.assertIn("/pr-review-post all", self.text)
+        self.assertIn("2 inline + 1 in the body", self.text)
+
+    def test_calibration_warnings(self):
+        l = report_ledger()
+        l["items"][3].update(verdict="CONFIRMED", claim_verdict="SOUND", fix_verdict="SOUND")
+        text = lt.render_report(l, "/s/l.json")
+        self.assertIn("warning: nothing was refuted", text)
+        self.assertIn("warning: 1 lowered / 0 raised", text)
+
+    def test_no_raw_html(self):
+        self.assertNotRegex(self.text, r"<(details|summary|br)\b")
+
+    def test_a_pipe_in_a_claim_is_escaped_so_it_cannot_break_the_triage_table(self):
+        l = report_ledger()
+        l["items"][0]["claim"] = "compares a | b incorrectly"
+        text = lt.render_report(l, "/s/l.json")
+        self.assertIn(r"compares a \| b incorrectly", text)
+        # The escaped pipe must not be read as a new table cell: once escaped
+        # pipes are removed, the triage row for item 1 still has exactly 6
+        # cells (7 real column delimiters).
+        row = next(ln for ln in text.splitlines() if ln.startswith("| 1 |"))
+        self.assertEqual(row.replace("\\|", "").count("|"), 7, row)
+
+
+class TestReportCli(unittest.TestCase):
+    def test_cmd_report_writes_report_md_and_prints_the_same_text(self):
+        d = tmpdir()
+        ledger_path = write(os.path.join(d, "ledger.json"), json.dumps(report_ledger()))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_report(SimpleNamespace(ledger=ledger_path))
+        self.assertEqual(code, 0, err.getvalue())
+        report_path = os.path.join(d, "report.md")
+        self.assertTrue(os.path.isfile(report_path))
+        with open(report_path, encoding="utf-8") as fh:
+            written = fh.read()
+        self.assertEqual(written, out.getvalue())
+        self.assertIn("## Triage", written)
+
+    def test_cmd_report_rejects_a_missing_ledger_without_a_traceback(self):
+        d = tmpdir()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_report(SimpleNamespace(ledger=os.path.join(d, "nope.json")))
+        self.assertEqual(code, 1)
+        lines = err.getvalue().splitlines()
+        self.assertTrue(lines)
+        self.assertTrue(all(line.startswith("error: ") for line in lines), lines)
+        self.assertEqual(out.getvalue(), "")
+        self.assertFalse(os.path.isfile(os.path.join(d, "report.md")))
+
+    def test_cmd_report_reports_a_write_failure_without_a_traceback(self):
+        d = tmpdir()
+        ledger_path = write(os.path.join(d, "ledger.json"), json.dumps(report_ledger()))
+        # A directory already sitting at the report path makes the write
+        # fail with IsADirectoryError (an OSError subclass) instead of
+        # succeeding, without needing filesystem permission tricks.
+        os.makedirs(os.path.join(d, "report.md"))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_report(SimpleNamespace(ledger=ledger_path))
+        self.assertEqual(code, 1)
+        lines = err.getvalue().splitlines()
+        self.assertTrue(lines)
+        self.assertTrue(all(line.startswith("error: ") for line in lines), lines)
+        self.assertEqual(out.getvalue(), "")
