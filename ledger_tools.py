@@ -227,6 +227,17 @@ TOKEN = re.compile(r"\{\{#(\d+)\}\}")
 EDITABLE_FIELDS = ("claim", "detail", "fold_note")
 
 
+def render_tokens(text):
+    """Read-only. Render `{{#n}}` cross-reference tokens in `text` as plain
+    `#n` references for publishing, and report every id referenced.
+
+    Unlike `renumber`'s `sub`, this never checks the referenced ids against a
+    ledger - the caller (`build_payload`) is the one that knows which ids are
+    actually posted, and warns about any that are not."""
+    refs = {int(m) for m in TOKEN.findall(text or "")}
+    return TOKEN.sub(lambda m: "#" + m.group(1), text or ""), refs
+
+
 def renumber(ledger):
     """Mutating: call inside the `renumber` subcommand, before `write_ledger`.
 

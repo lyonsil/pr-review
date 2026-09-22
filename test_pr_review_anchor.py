@@ -1605,3 +1605,82 @@ class TestBodyOnlyVerdicts(unittest.TestCase):
         p = anchor.build_payload(self._led("DOWNGRADED"), ["all"], "intro")
         self.assertTrue(p["body"].rstrip().endswith(anchor.ATTRIBUTION))
         self.assertEqual(p["body"].count(anchor.ATTRIBUTION), 1)
+
+
+class TestPayloadV2(unittest.TestCase):
+    def led(self, *items):
+        return {"schema": 2, "items": list(items), "clusters": []}
+
+    def test_tokens_render_as_plain_references(self):
+        p = anchor.build_payload(self.led(item(1, detail="as in {{#2}}"),
+                                          item(2, sev="low", line=20)), ["all"], "intro")
+        bodies = " ".join(c["body"] for c in p["comments"])
+        self.assertIn("as in #2", bodies)
+        self.assertNotIn("{{#", bodies)
+
+    def test_a_token_pointing_outside_the_review_is_warned(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            anchor.build_payload(self.led(item(1, detail="as in {{#2}}"),
+                                          item(2, sev="low", line=20, verdict="REFUTED")),
+                                 ["all"], "intro")
+        self.assertIn("#1 references #2, which is not in this review", err.getvalue())
+
+    def test_count_placeholder_counts_inline_and_body_findings(self):
+        p = anchor.build_payload(self.led(item(1), item(2, sev="low", on_changed_line=False)),
+                                 ["all"], "{count} findings.")
+        self.assertTrue(p["body"].startswith("2 findings."))
+
+    def test_off_diff_status_is_demoted_with_its_own_label(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            p = anchor.build_payload(self.led(item(1, anchor_status="off-diff"),
+                                              item(2, sev="low", anchor_status="dead")),
+                                     ["all"], "x")
+        self.assertEqual(p["comments"], [])
+        self.assertIn("#1 (not on a changed line)", err.getvalue())
+        self.assertIn("#2 (dead anchor)", err.getvalue())
+
+    def test_select_accepts_ranges(self):
+        l = self.led(*[item(i, sev="low", line=i) for i in range(1, 6)])
+        self.assertEqual(anchor.resolve_selection(l, ["1-2, 4-5"]), {1, 2, 4, 5})
+        with self.assertRaises(anchor.SelectionError):
+            anchor.resolve_selection(l, ["3-1"])
+        with self.assertRaises(anchor.SelectionError):
+            anchor.resolve_selection(l, ["4-9"])
+
+    # --- Additional coverage: tokens in every claim/detail emission site,
+    # and a token that resolves to something posted elsewhere in the payload.
+
+    def test_tokens_render_in_the_demoted_section_too(self):
+        p = anchor.build_payload(self.led(item(1, detail="as in {{#2}}", anchor_status="dead"),
+                                          item(2, sev="low", line=20)),
+                                 ["all"], "intro")
+        self.assertIn("as in #2", p["body"])
+        self.assertNotIn("{{#", p["body"])
+
+    def test_tokens_render_in_a_body_only_verdicts_section(self):
+        led = self.led(item(1),
+                       item(2, sev="low", verdict="DOWNGRADED", detail="as in {{#1}}"))
+        p = anchor.build_payload(led, ["all"], "intro", body_only_verdicts=["DOWNGRADED"])
+        self.assertIn("as in #1", p["body"])
+        self.assertNotIn("{{#", p["body"])
+
+    def test_token_pointing_to_a_demoted_finding_is_not_warned(self):
+        # #2 IS posted - just demoted into the body rather than inline - so a
+        # reference to it from an inline finding is a valid cross-reference,
+        # not a broken one.
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            anchor.build_payload(self.led(item(1, detail="as in {{#2}}"),
+                                          item(2, sev="low", anchor_status="dead")),
+                                 ["all"], "intro")
+        self.assertNotIn("which is not in this review", err.getvalue())
+
+    def test_token_pointing_to_a_body_only_finding_is_not_warned(self):
+        err = io.StringIO()
+        led = self.led(item(1, detail="as in {{#2}}"),
+                       item(2, sev="low", verdict="DOWNGRADED"))
+        with contextlib.redirect_stderr(err):
+            anchor.build_payload(led, ["all"], "intro", body_only_verdicts=["DOWNGRADED"])
+        self.assertNotIn("which is not in this review", err.getvalue())

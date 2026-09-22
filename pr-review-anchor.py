@@ -418,10 +418,11 @@ def cmd_reanchor(args):
 
 
 def resolve_selection(ledger, tokens):
-    """Expand --select tokens ('all', integer ids, cluster ids like 'C3') into a
-    set of item ids. Every token must resolve to something real in THIS ledger:
-    a typo'd id or an id that isn't in the ledger raises rather than silently
-    posting a smaller set than the caller asked for."""
+    """Expand --select tokens ('all', integer ids, ranges like '4-9', cluster ids
+    like 'C3') into a set of item ids. Every token must resolve to something
+    real in THIS ledger: a typo'd id, a backwards range (`a > b`), or an id
+    that isn't in the ledger raises rather than silently posting a smaller set
+    than the caller asked for."""
     items = ledger.get("items", [])
     known_ids = {it.get("id") for it in items
                  if isinstance(it.get("id"), int) and not isinstance(it.get("id"), bool)}
@@ -442,6 +443,15 @@ def resolve_selection(ledger, tokens):
                         ids.add(cid)
                     else:
                         unknown.append(str(cid))
+            elif re.fullmatch(r"\d+-\d+", tok):
+                a, b = (int(x) for x in tok.split("-"))
+                if a > b:
+                    unrecognized.append(tok)
+                for requested in range(a, b + 1):
+                    if requested in known_ids:
+                        ids.add(requested)
+                    else:
+                        unknown.append(str(requested))
             elif tok.isdigit():
                 requested = int(tok)
                 if requested in known_ids:
@@ -522,7 +532,14 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
 
     body_only_verdicts optionally forces whole verdicts into the body even when
     they anchor cleanly. It defaults to empty: placement follows anchoring, and
-    each comment carries its verdict in its header instead."""
+    each comment carries its verdict in its header instead.
+
+    Every `claim`/`detail` that publishes - inline, demoted, or in a
+    body-only-verdicts section - has its `{{#n}}` cross-reference tokens
+    rendered as plain `#n`; a token naming an id that does not publish
+    anywhere in this payload prints a stderr warning rather than posting a
+    dead link. `body_intro`'s literal `{count}` is filled with the number of
+    ids that publish."""
     selected = resolve_selection(ledger, tokens)
     admitted = resolve_include_refuted(ledger, include_refuted)
     body_only = set(body_only_verdicts or ())
@@ -553,14 +570,16 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
             demoted.append((it, "dead anchor", it.get("anchor_note")
                              or "the code this finding pointed at has moved or gone "
                                 "since the review ran"))
-        # The S5 refuter records on_changed_line; false means the finding does
-        # not sit on a line this PR touched, and GitHub rejects the ENTIRE
-        # review when any one comment anchors off a changed line - demoted
-        # for the same reason as a dead anchor. Only an explicit False
-        # demotes: a missing or null value means the field was never filled
-        # in (a ledger that has not been through S5 or reanchor), which must
-        # stay postable rather than silently demoting every item.
-        elif it.get("on_changed_line") is False:
+        # The S5 refuter records on_changed_line, and reanchor records
+        # anchor_status: "off-diff" when a moved anchor lands outside the
+        # diff - either means the finding does not sit on a line this PR
+        # touched, and GitHub rejects the ENTIRE review when any one comment
+        # anchors off a changed line - demoted for the same reason as a dead
+        # anchor. Only an explicit False or "off-diff" demotes: a missing or
+        # null on_changed_line means the field was never filled in (a ledger
+        # that has not been through S5 or reanchor), which must stay postable
+        # rather than silently demoting every item.
+        elif it.get("anchor_status") == "off-diff" or it.get("on_changed_line") is False:
             demoted.append((it, "not on a changed line", it.get("anchor_note")
                              or "this finding is not on a line the PR changed, so GitHub "
                                 "cannot attach a comment to it"))
@@ -636,6 +655,20 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
         raise PayloadError("item id(s) missing file/line, cannot be anchored to a comment: "
                             + ", ".join(f"#{i}" for i in unanchored))
 
+    # Every id that actually publishes somewhere - inline, demoted, or in a
+    # body-only-verdicts section - fills {count} and is what a {{#n}} token is
+    # checked against: a token pointing at a REFUTED or otherwise-dropped id
+    # is a broken cross-reference even though that id is still in the ledger.
+    posted = ({it["id"] for it in items} | {it["id"] for it, _, _ in demoted}
+              | {it["id"] for it, _ in secondary})
+
+    outside = []
+
+    def tok(it, text):
+        rendered, refs = lt.render_tokens(text)
+        outside.extend((it["id"], r) for r in sorted(refs - posted))
+        return rendered
+
     sites = {}
     for it in items:
         sites.setdefault((it["file"], it["line"]), []).append(it)
@@ -661,8 +694,8 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
             head = f"**#{it['id']}** - {severity_text(it)}"
             if label:
                 head += f" · {label}"
-            text = head + "\n\n" + it["claim"]
-            detail = (it.get("detail") or "").strip()
+            text = head + "\n\n" + tok(it, it["claim"])
+            detail = tok(it, (it.get("detail") or "").strip())
             if detail:
                 text += "\n\n" + detail
             # Carries the pressure-test's reasoning when it is about the code.
@@ -690,7 +723,7 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
     # contain it - strip any existing occurrence(s) first so it is never
     # duplicated or left stranded ahead of the demoted section, then
     # re-append it once at the very end.
-    body = body_intro.strip()
+    body = body_intro.replace("{count}", str(len(posted))).strip()
     if ATTRIBUTION in body:
         body = body.replace(ATTRIBUTION, "").rstrip()
 
@@ -702,8 +735,8 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
             label = VERDICT_LABEL.get(verdict)
             head = f"**#{it['id']}** ({severity_text(it)}"
             head += f" · {label})" if label else ")"
-            lines.append(f"{head} {loc} - {it['claim']}")
-            detail = (it.get("detail") or "").strip()
+            lines.append(f"{head} {loc} - {tok(it, it['claim'])}")
+            detail = tok(it, (it.get("detail") or "").strip())
             if detail:
                 lines.append(""); lines.append(detail)
             # These are here only because they could not anchor, so they carry
@@ -724,8 +757,8 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
         lines = [f"## {heading} ({gloss})", ""]
         for it in sorted(group, key=lambda x: x["id"]):
             loc = f"{it.get('file')}:{it['line']}" if it.get("line") is not None else it.get("file", "?")
-            lines.append(f"**#{it['id']}** ({severity_text(it)}) {loc} - {it['claim']}")
-            detail = (it.get("detail") or "").strip()
+            lines.append(f"**#{it['id']}** ({severity_text(it)}) {loc} - {tok(it, it['claim'])}")
+            detail = tok(it, (it.get("detail") or "").strip())
             if detail:
                 lines.append(""); lines.append(detail)
             block = verdict_reason_block(it)
@@ -736,6 +769,12 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
         body = (body + "\n\n" + section).strip() if body else section
 
     body = (body + "\n\n" + ATTRIBUTION).strip()
+
+    # A {{#n}} cross-reference to an id that never publishes anywhere in this
+    # payload (REFUTED, dropped, or simply not selected) would print as a
+    # link to nothing an author can find - warn rather than posting it silently.
+    for a, b in sorted(set(outside)):
+        print(f"warning: #{a} references #{b}, which is not in this review", file=sys.stderr)
 
     return {"body": body, "event": "COMMENT", "comments": comments}
 
