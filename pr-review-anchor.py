@@ -817,6 +817,25 @@ def cmd_payload(args):
     return 0
 
 
+def preview_chunks(payload):
+    """Break a GitHub review payload dict into the ordered pieces `render_preview`
+    concatenates: a header/body chunk, then one chunk per comment. Each chunk is
+    self-contained text (no trailing separator between chunks beyond what
+    `render_preview` supplies via "\n".join), so pages built from whole chunks by
+    `preview_pages` reassemble to exactly `render_preview`'s output."""
+    comments = payload.get("comments", [])
+    rule = "=" * 72
+    chunks = ["\n".join([rule, "PR REVIEW PAYLOAD PREVIEW", f"event: {payload.get('event', '')}",
+                         f"comments: {len(comments)}", rule, "", "REVIEW BODY", "-" * 72,
+                         payload.get("body", ""), ""])]
+    for n, c in enumerate(comments, start=1):
+        chunks.append("\n".join(["-" * 72,
+                                 f"COMMENT {n}/{len(comments)} - {c.get('path', '')}:"
+                                 f"{c.get('line', '')} ({c.get('side', '')})",
+                                 "-" * 72, c.get("body", ""), ""]))
+    return chunks
+
+
 def render_preview(payload):
     """Render a complete, non-truncated human-readable rendering of a GitHub
     review payload dict (the JSON `payload` writes) - a header with the event
@@ -826,20 +845,32 @@ def render_preview(payload):
     `preview`'s caller is about to POST. Plain text and GitHub-flavoured
     markdown only - no raw HTML - since this is printed straight to a
     terminal."""
-    comments = payload.get("comments", [])
-    rule = "=" * 72
-    lines = [rule, "PR REVIEW PAYLOAD PREVIEW",
-             f"event: {payload.get('event', '')}",
-             f"comments: {len(comments)}", rule, "",
-             "REVIEW BODY", "-" * 72, payload.get("body", ""), ""]
-    for n, c in enumerate(comments, start=1):
-        lines.append("-" * 72)
-        lines.append(f"COMMENT {n}/{len(comments)} - {c.get('path', '')}:{c.get('line', '')} "
-                      f"({c.get('side', '')})")
-        lines.append("-" * 72)
-        lines.append(c.get("body", ""))
-        lines.append("")
-    return "\n".join(lines)
+    return "\n".join(preview_chunks(payload))
+
+
+PAGE_LIMIT = 15000
+
+
+def preview_pages(payload, limit=PAGE_LIMIT):
+    """Pack whole chunks into pages of at most `limit` bytes. A chunk larger than
+    the limit gets a page of its own - a comment is never split, because the
+    user must read each one whole before approving it."""
+    pages, cur = [], []
+    size = lambda parts: len("\n".join(parts).encode("utf-8"))
+    for ch in preview_chunks(payload):
+        if cur and size(cur + [ch]) > limit:
+            pages.append(cur); cur = []
+        cur.append(ch)
+    if cur:
+        pages.append(cur)
+    out = []
+    for n, parts in enumerate(pages, start=1):
+        text = "\n".join(parts)
+        head = f"page {n}/{len(pages)}"
+        if len(text.encode("utf-8")) > limit:
+            head += " (one comment that exceeds the page limit; shown whole)"
+        out.append(head + "\n" + text)
+    return out
 
 
 def _lt_errors(exc):
@@ -970,7 +1001,25 @@ def cmd_preview(args):
         print(f"error: payload file {args.payload} is missing required field 'comments'",
               file=sys.stderr)
         return 1
-    print(render_preview(payload))
+
+    full = render_preview(payload)
+    txt = os.path.join(os.path.dirname(os.path.abspath(args.payload)), "preview.txt")
+    try:
+        with open(txt, "w", encoding="utf-8") as fh:
+            fh.write(full)
+    except OSError as exc:
+        print(f"error: could not write preview file {txt}: {exc}", file=sys.stderr)
+        return 1
+
+    page = getattr(args, "page", None)
+    if page is None:
+        print(full)
+        return 0
+    pages = preview_pages(payload)
+    if not 1 <= page <= len(pages):
+        print(f"error: page {page} out of range 1..{len(pages)}", file=sys.stderr)
+        return 1
+    print(pages[page - 1])
     return 0
 
 
@@ -996,7 +1045,7 @@ def main():
                          "comment carries its verdict in its header")
     y.add_argument("--body-file", required=True); y.set_defaults(fn=cmd_payload)
     w = sub.add_parser("preview")
-    w.add_argument("payload"); w.set_defaults(fn=cmd_preview)
+    w.add_argument("payload"); w.add_argument("--page", type=int); w.set_defaults(fn=cmd_preview)
     b = sub.add_parser("brief")
     b.add_argument("ledger"); b.add_argument("--key", required=True)
     b.add_argument("--context", required=True); b.set_defaults(fn=cmd_brief)

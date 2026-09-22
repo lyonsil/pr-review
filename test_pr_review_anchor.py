@@ -1169,6 +1169,32 @@ class TestRenderPreview(unittest.TestCase):
         self.assertIn("alpha claim", out)
         self.assertIn("alpha detail " + "z" * 500, out)
 
+    def test_render_preview_matches_straightforward_reconstruction(self):
+        """Guards the preview_chunks refactor: render_preview's output must stay
+        byte-identical. This reconstructs the pre-refactor algorithm independently
+        (not via preview_chunks) and compares byte-for-byte."""
+        comments = [
+            {"path": "a.ts", "line": 10, "side": "RIGHT", "body": "first line\nsecond line"},
+            {"path": "b.ts", "line": 22, "side": "LEFT", "body": "another\ncomment\nbody"},
+            {"path": "c.ts", "line": 5, "side": "RIGHT", "body": "third"},
+        ]
+        payload = self._payload(comments=comments,
+                                 body="Intro line one.\nIntro line two.\n\nIntro line three.")
+        rule = "=" * 72
+        expected_lines = [rule, "PR REVIEW PAYLOAD PREVIEW",
+                           f"event: {payload['event']}",
+                           f"comments: {len(comments)}", rule, "",
+                           "REVIEW BODY", "-" * 72, payload["body"], ""]
+        for n, c in enumerate(comments, start=1):
+            expected_lines.append("-" * 72)
+            expected_lines.append(f"COMMENT {n}/{len(comments)} - {c['path']}:{c['line']} "
+                                   f"({c['side']})")
+            expected_lines.append("-" * 72)
+            expected_lines.append(c["body"])
+            expected_lines.append("")
+        expected = "\n".join(expected_lines)
+        self.assertEqual(anchor.render_preview(payload), expected)
+
 
 class TestPreviewCli(unittest.TestCase):
     def _run(self, payload_path):
@@ -1242,9 +1268,55 @@ class TestPreviewCli(unittest.TestCase):
             self.assertIn(c["body"], out)
             self.assertIn(f"{c['path']}:{c['line']}", out)
 
+    def test_preview_txt_write_failure_emits_single_curated_error(self):
+        d = tempfile.mkdtemp()
+        pp = os.path.join(d, "payload.json")
+        with open(pp, "w") as fh:
+            json.dump({"body": "intro", "event": "COMMENT", "comments": []}, fh)
+        os.chmod(d, 0o500)  # read + execute only: existing files readable, no new file creatable
+        try:
+            code, out, err = self._run(pp)
+        finally:
+            os.chmod(d, 0o700)
+            os.remove(pp)
+            os.rmdir(d)
+        self._assert_single_curated_error(code, out, err)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPreviewPaging(unittest.TestCase):
+    def payload(self, sizes):
+        return {"event": "COMMENT", "body": "intro",
+                "comments": [{"path": "a.ts", "line": n + 1, "side": "RIGHT",
+                              "body": "x" * s} for n, s in enumerate(sizes)]}
+
+    def test_pages_reassemble_to_the_full_preview(self):
+        p = self.payload([6000] * 7)
+        pages = anchor.preview_pages(p)
+        stripped = [pg.split("\n", 1)[1] for pg in pages]
+        self.assertEqual("\n".join(stripped), anchor.render_preview(p))
+        self.assertTrue(all(len(pg.encode()) <= 15000 + 200 for pg in pages))
+        self.assertTrue(pages[0].startswith(f"page 1/{len(pages)}"))
+
+    def test_an_oversize_comment_gets_its_own_page_unsplit(self):
+        p = self.payload([100, 20000, 100])
+        pages = anchor.preview_pages(p)
+        big = [pg for pg in pages if "x" * 20000 in pg]
+        self.assertEqual(len(big), 1)
+        self.assertIn("exceeds the page limit", big[0].split("\n", 1)[0])
+
+    def test_cli_writes_preview_txt_and_prints_one_page(self):
+        d = tempfile.mkdtemp(); pp = os.path.join(d, "payload.json")
+        with open(pp, "w") as fh:
+            json.dump(self.payload([6000] * 7), fh)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            anchor.cmd_preview(SimpleNamespace(payload=pp, page=2))
+        self.assertTrue(out.getvalue().startswith("page 2/"))
+        self.assertTrue(os.path.isfile(os.path.join(d, "preview.txt")))
 
 
 class TestTerminalVerdictRequired(unittest.TestCase):
