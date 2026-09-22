@@ -739,3 +739,23 @@ class TestEditCli(unittest.TestCase):
         self.assertTrue(all(line.startswith("error: ") for line in lines), lines)
         self.assertEqual(open(ledger_path, "rb").read(), before)
         self.assertFalse(os.path.isfile(ledger_path + ".bak-edit"))
+
+    def test_cmd_edit_rejects_a_non_utf8_text_file_without_a_traceback(self):
+        l = led(item(1))
+        d = tmpdir()
+        ledger_path = write(os.path.join(d, "ledger.json"), json.dumps(l))
+        text_path = os.path.join(d, "text.bin")
+        with open(text_path, "wb") as fh:
+            fh.write(b"\xff\xfe")
+        before = open(ledger_path, "rb").read()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_edit(SimpleNamespace(ledger=ledger_path, id="1", field="detail",
+                                                    text_file=text_path))
+        self.assertEqual(code, 1)
+        lines = err.getvalue().splitlines()
+        self.assertTrue(lines)
+        self.assertTrue(all(line.startswith("error: ") for line in lines), lines)
+        self.assertIn("not valid UTF-8", lines[0])
+        self.assertEqual(open(ledger_path, "rb").read(), before)
+        self.assertFalse(os.path.isfile(ledger_path + ".bak-edit"))

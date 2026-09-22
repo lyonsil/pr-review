@@ -874,6 +874,8 @@ def cmd_edit(args):
                 text = fh.read()
         except FileNotFoundError:
             raise lt.LedgerError(f"text file not found: {args.text_file}")
+        except UnicodeDecodeError as exc:
+            raise lt.LedgerError(f"text file {args.text_file} is not valid UTF-8: {exc}")
         except OSError as exc:
             raise lt.LedgerError(f"could not read text file {args.text_file}: {exc}")
         lt.edit_field(led, iid, args.field, text)
