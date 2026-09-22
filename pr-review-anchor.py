@@ -868,7 +868,7 @@ def preview_pages(payload, limit=PAGE_LIMIT):
         text = "\n".join(parts)
         head = f"page {n}/{len(pages)}"
         if len(text.encode("utf-8")) > limit:
-            head += " (one comment that exceeds the page limit; shown whole)"
+            head += " (this page exceeds the page limit; shown whole)"
         out.append(head + "\n" + text)
     return out
 

@@ -1306,7 +1306,19 @@ class TestPreviewPaging(unittest.TestCase):
         pages = anchor.preview_pages(p)
         big = [pg for pg in pages if "x" * 20000 in pg]
         self.assertEqual(len(big), 1)
-        self.assertIn("exceeds the page limit", big[0].split("\n", 1)[0])
+        self.assertIn("this page exceeds the page limit", big[0].split("\n", 1)[0])
+
+    def test_an_oversize_body_gets_its_own_page_unsplit(self):
+        """The oversize label is chunk-neutral: chunk 0 is the header + review body, not
+        a comment, so an oversize body must not be mislabeled as a comment."""
+        p = {"event": "COMMENT", "body": "x" * 20000,
+             "comments": [{"path": "a.ts", "line": 1, "side": "RIGHT", "body": "y" * 100}]}
+        pages = anchor.preview_pages(p)
+        big = [pg for pg in pages if "x" * 20000 in pg]
+        self.assertEqual(len(big), 1)
+        self.assertIn("this page exceeds the page limit", big[0].split("\n", 1)[0])
+        self.assertNotIn("comment", big[0].split("\n", 1)[0])
+        self.assertNotIn("y" * 100, big[0])  # the small comment must land on a different page
 
     def test_cli_writes_preview_txt_and_prints_one_page(self):
         d = tempfile.mkdtemp(); pp = os.path.join(d, "payload.json")
