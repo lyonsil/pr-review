@@ -76,10 +76,10 @@ S0  setup, reap, resolve target, fetch, worktree
     link-deps ⚙ (moved here from S5; pnpm/yarn-aware)
     discover the repo's real test/typecheck/lint commands
 S1  launch generator (background); while waiting, preparation only:
-      S3 comment fetch, obligation table, posting diff ⚙, refuter briefs from template
+      S3 comment fetch, obligation table, posting diff ⚙, brief context file (ctx.json)
 S2  split -> items with stable ids 1..N (not renumbered again until S6)
 S4  cluster
-S5  dispatch <= 15 at a time, refill on completion; arm watchdog
+S5  brief ⚙ per cluster / unclustered item; dispatch <= 15 at a time, refill; arm watchdog
       each refuter writes verdicts/<key>.txt and hands back only the path
       remove-refuters ⚙
 S6  ingest ⚙ -> excerpt ⚙ -> changed-lines ⚙ -> (fold notes, quantifier sweep: judgement)
@@ -101,14 +101,22 @@ that also removes any leftover `wt-pr<n>-r*`.
 
 `refuter-brief.tmpl.md` ships in the repo and carries, verbatim: the three jobs (verdict, claim
 match, fix), the verdict definitions, the finding-writing contract, the worktree rules, and the
-reply format. The orchestrator fills placeholders only:
+reply format. Its placeholders:
 
 `{{WT}}`, `{{HEAD_SHA}}`, `{{MERGE_BASE}}`, `{{LINK_DEPS}}`, `{{COMMANDS}}`, `{{OBLIGATIONS}}`,
 `{{CLAUDE_MD_PATHS}}` (paths under `$WT`), `{{ITEMS}}` (JSON), `{{VERDICT_PATH}}`, `{{KEY}}`.
 
-The template carries a version line (`brief-version: <sha256 of template>`) that the refuter
-copies into its verdict file header. `ingest` rejects a verdict file whose header lacks the current
-template hash, so a hand-written brief is detected.
+Briefs are rendered by a subcommand, not by hand:
+`brief <ledger> --key KEY --context ctx.json` fills every placeholder - `WT`, SHAs and `ITEMS` from
+the ledger; `LINK_DEPS`, `COMMANDS`, `OBLIGATIONS`, `CLAUDE_MD_PATHS` and the scratch path from a
+small context file the orchestrator writes once - and writes `briefs/<key>.md` plus
+`briefs/<key>.json` (`key`, `owns`, `hash`). `KEY` must be a cluster id or `i<id>` of an
+unclustered item, so batching unrelated items cannot be expressed. `brief` also rejects an
+obligation-table row whose last cell does not cite a repo file, and any placeholder left unfilled.
+
+The template hash (first 12 hex digits of its sha256) is written into the brief; the refuter copies
+it into its verdict file header. `ingest` rejects a verdict file whose header lacks the current
+hash, and takes the dispatched set from `briefs/*.json`.
 
 ### Verdict file
 
@@ -140,8 +148,8 @@ The hand-back message is the path and nothing else.
 - `DOWNGRADED` requires `severity < severity_in`. A narrowed scope at the same severity is
   `CONFIRMED` with `CLAIM_VERDICT: REWRITTEN`.
 - `REFUTED` carries no `CLAIM_REWRITE` or `FIX_REWRITE`.
-- A `Fix:` that asks for no change or defers ("no code change", "not required", "optional",
-  "if ... downgrade", "should be closed") is a hedge: the finding is `REFUTED` or gets a
+- A `Fix:` that asks for no change or defers ("no code change", "not required for this PR",
+  "if ... then downgrade", "should be closed") is a hedge: the finding is `REFUTED` or gets a
   constraint.
 - Every obligation-table row cites a repo file. A personal preference (e.g. spelling) is not an
   obligation and is not presented to the author as a project rule.
@@ -174,8 +182,11 @@ New item fields:
 | `fix_original` | `ingest` | generator's `Fix:` text before any `FIX_REWRITE` |
 | `refuter_key` | `ingest` | which verdict file answered this item |
 | `old_id` | `renumber` | the stable S2 id |
-| `fold_note` | orchestrator | for DOWNGRADED: `folded` or `bookkeeping`, per S5 |
-| `anchored_sha` | `reanchor --head` | the head the anchors were resolved against |
+| `fold_note` | orchestrator via `edit` | for DOWNGRADED: `folded` or `bookkeeping`, per S5 |
+| `unanswered` | `ingest --inconclusive` | the refuter never answered; see validate exemption |
+
+New ledger-root field: `anchored_sha`, written by `reanchor --head` - the head the anchors were
+resolved against.
 
 Invariants: `anchor_excerpt` begins at `line`; when `on_changed_line` is true, `line` is a `+`
 line in the posting diff. Existing fields are unchanged.
@@ -224,10 +235,18 @@ writes ledger JSON directly.
 
 - `--worktree WT`: each `anchor_excerpt` must match the file verbatim at `line`; `...` and `…`
   lines are rejected outright.
-- Process-vocabulary lint on `claim` and `detail`: `refuter`, `pressure-test`, `Note for the`,
-  `this batch`, `\bitems? #\d+`, `\brewrite`, `downgrad`, and any `#\d+` outside a `{{#...}}` token
-  (exempting CSS hex colors and code spans).
-- Extended `HEDGE_PATTERNS`: no-change and deferral phrasings listed under verdict semantics.
+- Process-vocabulary lint on `claim` and `detail`, with code spans stripped first: `refuter`,
+  `pressure-test`, `Note for the`, `this batch`, `\bitems? #\d+`, and any `#\d+` outside a
+  `{{#...}}` token. (`rewrite` and `downgrad` were dropped after checking the audited ledgers: they
+  occur in legitimate author-facing fixes - "rewrite the `@returns`", "the never-downgrade rule".)
+- Extended `HEDGE_PATTERNS`: `no code change`, `not required for/in this PR|change`,
+  `should be downgraded|closed|dropped`, `if ... then downgrade|close|drop`. (A bare `optional` or
+  `not required` was dropped: both occur in type-level prose.)
+- An anchor-excerpt line consisting only of an ellipsis (`...`, `…`, `// ...`) is rejected without
+  `--worktree`; a spread operator (`...args`) is not an ellipsis line.
+- `DOWNGRADED` requires `fold_note` of `folded` or `bookkeeping`.
+- An item with `unanswered: true` (written only by `ingest --inconclusive`) and verdict
+  `INCONCLUSIVE` is exempt from `claim_verdict`; it carries `fix_verdict: UNVERIFIABLE`.
 - Verdict-semantics rules above.
 - `claim` is a single sentence of at most 40 words.
 - When `claim_verdict` / `fix_verdict` is `REWRITTEN`, `claim_original` / `fix_original` must be
@@ -251,8 +270,12 @@ writes ledger JSON directly.
 - `link-deps`: lockfile guard covers `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
   `bun.lockb`; links each tracked package directory's `node_modules` that exists in the primary
   checkout, not only the root.
-- `remove-refuters <scratch> <n>`: removes every `<scratch>/wt-pr<n>-r*` unconditionally.
-- Reaper: a path matching `*/scratchpad/wt-pr*-r*` skips the dirty guard (R5). Current-session
+- Refuter worktrees are named `wt-pr<n>-r<key>` with the key lowercased (`wt-pr13-rc3`,
+  `wt-pr13-ri12`).
+- `remove-refuters <scratch> <n>`: removes every `<scratch>/wt-pr<n>-r[ci][0-9]*` unconditionally.
+- `primary-status <wt>`: prints `git status --porcelain` of the primary checkout behind `<wt>`, for
+  the S0 snapshot and S6 comparison.
+- Reaper: a path matching `*/scratchpad/wt-pr*-r[ci][0-9]*` skips the dirty guard (R5). Current-session
   exclusion and the 24h age floor still apply to it; every other review path keeps the dirty guard.
 
 ## Prompt changes
@@ -265,7 +288,7 @@ do a now-tooled step by hand is removed. Additionally:
 - Rebase check: flag only when `git cherry "$BASE_TIP" "$HEAD_SHA"` shows `-` lines; state that the
   base advancing is the normal case.
 - Quantifier sweep regex uses `(?<![\w-])...(?![\w-])` so `read-only` does not match; hits and
-  their disposition are written to `report.md`.
+  their disposition are written to `quantifiers.md` beside the ledger and relayed after the report.
 - Worktree snapshot delta: additions only, under `$SCRATCH`, via `comm -13` on sorted paths; the
   "before" snapshot is taken after `create`.
 - Waiting rule (R7) and watchdog, stated in S1 and S5.
