@@ -5,6 +5,10 @@ argument-hint: <ids | clusters | all> [constraints]
 
 Post the selected findings: $ARGUMENTS
 
+Tool output does not reach the user's screen - only your own message text does. Wherever this
+command says to report, relay, show or name something a tool printed, put it in your message
+text, copied verbatim where it says so.
+
 ## 1. Load
 
 1. Resolve this session's scratchpad directory - the ledger and every file written below live
@@ -158,9 +162,9 @@ and one off-diff anchor would fail the entire review POST. `payload` therefore m
 off-diff item into the review body automatically, under its own heading, and keeps it out of
 `comments[]`. Report which ids were demoted and why, then carry on. Refuted items are the opposite
 case and are never demoted: they were judged not real, so they appear nowhere unless re-admitted
-per-id with `--include-refuted`. `DOWNGRADED` and `INCONCLUSIVE` items are NOT routed by verdict - they post
-inline like anything else when they anchor (see step 1), so they appear in the demotion warning
-only when their own anchor failed.
+per-id with `--include-refuted`. `DOWNGRADED` and `INCONCLUSIVE` items are NOT routed by verdict -
+they post inline like anything else when they anchor (see step 1), so they appear in the demotion
+warning only when their own anchor failed.
 
 `reanchor` also recomputes `on_changed_line` from the diff and overwrites what `/pr-review` S6's
 `changed-lines` recorded, printing a `notice:` naming every id whose value changed. Do not treat
@@ -271,8 +275,8 @@ the JSON (`REFUTED` without a matching `--include-refuted`), ids moved into the 
 the label `dead anchor` or `not on a changed line` (GitHub rejects the whole review over one
 off-diff anchor), ids named by `--include-refuted` that were **not** in `--select` and so
 re-admitted nothing, ids re-admitted **because** of `--include-refuted`, and `{{#id}}`
-cross-references to a finding that is not in this review. **Relay every line to the user before
-presenting the plan.** They must see exactly what was dropped, moved or overridden, or they will
+cross-references to a finding that is not in this review. **Relay every line to the user, as message
+text, before presenting the plan.** They must see exactly what was dropped, moved or overridden, or they will
 believe they posted findings that never made it into the payload, or that a refuted finding they
 never asked to override went out anyway.
 
@@ -281,7 +285,8 @@ HTML.** No `<details>`, `<summary>`, or `<br>` - the terminal prints those liter
 only to what you print for the user; the review body and comment bodies you are quoting are bound
 for GitHub and keep whatever markdown they carry.
 
-Present the plan and **stop for approval**. Do NOT retype or summarize the payload - render it
+Then present the plan: every page of the preview first, and only then **stop for approval** -
+once, after the last page, never after page 1. Do NOT retype or summarize the payload - render it
 from the file that will actually be sent, so what the user approves is byte-for-byte what posts.
 
 Show the preview page by page, as your own message text - tool output does not reach the
@@ -303,8 +308,8 @@ summary is approving text they have not read, which then posts under their own G
 the output is long, that is the correct amount of output. What is never acceptable is a
 hand-written précis standing in for the preview.
 
-Alongside it, relay the `payload.stderr` lines from above, and state the head SHA the anchors were
-resolved against (`$NOW`, recorded as `anchored_sha`).
+Before the first page, relay the `payload.stderr` lines from above as message text, and state the
+head SHA the anchors were resolved against (`$NOW`, recorded as `anchored_sha`).
 
 Honor any constraints in $ARGUMENTS - for example "do not say whether anything is blocking".
 

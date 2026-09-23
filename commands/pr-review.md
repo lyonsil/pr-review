@@ -8,6 +8,10 @@ Run the review pipeline for: $ARGUMENTS
 Work through these stages in order. Do not skip ahead to posting - this command stops at the
 triage table.
 
+Tool output does not reach the user's screen - only your own message text does. Wherever this
+command says to report, relay, show or name something a tool printed, put it in your message
+text, copied verbatim where it says so.
+
 ## S0. Setup
 
 1. Resolve this session's scratchpad directory. Every path below hangs off it:
@@ -101,8 +105,8 @@ triage table.
 
    No output (exit status 1 from `grep -q`) is that normal case. When it prints, the merge-base
    sits below the entire base stack and the diff wrongly contains another PR's work - GitHub's own
-   Files tab shows the same thing, so the inflation is easy to mistake for the real scope. Find the real fork point in the full `git cherry "$BASE_TIP"
-   "$HEAD_SHA"` output: the `+` commits are the ones with no patch-equivalent in the base, and the
+   Files tab shows the same thing, so the inflation is easy to mistake for the real scope. Find the
+   real fork point in the full `git cherry "$BASE_TIP" "$HEAD_SHA"` output: the `+` commits are the ones with no patch-equivalent in the base, and the
    review scope starts at the parent of the first `+` commit that belongs to THIS PR's work (read
    the subjects - the leading `+` commits are often rebase leftovers of the base's own history).
    Confirm the range with a diffstat before accepting it, and state the scope explicitly when you
@@ -423,10 +427,12 @@ delivered as a message.
 After dispatching, arm the watchdog - the only wakeup this command may use:
 `ScheduleWakeup(delaySeconds=1200, prompt="pr-review watchdog: check refuter progress")`.
 On waking, stat (never read) each outstanding refuter's output file. One unchanged for 15 minutes:
-`TaskStop` it and dispatch it again once. A second stall: leave it for `ingest --inconclusive`.
-Re-arm until every verdict file exists, then stop the wakeup.
+`TaskStop` it and dispatch it again once. A second stall: `TaskStop` it, do not dispatch it again,
+and count it as done - its items are closed with `ingest --inconclusive` below. Re-arm only while
+some refuter has neither written its verdict file nor stalled twice; once every refuter has done
+one or the other, do not re-arm.
 
-When all have answered:
+When every refuter has answered or stalled twice:
 
 ```bash
 python3 ~/.claude/pr-review/pr-review-anchor.py ingest <ledger>
@@ -549,6 +555,8 @@ A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
 python3 $A report $L
 ```
 
-Relay `report`'s output in full, then the quantifier dispositions, then the teardown one-liner in
-case the user abandons the round: `~/.claude/pr-review/pr-review-wt.sh remove $WT`.
+Relay `report`'s output in full as your own message text - tool output does not reach the
+user's screen - copied verbatim, never retyped or summarized. Then, also as message text, the
+quantifier dispositions from `quantifiers.md`, then the teardown one-liner in case the user
+abandons the round: `~/.claude/pr-review/pr-review-wt.sh remove $WT`.
 Then **stop**. Do not post anything.
