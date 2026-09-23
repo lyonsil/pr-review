@@ -64,6 +64,23 @@ dirty_count() {
   git -C "$1" status --porcelain 2>/dev/null | wc -l | tr -d ' '
 }
 
+# Resolve the primary checkout backing worktree <wt> - the directory holding
+# the real .git this worktree shares - and echo its path on stdout. The path
+# always ends in a literal "/..", since it is built directly from
+# `--git-common-dir` (which names the .git dir itself, not its parent) and is
+# not otherwise canonicalized; a caller that needs an absolute, existing path
+# resolves it itself (`cd "$path" && pwd`, as cmd_link_deps does), since only
+# that caller needs the extra failure mode of "the path doesn't resolve".
+# Fails with "error: not a git worktree: <wt>" on stderr, exit 1, when <wt>
+# is not a git worktree at all.
+primary_repo_of() {
+  local wt="$1" common
+  common=$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null) || {
+    echo "error: not a git worktree: $wt" >&2; return 1; }
+  case "$common" in /*) ;; *) common="$wt/$common" ;; esac
+  printf '%s\n' "$common/.."
+}
+
 consider() {
   local wt="$1" locked="$2" branch="$3"
   [ -n "$wt" ] || return 0
@@ -195,11 +212,9 @@ cmd_remove_refuters() {
 cmd_primary_status() {
   local wt="${1:-}"
   [ -n "$wt" ] || { echo "usage: pr-review-wt.sh primary-status <worktree>" >&2; return 2; }
-  local common
-  common=$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null) || {
-    echo "error: not a git worktree: $wt" >&2; return 1; }
-  case "$common" in /*) ;; *) common="$wt/$common" ;; esac
-  git -C "$common/.." status --porcelain
+  local primary
+  primary=$(primary_repo_of "$wt") || return 1
+  git -C "$primary" status --porcelain
 }
 
 # Make the primary checkout's installed dependencies visible inside a review
@@ -218,12 +233,10 @@ cmd_link_deps() {
   fi
   if [ ! -d "$wt" ]; then echo "error: no such worktree: $wt" >&2; return 1; fi
 
-  local common
-  common=$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null) || {
-    echo "error: not a git worktree: $wt" >&2; return 1; }
-  case "$common" in /*) ;; *) common="$wt/$common" ;; esac
+  local primary
+  primary=$(primary_repo_of "$wt") || return 1
   local main_repo
-  main_repo=$(cd "$common/.." 2>/dev/null && pwd) || {
+  main_repo=$(cd "$primary" 2>/dev/null && pwd) || {
     echo "error: cannot locate the primary checkout for $wt" >&2; return 1; }
 
   if [ -e "$wt/node_modules" ]; then echo "declined already-present"; return 0; fi

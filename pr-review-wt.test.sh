@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test harness for pr-review-wt.sh. Creates throwaway git repos under $TMPDIR.
-# Expected: passed=70 failed=0
+# Expected: passed=80 failed=0
 set -uo pipefail
 # Resolve to an absolute path before any test cd's into a throwaway repo dir.
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/pr-review-wt.sh"
@@ -280,11 +280,31 @@ check "ri2 gone"   "$([ -d "$SP/wt-pr5-ri2" ] && echo yes || echo no)" "no"
 check "main kept"  "$([ -d "$SP/wt-pr5" ] && echo yes || echo no)" "yes"
 check "other PR kept" "$([ -d "$SP/wt-pr6-rc1" ] && echo yes || echo no)" "yes"
 
+echo "== remove-refuters: refuses without both arguments =="
+setup_repo
+ERR=$("$SCRIPT" remove-refuters 2>&1 >/dev/null); RC=$?
+check "no args: exit code"        "$RC" "2"
+check "no args: usage message"    "$(printf '%s' "$ERR" | grep -c '^usage: pr-review-wt.sh remove-refuters')" "1"
+ERR=$("$SCRIPT" remove-refuters "$R/scratchpad" 2>&1 >/dev/null); RC=$?
+check "missing pr-number: exit code" "$RC" "2"
+
 echo "== primary-status reports the primary checkout, not the worktree =="
 setup_repo
 echo change >> f.txt
 WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
 check "primary dirt shown" "$("$SCRIPT" primary-status "$WT" | grep -c 'f.txt')" "1"
+
+echo "== primary-status: refuses without an argument =="
+setup_repo
+ERR=$("$SCRIPT" primary-status 2>&1 >/dev/null); RC=$?
+check "no arg: exit code"      "$RC" "2"
+check "no arg: usage message"  "$(printf '%s' "$ERR" | grep -c '^usage: pr-review-wt.sh primary-status')" "1"
+
+echo "== primary-status: errors on a path that is not a git worktree =="
+NOTWT=$(mktemp -d)
+ERR=$("$SCRIPT" primary-status "$NOTWT" 2>&1 >/dev/null); RC=$?
+check "not-a-worktree: exit code"     "$RC" "1"
+check "not-a-worktree: error message" "$(printf '%s' "$ERR" | grep -Fc "error: not a git worktree: $NOTWT")" "1"
 
 echo "== link-deps: declines when pnpm-lock.yaml changed =="
 setup_repo
@@ -304,5 +324,22 @@ BASE=$(git rev-parse HEAD)
 WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
 "$SCRIPT" link-deps "$WT" "$BASE" >/dev/null
 check "package node_modules linked" "$([ -f "$WT/libs/a/node_modules/m" ] && echo yes || echo no)" "yes"
+
+echo "== link-deps: never overwrites an existing per-package node_modules =="
+setup_repo
+mkdir -p node_modules libs/a/node_modules && echo x > libs/a/node_modules/m
+echo node_modules > .gitignore
+echo '{}' > libs/a/package.json; git add libs/a/package.json; git commit -qm pkg
+BASE=$(git rev-parse HEAD)
+WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
+mkdir -p "$WT/libs/a/node_modules"; echo original > "$WT/libs/a/node_modules/existing-marker"
+"$SCRIPT" link-deps "$WT" "$BASE" >/dev/null
+check "existing marker survives untouched"     "$(cat "$WT/libs/a/node_modules/existing-marker" 2>/dev/null)" "original"
+check "existing node_modules stays a real dir" "$([ -L "$WT/libs/a/node_modules" ] && echo symlink || echo dir)" "dir"
+# `ln -s SRC DEST` treats an existing DEST *directory* as a container and
+# links SRC's basename inside it instead of failing - so without the guard,
+# link-deps would silently drop a stray node_modules/node_modules symlink
+# into the pre-existing directory rather than leaving it alone.
+check "no stray nested symlink is dropped in"  "$([ -e "$WT/libs/a/node_modules/node_modules" ] && echo yes || echo no)" "no"
 
 echo; echo "passed=$PASS failed=$FAIL"; [ "$FAIL" -eq 0 ]
