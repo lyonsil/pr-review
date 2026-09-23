@@ -212,6 +212,16 @@ def fill_excerpts(ledger, worktree):
         it["anchor_excerpt"] = new[it["id"]]
 
 
+def first_changed_line(changed, start, end):
+    """Read-only. The first line of `changed` inside [start, end], or None.
+
+    The one rule for anchoring a range: it posts at its first changed line,
+    and its end stays where it is - the moved start never drags the end
+    along. `mark_changed_lines` and `reanchor` both call this, so the two
+    commands always agree on where a range lands."""
+    return min((n for n in changed if start <= n <= end), default=None)
+
+
 def mark_changed_lines(ledger, worktree, changed):
     """Mutating: call inside the `changed-lines` subcommand, before
     `write_ledger`.
@@ -228,16 +238,13 @@ def mark_changed_lines(ledger, worktree, changed):
             lines = changed.get(it["file"], set())
             start, end = it["line"], it.get("line_end") or it["line"]
             was = it.get("on_changed_line")
-            if start in lines:
-                now = True
-            else:
-                hit = min((n for n in lines if start < n <= end), default=None)
-                now = hit is not None
-                if hit:
-                    it["line"] = hit
-                    it["anchor_excerpt"] = _excerpt_for(worktree, it)
-                    notes.append(f"moved #{it['id']} {start} -> {hit} "
-                                 "(first changed line in its range)")
+            hit = first_changed_line(lines, start, end)
+            now = hit is not None
+            if now and hit != start:
+                it["line"] = hit
+                it["anchor_excerpt"] = _excerpt_for(worktree, it)
+                notes.append(f"moved #{it['id']} {start} -> {hit} "
+                             "(first changed line in its range)")
             if was is not None and bool(was) != now:
                 notes.append(f"flipped #{it['id']} on_changed_line {bool(was)} -> {now}")
             it["on_changed_line"] = now

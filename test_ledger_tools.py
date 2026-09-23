@@ -737,6 +737,12 @@ class TestExcerptAndChangedLines(unittest.TestCase):
                          (3, "l3\nl4", True))
         self.assertTrue(any("#1" in n and "2 -> 3" in n for n in notes), notes)
 
+    def test_first_changed_line_searches_the_closed_range(self):
+        self.assertEqual(lt.first_changed_line({3, 4}, 2, 4), 3)
+        self.assertEqual(lt.first_changed_line({2, 3}, 2, 4), 2)
+        self.assertEqual(lt.first_changed_line({4}, 2, 4), 4)
+        self.assertIsNone(lt.first_changed_line({1, 5}, 2, 4))
+
     def test_nothing_changed_in_range_is_off_diff_and_flip_is_reported(self):
         l = led(item(1, line=2, line_end=3, anchor_excerpt="l2\nl3", on_changed_line=True))
         notes = lt.mark_changed_lines(l, self.wt, {"a.ts": {5}})

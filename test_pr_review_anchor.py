@@ -490,35 +490,108 @@ class TestReanchorCli(unittest.TestCase):
                                                 head="abc123", dry_run=False))
         self.assertEqual(json.load(open(lp))["anchored_sha"], "abc123")
 
-    def test_range_line_end_past_eof_after_move_is_dead(self):
-        """A range whose anchor moves forward far enough that its recut span
-        runs past the end of the file cannot be re-excerpted; reanchor must
-        report it dead (via the wrapped lt.read_lines call) rather than crash
-        or silently truncate the excerpt."""
+    def test_a_recut_that_cannot_be_read_is_dead_and_reports_the_kept_line(self):
+        """A recut whose end runs past the end of the file (here the ledger's
+        line_end disagrees with its one-line excerpt) cannot be re-excerpted;
+        reanchor must report it dead rather than crash or silently truncate,
+        keep the ledger's line, and print that kept line - not the line the
+        failed recut would have moved to."""
         d = tempfile.mkdtemp()
         with open(os.path.join(d, "a.ts"), "w") as fh:
-            fh.write("one\ntwo\nthree\nfour\n")
-        led = {"schema": 2, "items": [item(1, line=2, line_end=4,
-                                           anchor_excerpt="two\nthree\nfour")],
+            fh.write("zero\none\ntwo\nthree\n")
+        led = {"schema": 2, "items": [item(1, line=2, line_end=9, anchor_excerpt="two")],
                "clusters": []}
         ledger_path = self._write_json(led)
-        # Line 2 (the recorded anchor) is untouched; line 3 is the only
-        # changed line in range, so the anchor moves 2 -> 3 and the recut
-        # keeps the original 3-line span, asking for lines 3..5 of a 4-line
-        # file.
+        # "two" drifted from line 2 to line 3, which is changed; the recut
+        # keeps the ledger's end shifted by the same drift, 9 -> 10.
         diff_path = self._write_text(
             "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n"
-            "@@ -1,4 +1,4 @@\n one\n two\n-three\n+THREE\n four\n"
+            "@@ -1,3 +1,4 @@\n+zero\n one\n-two\n+two\n three\n"
         )
         try:
             code, out, err = self._run(ledger_path, d, diff_path)
             with open(ledger_path) as fh:
-                rewritten = json.load(fh)
+                rewritten = json.load(fh)["items"][0]
         finally:
             os.remove(ledger_path); os.remove(diff_path)
         self.assertEqual(code, 0)
-        self.assertEqual(rewritten["items"][0]["anchor_status"], "dead")
-        self.assertIn("beyond end of file", rewritten["items"][0]["anchor_note"])
+        self.assertEqual(rewritten["anchor_status"], "dead")
+        self.assertIn("beyond end of file", rewritten["anchor_note"])
+        self.assertEqual((rewritten["line"], rewritten["line_end"]), (2, 9))
+        self.assertIn("a.ts:2 ", out)
+        self.assertNotIn("a.ts:3 ", out)
+
+    def test_reanchor_and_changed_lines_recut_a_range_to_the_same_place(self):
+        """Lines 9-11 of a 12-line file with only line 11 changed: both
+        commands move the start to 11 and keep the end at 11. Computing the
+        end from the moved start would ask for 11..13 - past the end of the
+        file, so reanchor reported it dead while changed-lines moved it."""
+        d = tempfile.mkdtemp()
+        lines = [f"l{n}" for n in range(1, 13)]
+        with open(os.path.join(d, "a.ts"), "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        diff = ("diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n"
+                "@@ -10,3 +10,3 @@\n l10\n-old\n+l11\n l12\n")
+        results = []
+        for run in ("reanchor", "changed-lines"):
+            led = {"schema": 2, "items": [item(1, line=9, line_end=11,
+                                               anchor_excerpt="l9\nl10\nl11")],
+                   "clusters": []}
+            ledger_path, diff_path = self._write_json(led), self._write_text(diff)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    if run == "reanchor":
+                        code = anchor.cmd_reanchor(SimpleNamespace(
+                            ledger=ledger_path, worktree=d, diff=diff_path))
+                    else:
+                        code = anchor.cmd_changed_lines(SimpleNamespace(
+                            ledger=ledger_path, worktree=d, diff=diff_path))
+                with open(ledger_path) as fh:
+                    it = json.load(fh)["items"][0]
+            finally:
+                os.remove(ledger_path); os.remove(diff_path)
+            self.assertEqual(code, 0, run)
+            results.append((it["line"], it["line_end"], it["anchor_excerpt"], it["on_changed_line"]))
+        self.assertEqual(results[0], (11, 11, "l11", True))
+        self.assertEqual(results[0], results[1])
+
+    def test_an_unmoved_anchor_without_line_end_keeps_its_excerpt(self):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "a.ts"), "w") as fh:
+            fh.write("one\ntwo\nthree\n")
+        it = item(1, line=2, anchor_excerpt="two\nthree"); del it["line_end"]
+        ledger_path = self._write_json({"schema": 2, "items": [it], "clusters": []})
+        diff_path = self._write_text("diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n"
+                                     "@@ -1,3 +1,3 @@\n one\n-TWO\n+two\n three\n")
+        try:
+            self._run(ledger_path, d, diff_path)
+            with open(ledger_path) as fh:
+                after = json.load(fh)["items"][0]
+        finally:
+            os.remove(ledger_path); os.remove(diff_path)
+        self.assertEqual((after["anchor_status"], after["anchor_excerpt"]), ("ok", "two\nthree"))
+
+    def test_a_drifted_range_keeps_its_end_shifted_by_the_drift_not_by_the_move(self):
+        """Lines 9-11 drift to 10-12 (a line inserted above) and only the
+        drifted last line, 12, is changed: the start moves to 12 and the end
+        is the original end plus the drift, 12 - never 12 plus the span."""
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "a.ts"), "w") as fh:
+            fh.write("\n".join(["new"] + [f"l{n}" for n in range(1, 13)]) + "\n")
+        led = {"schema": 2, "items": [item(1, line=9, line_end=11,
+                                           anchor_excerpt="l9\nl10\nl11")], "clusters": []}
+        ledger_path = self._write_json(led)
+        diff_path = self._write_text("diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n"
+                                     "@@ -11,2 +11,2 @@\n l10\n-old\n+l11\n")
+        try:
+            code, out, err = self._run(ledger_path, d, diff_path)
+            with open(ledger_path) as fh:
+                it = json.load(fh)["items"][0]
+        finally:
+            os.remove(ledger_path); os.remove(diff_path)
+        self.assertEqual((it["anchor_status"], it["line"], it["line_end"], it["anchor_excerpt"]),
+                         ("moved", 12, 12, "l11"))
 
     def test_off_diff_drift_preserves_span_for_a_later_changed_line(self):
         """The off-diff branch moves `line` to the re-matched position, and
@@ -588,8 +661,8 @@ class TestReanchorCli(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(rewritten["anchor_status"], "moved")
         self.assertEqual(rewritten["line"], 3)
-        self.assertEqual(rewritten["line_end"], 5)
-        self.assertEqual(rewritten["anchor_excerpt"], "three\nfour\nfive")
+        self.assertEqual(rewritten["line_end"], 4)
+        self.assertEqual(rewritten["anchor_excerpt"], "three\nfour")
 
 
 class TestPayload(unittest.TestCase):

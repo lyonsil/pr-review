@@ -293,15 +293,22 @@ def cmd_validate(args):
     return 0
 
 
-def reanchor_item(item, worktree, changed):
+def _resolve_anchor(item, worktree, changed):
+    """Where `item`'s anchor lands at this head: (status, line, line_end, why).
+
+    `line`/`line_end` are None for a dead anchor. Otherwise the excerpt is
+    re-matched, the whole range shifts by the drift (matched line minus the
+    ledger's line), and `lt.first_changed_line` picks the start inside the
+    shifted range - the end stays at the shifted end, never re-derived from
+    the moved start. An off-diff anchor keeps the shifted range as is."""
     path = os.path.join(worktree, item["file"])
     if not os.path.isfile(path):
-        return "dead", None, "file no longer present at head"
+        return "dead", None, None, "file no longer present at head"
     with open(path, encoding="utf-8", errors="replace") as fh:
         content = fh.read().splitlines()
     excerpt = item.get("anchor_excerpt", "").splitlines()
     if not excerpt:
-        return "dead", None, "empty anchor excerpt"
+        return "dead", None, None, "empty anchor excerpt"
     # Trailing whitespace is normalized away (formatters trim it harmlessly).
     # Leading whitespace is left significant on purpose: ignoring it too would
     # make short/common lines (e.g. a lone "}") match far more places and raise
@@ -313,25 +320,28 @@ def reanchor_item(item, worktree, changed):
     hits = [n + 1 for n in range(len(content) - len(excerpt) + 1)
             if [l.rstrip() for l in content[n:n + len(excerpt)]] == norm]
     if not hits:
-        return "dead", None, "anchor excerpt no longer present"
+        return "dead", None, None, "anchor excerpt no longer present"
     old = item.get("line") or hits[0]
-    new_line = min(hits, key=lambda h: abs(h - old))
+    matched = min(hits, key=lambda h: abs(h - old))
     note = ""
     if len(hits) > 1:
-        others = [h for h in hits if h != new_line]
+        others = [h for h in hits if h != matched]
         note = f"ambiguous: excerpt also matches at line(s) {others}; nearest to {old} chosen"
-    span = max((item.get("line_end") or item.get("line") or new_line)
-               - (item.get("line") or new_line), 0)
-    file_changed = changed.get(item["file"], set())
-    target = new_line if new_line in file_changed else min(
-        (n for n in file_changed if new_line < n <= new_line + span), default=None)
+    end = max((item.get("line_end") or old) + (matched - old), matched)
+    target = lt.first_changed_line(changed.get(item["file"], set()), matched, end)
     if target is None:
         reason = "not on a changed line; cannot be posted inline"
-        return "off-diff", new_line, f"{reason} ({note})" if note else reason
+        return "off-diff", matched, end, f"{reason} ({note})" if note else reason
     if target == item.get("line"):
-        return "ok", target, note
+        return "ok", target, end, note
     moved_reason = f"moved {item.get('line')} -> {target}"
-    return "moved", target, f"{moved_reason} ({note})" if note else moved_reason
+    return "moved", target, end, f"{moved_reason} ({note})" if note else moved_reason
+
+
+def reanchor_item(item, worktree, changed):
+    """Read-only. `_resolve_anchor` without the range end: (status, line, why)."""
+    status, line, _end, why = _resolve_anchor(item, worktree, changed)
+    return status, line, why
 
 
 def cmd_reanchor(args):
@@ -363,10 +373,9 @@ def cmd_reanchor(args):
     counts = {"ok": 0, "moved": 0, "off-diff": 0, "dead": 0}
     corrected = []
     for it in led.get("items", []):
-        status, new_line, why = reanchor_item(it, args.worktree, changed)
-        if status in ("ok", "moved") and new_line != it.get("line"):
-            span_end = (it.get("line_end") or it.get("line")) - it.get("line") + new_line
-            new_end = max(span_end, new_line)
+        status, new_line, new_end, why = _resolve_anchor(it, args.worktree, changed)
+        kept = (it.get("line"), it.get("line_end") or it.get("line"))
+        if status in ("ok", "moved") and (new_line, new_end) != kept:
             try:
                 excerpt = lt.read_lines(args.worktree, it["file"], new_line, new_end)
             except lt.LedgerError as exc:
@@ -374,14 +383,11 @@ def cmd_reanchor(args):
             else:
                 it["line"], it["line_end"] = new_line, new_end
                 it["anchor_excerpt"] = "\n".join(excerpt)
-        elif status == "off-diff" and new_line:
-            # The matched excerpt is unchanged (it matched verbatim at
-            # new_line), so line_end must move with line by the same
-            # span-preserving math as the ok/moved branch - leaving it
-            # behind silently shrinks the range a later pass searches, and
-            # can miss a changed line that is still inside the true span.
-            span_end = (it.get("line_end") or it.get("line")) - it.get("line") + new_line
-            it["line"], it["line_end"] = new_line, max(span_end, new_line)
+        elif status == "off-diff":
+            # The matched excerpt is unchanged (it matched verbatim), so the
+            # whole range moves by the drift - leaving line_end behind would
+            # shrink the range a later pass searches for a changed line.
+            it["line"], it["line_end"] = new_line, new_end
         it["anchor_status"], it["anchor_note"] = status, why
         # on_changed_line is a property of the diff. A dead excerpt tells us
         # nothing about the diff, so it leaves the recorded value alone.
@@ -392,7 +398,9 @@ def cmd_reanchor(args):
             if was is not None and bool(was) != now:
                 corrected.append((it.get("id"), bool(was), now))
         counts[status] += 1
-        print(f"{status:6} #{it.get('id')!s:<3} {it.get('file')}:{new_line or it.get('line')} {why}")
+        # The line the ledger now holds: a dead anchor (including a recut
+        # that could not be read) keeps its old line.
+        print(f"{status:6} #{it.get('id')!s:<3} {it.get('file')}:{it.get('line')} {why}")
 
     if getattr(args, "head", None):
         led["anchored_sha"] = args.head
