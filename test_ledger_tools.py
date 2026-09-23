@@ -911,3 +911,14 @@ class TestReportCli(unittest.TestCase):
         self.assertTrue(lines)
         self.assertTrue(all(line.startswith("error: ") for line in lines), lines)
         self.assertEqual(out.getvalue(), "")
+
+
+class TestAuditRegression(unittest.TestCase):
+    def test_every_audited_defect_is_now_rejected(self):
+        cases = json.load(open(os.path.join(HERE, "tests", "fixtures", "audit-defects.json")))
+        self.assertGreaterEqual(len(cases), 6)
+        for c in cases:
+            it = dict(c["item"]); it["id"] = 1
+            errs = anchor.validate(led(it))
+            self.assertTrue(any(c["expect"] in e for e in errs),
+                            f"source {c['source']} item {c['item']['id']}: {errs}")

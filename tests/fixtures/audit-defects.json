@@ -1,0 +1,191 @@
+[
+  {
+    "source": 0,
+    "item": {
+      "id": 4,
+      "severity": "high",
+      "severity_in": "high",
+      "cluster": "C1",
+      "file": "packages/platform/src/editor/markerEdit/MarkerEditPlugin.tsx",
+      "line": 876,
+      "line_end": 944,
+      "anchor_excerpt": "      ...(isStandardView\n        ? [\n            editor.registerNodeTransform(TextNode, (node) => {\n              if (editor.isComposing()) return;\n              $displayWhitespaceTransform(node);\n            }),\n            editor.registerCommand(\n              COPY_COMMAND,\n              (event) =>\n                $handleCopyForStandardView(\n                  // COPY_COMMAND's payload is `ClipboardEvent | KeyboardEvent | null`. A plain\n                  // `event instanceof ClipboardEvent` narrows this correctly in real browsers,\n                  // but jsdom (our test environment) doesn't implement `ClipboardEvent` at all \u2014\n                  // `instanceof` against the undefined global throws \u2014 so this duck-checks the\n                  // one property `$handleCopyForStandardView` actually needs instead.\n                  event && typeof event === \"object\" && \"clipboardData\" in event ? event : null,\n                  editor,\n                  false,\n                ),\n              COMMAND_PRIORITY_HIGH,\n            ),\n            editor.registerCommand(\n              CUT_COMMAND,\n              (event) => {\n                // A structure-protected document's cut of a selection `StructureKeyboardPlugin`\n                // refuses to replace is that plugin's to refuse, for the reason the paste claim\n                // below declines the same selection: both register at HIGH and this plugin mounts\n                // first, so claiming it here removed the range before the refusal ever ran.\n                const selection = $getSelection();\n                if (\n                  context.structureProtectionMode === \"protected\" &&\n                  $isRangeSelection(selection) &&\n                  $shouldBlockSelectionReplacement(selection)\n                ) {\n                  // The CRITICAL cut arm below has already armed the whole-paragraph reap for this\n                  // selection. A refused cut changes nothing, so no commit runs the update listener\n                  // that resets it, and the next commit's transforms would read it as fresh.\n                  context.wholeParaDeleteExpected?.clear();\n                  return false;\n                }\n                return $handleCopyForStandardView(\n                  event && typeof event === \"object\" && \"clipboardData\" in event ? event : null,\n                  editor,\n                  true,\n                );\n              },\n              COMMAND_PRIORITY_HIGH,\n            ),\n            editor.registerCommand(\n              PASTE_COMMAND,\n              (event) =>\n                $handlePasteForStandardView(\n                  // Same jsdom-safe duck-check as COPY above.\n                  event && typeof event === \"object\" && \"clipboardData\" in event\n                    ? (event as ClipboardEvent)\n                    : null,\n                  context.structureProtectionMode === \"protected\",\n                  // Consumed by $paraMarkerDeletionTransform below, same as the\n                  // INSERT_PARAGRAPH_COMMAND and LOW-priority PASTE_COMMAND handlers arm it for\n                  // the paste paths that reach them \u2014 this HIGH-priority claim reaches the\n                  // former only from its second line on, and the latter never.\n                  () => {\n                    context.splitExpected.current = true;\n                  },\n                ),\n              COMMAND_PRIORITY_HIGH,\n            ),\n          ]\n        : []),",
+      "on_changed_line": false,
+      "claim": "A Cut that structure protection refuses in a non-Standard editable view (e.g. Unformatted) can leave a stale paragraph-deletion arm that later reaps an unrelated, untouched paragraph.",
+      "detail": "**What happens:** The clear-the-arm fix for a refused protected Cut (`context.wholeParaDeleteExpected?.clear()` at line 913) lives only inside the `isStandardView`-gated plugin block (lines 876-944). But the CRITICAL handler that unconditionally arms `wholeParaDeleteExpected` (lines 945-956, pre-existing, not gated on `isStandardView`) and `StructureKeyboardPlugin`'s own CUT refusal are both fully active in any `markerMode: \"editable\"` view, Standard or not. In a view with `isStandardView` false but `markerMode: \"editable\"`, a Ctrl+X spanning a paragraph boundary arms the reap set, gets refused by `StructureKeyboardPlugin`, and nothing registered for that view clears it.\n\n**Why it matters:** Same phantom-paragraph-reap outcome as item #5, reachable in a second view mode. Platform.Bible's own current production menu does not expose an Unformatted view (per a prior review comment on this PR, `MarkerEditPlugin.tsx:437`), but this package's own public `view` prop documents `\"unformatted\"` as a supported mode (`editor.model.ts:632`), and the demo app's dev harness (`demos/platform/src/app/app.tsx`, via `ViewModeDropDown`) wires it directly into the real `<Editor>` with structure protection selectable independently. So this is reachable through the package's own documented API and dev tooling today, even though Platform.Bible's shipped menu doesn't currently surface it \u2014 the prior comment settles a different, narrower question (what Platform.Bible's menu exposes) than this finding depends on (what the package itself allows).\n\n**Fix:** Scope the arm's lifetime to the originating gesture's dispatch, not to Lexical's commit count: stamp each armed key with an id bumped once per top-level KEY_DOWN_COMMAND/CUT_COMMAND dispatch (before any tier runs), and additionally schedule the arm's own removal via `queueMicrotask`/`Promise.resolve().then()` at arm time, so an arm no consuming commit claims within the synchronous handling of that one keystroke/cut event self-destructs before any later, unrelated commit's transform pass can observe it. This works for every view and every gesture without a per-call-site clear.",
+      "evidence": [
+        "packages/platform/src/editor/markerEdit/MarkerEditPlugin.tsx:876-944",
+        "packages/platform/src/editor/markerEdit/MarkerEditPlugin.tsx:945-956",
+        "PR review comment thread r4067241371 on MarkerEditPlugin.tsx:437"
+      ],
+      "verdict": "CONFIRMED",
+      "verdict_reason": "The clear-the-arm fix (MarkerEditPlugin.tsx:913) only runs inside the isStandardView-gated CUT_COMMAND block. The CRITICAL-priority handler that unconditionally arms wholeParaDeleteExpected (lines 945-956) is pre-existing and not gated on isStandardView, so it also arms in a non-Standard editable view. A refused cut produces zero real commits, so the update listener that clears the arm never runs. Reachability: even though a prior review comment says Platform.Bible's own production menu doesn't currently expose the Unformatted view, this package's own public `view` prop (editor.model.ts:632) documents \"unformatted\" as a supported mode, and the demo app's dev harness wires it directly into the real <Editor> with structure protection selectable independently \u2014 so this is reachable through the package's own documented API, not merely hypothetical.",
+      "claim_verdict": "SOUND",
+      "claim_reason": "Matches exactly: the clearing fix is scoped to isStandardView while the arming and reap are not, and the non-Standard editable view is real and package-documented, not dead code.",
+      "fix_verdict": "REWRITTEN",
+      "fix_reason": "Traced Lexical's actual commit mechanics: a per-commit generation counter cannot distinguish the legitimate case (the cut's own successful commit) from the buggy case (a later unrelated commit) \u2014 in both, zero real commits occur between arming and the commit that reads the arm, so both read the identical, not-yet-incremented generation value. The originally proposed cluster fix does not actually work.",
+      "origin": "code-review",
+      "dedupe": null,
+      "anchor_status": "dead",
+      "anchor_note": "no longer on a changed line; cannot be posted inline"
+    },
+    "expect": "review-process wording"
+  },
+  {
+    "source": 0,
+    "item": {
+      "id": 14,
+      "severity": "low",
+      "severity_in": "low",
+      "cluster": null,
+      "file": "packages/platform/src/editor/MarkersViewCopyPlugin.tsx",
+      "line": 95,
+      "line_end": 97,
+      "anchor_excerpt": "      if (!$isRangeSelection(selection) || selection.isCollapsed()) return false;\n      const usfm = $selectionToUsfmViaStandardView(editor, viewOptions);\n      if (usfm === undefined) return false;",
+      "on_changed_line": true,
+      "claim": "A `NodeSelection` over a whole read-only construct in the Markers view falls back to Lexical's own copy, which \u2014 since Markers view builds no marker-byte glyphs for `UnknownNode` outside editable mode \u2014 writes only the construct's raw content with the marker envelope and attributes missing, rather than the USFM bytes the plugin otherwise guarantees.",
+      "detail": "**What happens:** `MarkersViewCopyPlugin`'s `$copy` declines for any non-`RangeSelection` (lines 95-97), falling through to Lexical's own default copy for a `NodeSelection`, which writes the construct's display-derived text/html rather than its USFM bytes \u2014 breaking the plugin's stated guarantee of matching a Standard-view copy of the same range.\n\n**Why it matters:** Whether ordinary click/drag interaction can actually produce a `NodeSelection` over these constructs in a real browser is explicitly already an open, documented uncertainty for the analogous Standard-view case (`docs/clipboard-semantics.md`'s \"Unverified assumption\" note) \u2014 so this may be inherited rather than new. Nothing in this PR extends the existing Standard-view \"selection contains it whole\" USFM path to the Markers view either, so the gap is at minimum not closed by this PR's own stated guarantee. No demonstrated path (keyboard or programmatic) currently produces a `NodeSelection` over one of these constructs, so this is a documented-but-unproven risk rather than an observed one.\n\n**Fix:** If/when the Standard-view `NodeSelection`-over-a-construct question is resolved with a real-browser check, apply the same handling to `MarkersViewCopyPlugin`'s `$copy` rather than leaving it silently uncovered. If real-browser interaction cannot produce this selection shape today, this should be downgraded or closed rather than fixed speculatively.",
+      "evidence": [
+        "packages/platform/src/editor/MarkersViewCopyPlugin.tsx:95-97",
+        "docs/clipboard-semantics.md"
+      ],
+      "verdict": "DOWNGRADED",
+      "verdict_reason": "The gap is real: $copy declines for a NodeSelection, falling through to Lexical's default copy. But traced what that default copy actually writes: for markerMode:\"visible\" (this plugin's only mount condition), createUnknown pushes only the construct's raw content children with no marker envelope at all \u2014 so the fallback loses marker/attribute bytes rather than substituting garbled display text. Checked every $createNodeSelection call site in the repo: both target only VerseNode via keyboard/programmatic paths, never UnknownNode, so there is no demonstrated way to produce this selection shape today.",
+      "claim_verdict": "REWRITTEN",
+      "claim_reason": "Checked against createUnknown's non-editable branch: Markers view gives an UnknownNode no marker-byte display children outside editable mode, so there is no \"display text\" being substituted \u2014 the fallback instead writes bare content with the marker envelope and attributes missing.",
+      "fix_verdict": "SOUND",
+      "fix_reason": "The fix's own conditional framing matches what was found: no current click/drag or programmatic path produces this selection shape, and the reachability question is explicitly unverified upstream in code this same PR added, so leaving it conditional is the honest call.",
+      "origin": "code-review",
+      "dedupe": null,
+      "anchor_status": "ok",
+      "anchor_note": ""
+    },
+    "expect": "hedged"
+  },
+  {
+    "source": 0,
+    "item": {
+      "id": 19,
+      "severity": "low",
+      "severity_in": "low",
+      "cluster": null,
+      "file": "packages/platform/src/editor/markerEdit/whitespaceDisplay.plugin.utils.ts",
+      "line": 248,
+      "line_end": 294,
+      "anchor_excerpt": "const AFTER_MARKER_NBSP = new RegExp(String.raw`(${MARKER_TOKEN})\\u00A0`, \"g\");\nconst BEFORE_MARKER_NBSP = new RegExp(String.raw`\\u00A0(?=${MARKER_TOKEN})`, \"g\");\n\n/**\n * Positional NBSP normalization for an external paste's resolved text. Standard view has no\n * `text/html` fidelity carrier for foreign sources (`$handlePasteForStandardView` below drops\n * formatting entirely and re-tokenizes the plain text \u2014 a Paratext 9 clipboard is the one source\n * whose html IS read for fidelity, and it is decoded to USFM outright before reaching here, with\n * every NBSP already resolved to the space it stands for: {@link getPastePayload}), so a\n * `text/html` payload's NBSPs are the only clue to which spaces were meaningful markup vs. plain\n * content \u2014 and the browser's own\n * clipboard round-trip (and a same-editor paste, whose private Lexical flavor does not survive\n * `navigator.clipboard.read()` \u2014 see `$handlePasteForStandardView`'s doc comment) both carry a\n * DISPLAY-NBSP (a Standard-view run space, a marker's own trailing separator, or a note's\n * internal spacer \u2014 `createNote` in `usj-editor.adaptor.ts` appends one after EVERY child, not\n * just the first, so one sits directly before `\\ft`/`\\f*` and every other child after the caller)\n * as a real NBSP, indistinguishable at this point from a genuine data-NBSP (PT9's `~` glyph).\n *\n * The two are told apart POSITIONALLY, mirroring PT9's `PostprocessUsfm`, in three passes:\n *\n * 1. A leading NBSP run \u2014 at the very start of the text, or right after a newline (a later\n *    paragraph of a multi-line paste can itself start mid-span) \u2014 reads as display spacing with\n *    nothing in front of it to match against (a partial selection starting exactly at a char\n *    span's structural leading NBSP, or inside a paragraph-leading space run, which Standard view\n *    stores as all-NBSP) and becomes plain spaces, one per NBSP.\n * 2. An NBSP immediately FOLLOWING a marker token is the required opener/closer separator and\n *    becomes a plain space (e.g. the mandatory space after `\\f`/`\\fr`, or a char span's own\n *    leading separator when the marker literal IS present in the pasted text).\n * 3. An NBSP immediately PRECEDING a marker token becomes a plain space \u2014 `the\\u00A0\\nd Lord`\n *    keeps the space between its words, and `\\nd Lord\\u00A0\\nd*` keeps its span's trailing space.\n *    None is dropped, even where a note's display layout puts a spacer (before a child's marker or\n *    the note's own `\\f*`): no copy this editor makes puts that layout on the clipboard (Standard\n *    view and the Markers view both copy USFM), a foreign carrier holding a copy of the display is\n *    the only source left, and telling its spacers apart from a space the user typed there is not\n *    possible from the text alone. Keeping a spacer costs a stray space; dropping a user's space\n *    loses content.\n *\n * Passes 2 and 3 both match against the SAME `AFTER_MARKER_NBSP`/`BEFORE_MARKER_NBSP` token set,\n * so a marker recognized by one is recognized by the other. Every remaining NBSP is genuine data\n * and is preserved as `~`, the same display form typed data-NBSP takes, so serialization\n * round-trips it to a real NBSP instead of silently collapsing it to a plain space or dropping it.\n */\nexport function normalizePastedNbsp(text: string): string {\n  return text\n    .replace(/^\\u00A0+/gm, (run) => \" \".repeat(run.length))\n    .replace(AFTER_MARKER_NBSP, \"$1 \")\n    .replace(BEFORE_MARKER_NBSP, \" \")",
+      "on_changed_line": true,
+      "claim": "`normalizePastedNbsp`'s two marker-adjacent NBSP passes now do the same substitution and can be merged into one.",
+      "detail": "**What happens:** `AFTER_MARKER_NBSP` and `BEFORE_MARKER_NBSP` (lines 248-249, 290-294) both now replace their match with a single space. `AFTER_MARKER_NBSP`'s capture-group-plus-backreference exists only to redundantly re-emit text it isn't changing.\n\n**Why it matters:** Two regex constants and two chained `.replace` calls do the work one could; harmless today but adds surface area for the next person editing this function to keep in sync. Item #8 in this batch narrows `BEFORE_MARKER_NBSP` to drop (not space) the NBSP specifically between \\va* and \\vp \u2014 a divergence from `AFTER_MARKER_NBSP` that this merge is incompatible with.\n\n**Fix:** Don't merge these two passes as a standalone change. Apply item #8's fix first, since it requires `BEFORE_MARKER_NBSP` to diverge from `AFTER_MARKER_NBSP` for the \\va*-to-\\vp transition specifically (drop rather than space the NBSP there). Once that lands, a merge of the two passes would need to preserve that one-transition exception rather than collapsing back to a single alternation - likely not worth the added complexity to save two lines.",
+      "evidence": [
+        "packages/platform/src/editor/markerEdit/whitespaceDisplay.plugin.utils.ts:248-249,290-294"
+      ],
+      "verdict": "CONFIRMED",
+      "verdict_reason": "Confirmed both regexes now substitute with exactly a single space, making them the same operation today.",
+      "claim_verdict": "SOUND",
+      "claim_reason": "Matches: both passes now perform the identical substitution.",
+      "fix_verdict": "REWRITTEN",
+      "fix_reason": "Item #8 in this same batch (whose fix was independently CONFIRMED/rewritten) requires the BEFORE_MARKER_NBSP pass to diverge from AFTER_MARKER_NBSP for the \\\\va*-to-\\\\vp transition specifically \u2014 dropping rather than spacing the NBSP there. That divergence is incompatible with merging the two passes into one alternation as this fix proposes. This needs a human decision on sequencing (apply item #8's narrower fix first, then decide whether a merge is still worthwhile) rather than a mechanical answer. Resolved by the user: reworded to a constraint reflecting that item #8''s fix requires the divergence this merge would remove. Resolved by the user: reworded to a constraint reflecting that item #8's fix requires the divergence this merge would remove.",
+      "origin": "code-review",
+      "dedupe": null,
+      "anchor_status": "ok",
+      "anchor_note": ""
+    },
+    "expect": "review-process wording"
+  },
+  {
+    "source": 1,
+    "item": {
+      "id": 8,
+      "severity": "medium",
+      "file": "c-sharp-tests/Projects/ParatextProjectDataProviderPt9InterlinearTests.cs",
+      "line": 1417,
+      "cluster": null,
+      "claim": "The de-duplication test cannot tell correct de-duplication from the selector being ignored entirely.",
+      "detail": "**What happens:** `GetPt9InterlinearData_SelectorWithRepeatsAndReverseOrder_ReadsEachOnceInScanOrder` at `ParatextProjectDataProviderPt9InterlinearTests.cs:1417` seeds exactly two book files and names both in the selector, so `selected` is trivially `whole`, and the single assertion at `:1434-1436` compares two derived sequences. Mutating `SelectRequestedPt9Files` to `return scannedPaths;` - every selected read silently serving the whole project - leaves this test green. The de-duplication half does hold: returning `requestedPaths.ToList()` is caught. There is also no positive control, so an empty-versus-empty comparison would pass.\n\n**Why it matters:** \"the selection was a no-op\" is the strongest failure this test could catch and the one it misses, and it is the failure the ADR calls out - a per-file importer assembling one whole copy per read and never being told. The no-op mutation is caught elsewhere in the fixture, by `GetPt9InterlinearData_Selector_StillServesSettingsDerivedParts` and `GetPt9InterlinearData_SelectorOnOverSizeProject_ServesTheSelectedFile`, so the suite is not blind to it - this test simply provides none of that protection while its name says it does.\n\n**Fix:** Seed a third book file the selector does not name (for example `WriteProjectFile(\"Interlinear_fr.xml\", InterlinearEsMatXml);`), drop the now-unused `whole` variable, and replace the assertion with a pinned two-element list in scan order:\n\n```csharp\nAssert.That(\n    selected.Books.Select(book => book.FilePath),\n    Is.EqualTo(\n        new[]\n        {\n            \"Interlinear_en/Interlinear_en_JAS.xml\",\n            \"Interlinear_es/Interlinear_es_MAT.xml\",\n        }\n    )\n);\n```\n\nWrite it multi-line as shown; csharpier reformats a single-line array literal here.",
+      "evidence": [
+        "c-sharp-tests/Projects/ParatextProjectDataProviderPt9InterlinearTests.cs:1417",
+        "c-sharp-tests/Projects/ParatextProjectDataProviderPt9InterlinearTests.cs:1434",
+        "c-sharp/Projects/Pt9InterlinearReader.cs:439"
+      ],
+      "origin": "code-review",
+      "line_end": 1417,
+      "anchor_excerpt": "    public void GetPt9InterlinearData_SelectorWithRepeatsAndReverseOrder_ReadsEachOnceInScanOrder()",
+      "on_changed_line": true,
+      "verdict": "DOWNGRADED",
+      "verdict_reason": "`GetPt9InterlinearData_SelectorWithRepeatsAndReverseOrder_ReadsEachOnceInScanOrder` (c-sharp-tests/Projects/ParatextProjectDataProviderPt9InterlinearTests.cs:1417) seeds exactly two book files and names both in the selector (:1419-1420, :1427-1429), so `selected` and `whole` are built from the same file set and the single assertion at :1434-1436 compares two derived sequences. Mutating `SelectRequestedPt9Files` (c-sharp/Projects/Pt9InterlinearReader.cs:439) to `return scannedPaths;`, making selection a no-op, leaves this test green: the fixture reports 57/59 and this test is one of the 57. That mutation is caught elsewhere, though - `GetPt9InterlinearData_Selector_StillServesSettingsDerivedParts` fails because it expects `selected.Lexicon` to be null when the selector excludes the lexicon, and `GetPt9InterlinearData_SelectorOnOverSizeProject_ServesTheSelectedFile` fails because the no-op serves everything and trips the size cap. Mutating instead to `return requestedPaths.ToList();` IS caught here, failing at :1436 on ordering.",
+      "severity_in": "medium",
+      "dedupe": null,
+      "anchor_status": "ok",
+      "anchor_note": "",
+      "claim_verdict": "SOUND",
+      "claim_reason": "Both halves were checked against actual mutation runs: the no-op passes at this test, the de-duplication mutation fails at it. On the missing positive control, `whole.Books`/`selected.Books` are never empty with the current fixture, and an empty scan would make `SelectRequestedPt9Files` throw at c-sharp/Projects/Pt9InterlinearReader.cs:421-436 before the assertion runs, so the structural weakness is real but not currently reachable as a silent pass.",
+      "fix_verdict": "REWRITTEN",
+      "fix_reason": "Applied in a scratch copy: seeding a third file not named in the selector and pinning a two-element list passes at baseline, now fails under the `return scannedPaths;` no-op (the extra file appears), and still fails under `return requestedPaths.ToList();`. Scan order comes from `filePaths.Sort(StringComparer.Ordinal)` at c-sharp/Projects/Pt9InterlinearReader.cs:502, which orders the three fixtures en, es, fr. One correction: a single-line `new[] { ... }` array literal here exceeds csharpier's width and is reformatted, so the multi-line form should be written directly."
+    },
+    "expect": "DOWNGRADED"
+  },
+  {
+    "source": 1,
+    "item": {
+      "id": 19,
+      "severity": "low",
+      "file": "c-sharp-tests/Projects/ParatextProjectDataProviderPt9InterlinearTests.cs",
+      "line": 213,
+      "cluster": null,
+      "claim": "The BOM-prefixed fixture in `GetPt9InterlinearManifest_HashesEveryFileToItsOwnDigest` (c-sharp-tests/Projects/ParatextProjectDataProviderPt9InterlinearTests.cs:195-227) asserts only the file's hash, not its `BookId`/`GlossLanguage`, even though the surrounding suite already asserts those fields via non-BOM fixtures elsewhere in the same file.",
+      "detail": "**What happens:** `ReadPt9BookIdentity` opens its `StreamReader` with `detectEncodingFromByteOrderMarks: true` at `Pt9InterlinearReader.cs:192`. Mutating that to `false` leaves 59/59 green. `GetPt9InterlinearManifest_HashesEveryFileToItsOwnDigest` already writes a BOM-prefixed `Interlinear_en/Interlinear_en_MAT.xml` carrying `GlossLanguage=\"en\" BookId=\"MAT\"`, but the assertion at `ParatextProjectDataProviderPt9InterlinearTests.cs:213` projects only `entry.Value.Hash`, so identity is never asserted for it.\n\n**Why it matters:** PT9 writes these files with a BOM. Without detection, `MoveToContent()` throws `XmlException`, the catch at `:210` answers `(null, null)`, and a caller grouping reads by book - the point of the new manifest - sees an unidentifiable corpus.\n\n**Fix:** Optional, not a regression guard: add `Assert.That(manifest.Files[\"Interlinear_en/Interlinear_en_MAT.xml\"].BookId, Is.EqualTo(\"MAT\"))` and the `GlossLanguage` counterpart to `GetPt9InterlinearManifest_HashesEveryFileToItsOwnDigest`, purely for parity with the manifest tests that already assert identity on non-BOM fixtures. Do not describe this as closing a byte-order-mark regression gap: `detectEncodingFromByteOrderMarks` is inert for a UTF-8-BOM file read through an explicitly UTF-8 `StreamReader`, so no assertion on this fixture can turn red from it.",
+      "evidence": [
+        "c-sharp/Projects/Pt9InterlinearReader.cs:192",
+        "c-sharp-tests/Projects/ParatextProjectDataProviderPt9InterlinearTests.cs:213",
+        "c-sharp/Projects/Pt9InterlinearReader.cs:210"
+      ],
+      "origin": "code-review",
+      "line_end": 213,
+      "anchor_excerpt": "            manifest.Files.ToDictionary(entry => entry.Key, entry => entry.Value.Hash),",
+      "on_changed_line": true,
+      "verdict": "REFUTED",
+      "verdict_reason": "Setting `detectEncodingFromByteOrderMarks: false` at c-sharp/Projects/Pt9InterlinearReader.cs:192 and running the PT9 fixture gives 59/59 green, matching the claim. But the claimed cause does not happen. A standalone probe constructing the identical `StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: {true,false}, bufferSize: 1024, leaveOpen: true)` against the exact bytes the test seeds (`EF BB BF` + `<InterlinearData GlossLanguage=\"en\" BookId=\"MAT\" />`) returns `GlossLanguage=en, BookId=MAT` with no exception under BOTH settings: .NET's `StreamReader` strips a BOM matching its explicitly declared encoding's preamble unconditionally, independent of the flag, which governs only auto-switching to a different detected encoding. Applying the proposed assertions and re-running with the mutation still applied still passed. Identity extraction is already asserted elsewhere with non-BOM fixtures (:1176-1181, :1217-1218, :1235-1236), so a genuine extraction regression would already fail. PT9 does write these files with a UTF-8 BOM (~/Paratext/PtxUtils/Memento.cs:185-197); it is specifically the causal chain that is false.",
+      "severity_in": "medium",
+      "dedupe": null,
+      "anchor_status": "ok",
+      "anchor_note": "",
+      "claim_verdict": "REWRITTEN",
+      "claim_reason": "The central mechanism is disproved by the reproduction: flipping the flag produces byte-identical `BookId`/`GlossLanguage` output, so there is no regression path for a test to miss.",
+      "fix_verdict": "REWRITTEN",
+      "fix_reason": "The prescribed assertions were applied and run against the described mutation; the test still passed, so the fix does not achieve what it is prescribed for. The fields are reachable and correctly typed, so the assertions compile and pass as coverage parity, just not as a regression guard."
+    },
+    "expect": "REFUTED"
+  },
+  {
+    "source": 2,
+    "item": {
+      "id": 11,
+      "severity": "low",
+      "severity_in": "low",
+      "cluster": null,
+      "file": "extensions/src/platform-scripture-editor/src/main.ts",
+      "line": 155,
+      "line_end": 229,
+      "anchor_excerpt": "async function insertEndnoteAtSelection(webViewId: string | undefined): Promise<void> {\n  logger.debug('Inserting endnote...');\n  ...\n  await webViewController.insertEndnoteAtSelection();\n}",
+      "on_changed_line": false,
+      "claim": "`main.ts` now carries a fourth near-verbatim insert-at-selection handler, each copied across three layers (handler, postMessage wrapper, `registerCommand` block).",
+      "detail": "**What happens:** `insertFootnoteAtSelection`, `insertCrossReferenceAtSelection`, `insertEndnoteAtSelection` (new), and `insertCommentAtSelection` (155-229, WebViewFactory methods 834-863, `registerCommand` blocks 1196-1283) are structurally identical apart from the log string and the controller method called. `EditorMessageInsertTextualNoteAtSelection` (`types/platform-scripture-editor.d.ts:73-78`) already models footnote/cross-reference/endnote as one method-string union, so consolidation is architecturally straightforward.\n\n**Why it matters:** Maintenance cost only \u2014 a fifth insert type means a fifth hand-copied instance. No correctness impact.\n\n**Fix:** Not required for this PR. Before a fifth rail is added, collapse `insertFootnoteAtSelection`/`insertCrossReferenceAtSelection`/`insertEndnoteAtSelection` into one parameterized handler mirroring `EditorMessageInsertTextualNoteAtSelection`'s shape; `insertCommentAtSelection` stays separate since its `WebViewFactory` method carries its own `canUserCreateComments` permission check the others don't need.",
+      "evidence": [
+        "extensions/src/platform-scripture-editor/src/main.ts:155-229",
+        "extensions/src/platform-scripture-editor/src/main.ts:834-896",
+        "extensions/src/platform-scripture-editor/src/types/platform-scripture-editor.d.ts:73-78"
+      ],
+      "verdict": "CONFIRMED",
+      "verdict_reason": "insertEndnoteAtSelection is new; the first three insert-note handlers and their WebViewFactory methods are structurally identical apart from the varying method string. EditorMessageInsertTextualNoteAtSelection already models the three textual notes as a method-string union, proving consolidation is architecturally viable. insertCommentAtSelection's WebViewFactory method carries a canUserCreateComments guard the other three don't need, so it would stay separate.",
+      "claim_verdict": "SOUND",
+      "claim_reason": "The four handlers exist and are near-identical across three layers; marking the fix as not required for this PR is appropriate since this is a zero-correctness-impact maintenance note.",
+      "fix_verdict": "SOUND",
+      "fix_reason": "Collapsing footnote/cross-reference/endnote into one parameterized handler is straightforward given the functions differ only in log message and controller method; no structural barriers to the refactor.",
+      "origin": "code-review",
+      "dedupe": null,
+      "anchor_status": "dead",
+      "anchor_note": "anchor excerpt no longer present"
+    },
+    "expect": "ellipsis"
+  }
+]
