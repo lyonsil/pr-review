@@ -3,9 +3,15 @@
 Personal tooling for the multi-stage PR review pattern. Two slash commands plus the
 deterministic scripts they call.
 
-- `pr-review-wt.sh`      worktree lifecycle: reap | create | remove | scratchpad | link-deps
-- `pr-review-anchor.py`  ledger validate | reanchor | payload
+- `pr-review-wt.sh`      worktree lifecycle: reap | create | remove | scratchpad | link-deps |
+  remove-refuters | primary-status
+- `pr-review-anchor.py`  ledger validate | reanchor | payload | preview | brief | ingest | excerpt |
+  changed-lines | renumber | edit | report (shared logic in `ledger_tools.py`)
+- `refuter-brief.tmpl.md`  the refuter's whole contract; `brief` renders it per cluster or item
 - `commands/pr-review.md`, `commands/pr-review-post.md`  symlinked into ~/.claude/commands/
+
+`~/.claude/commands/pr-review*.md` are symlinks into `commands/` here - edit these files, not the
+links.
 
 Spec and plan: paranext-core `docs/superpowers/specs|plans/2026-08-28-pr-review-pipeline*.md`
 

@@ -17,7 +17,7 @@ triage table.
    ```
 
    There is **no `$CLAUDE_SCRATCHPAD` environment variable** in this harness - do not reference
-   one. The subcommand honours it if it is ever set, and otherwise derives the path from
+   one. The subcommand honors it if it is ever set, and otherwise derives the path from
    `$CLAUDE_CODE_SESSION_ID` (`pr-review-wt.sh`'s `scratchpad_path`). Use the subcommand rather
    than deriving the path yourself: `reap`'s current-session exclusion calls the same function, so
    a worktree placed under `$SCRATCH` is exactly the set the reaper protects. It prints an
@@ -78,33 +78,37 @@ triage table.
 
    ```bash
    git fetch origin "$BASE_REF"
-   MERGE_BASE=$(git merge-base "$HEAD_SHA" "$(git rev-parse FETCH_HEAD)")
+   BASE_TIP=$(git rev-parse FETCH_HEAD)
+   MERGE_BASE=$(git merge-base "$HEAD_SHA" "$BASE_TIP")
    ```
 
    Capture `HEAD_SHA` (step 4) **before** this fetch: `FETCH_HEAD` is a single per-checkout ref and
    this second fetch overwrites it. For `.`, `BASE_REF` is already a local remote-tracking branch,
-   so `MERGE_BASE=$(git merge-base HEAD "origin/$BASE_REF")` is enough.
+   so `BASE_TIP=$(git rev-parse "origin/$BASE_REF")` and
+   `MERGE_BASE=$(git merge-base HEAD "$BASE_TIP")` are enough.
 
-   Store `MERGE_BASE` in the ledger as `merge_base` (S6), and pass it to every refuter in S5 -
-   establishing what is pre-existing versus introduced is central to their job, and they need the
-   SHA to check it.
+   Store `MERGE_BASE` in the draft ledger as `merge_base` (S4). `brief` hands it to every refuter
+   in S5 - establishing what is pre-existing versus introduced is central to their job, and they
+   need the SHA to check it.
 
-   **Check for a stacked PR whose base was rebased before you trust that scope.** If the base
-   branch has been rebased since this branch forked, the merge-base sits below the entire base
-   stack and the diff wrongly contains another PR's work - GitHub's own Files tab shows the same
-   thing, so the inflation is easy to mistake for the real scope:
+   **Check whether the base was rebased.** `main` moving ahead of this branch is the normal case and
+   needs nothing. A rebased base shows up as commits the base already carries under a different
+   SHA:
 
    ```bash
-   BASE_TIP=$(git rev-parse FETCH_HEAD)
-   git merge-base --is-ancestor "$BASE_TIP" "$HEAD_SHA" \
-     || echo "base was rebased - MERGE_BASE spans the base stack, derive the fork point"
+   git cherry "$BASE_TIP" "$HEAD_SHA" | grep -q '^-' && echo "base was rebased - derive the fork point"
    ```
 
-   When it is not an ancestor, find the real fork point with `git cherry "$BASE_TIP" "$HEAD_SHA"`:
-   the `+` commits are the ones with no patch-equivalent in the base, and the review scope starts
-   at the parent of the first `+` commit that belongs to THIS PR's work (read the subjects - the
-   leading `+` commits are often rebase leftovers of the base's own history). Confirm the range
-   with a diffstat before accepting it, and state the scope explicitly in S6 and in the review body.
+   No output (exit status 1 from `grep -q`) is that normal case. When it prints, the merge-base
+   sits below the entire base stack and the diff wrongly contains another PR's work - GitHub's own
+   Files tab shows the same thing, so the inflation is easy to mistake for the real scope. Find the real fork point in the full `git cherry "$BASE_TIP"
+   "$HEAD_SHA"` output: the `+` commits are the ones with no patch-equivalent in the base, and the
+   review scope starts at the parent of the first `+` commit that belongs to THIS PR's work (read
+   the subjects - the leading `+` commits are often rebase leftovers of the base's own history).
+   Confirm the range with a diffstat before accepting it, and state the scope explicitly when you
+   relay the S6 report and in the review body. Store that fork point as the ledger's `merge_base`
+   in place of `MERGE_BASE`: it is the review base below, and `merge_base` is what `brief` hands
+   the refuters.
 
    **This yields two different bases, and they are not interchangeable:**
 
@@ -114,7 +118,8 @@ triage table.
    | posting base | GitHub's merge-base | what can anchor - GitHub accepts comments only on lines in ITS diff |
 
    The posting base is a superset, so a finding can sit outside the review scope and still be
-   postable. Judge `on_changed_line` against the **posting** base (S6), never the review base.
+   postable. `on_changed_line` is judged against the **posting** base, never the review base: that
+   is why the diff S6's `changed-lines` reads is `gh pr diff`, not a diff from the fork point.
 6. Create the worktree and capture the path with a **direct command substitution** - never through
    a pipe, and never wrapped in `bash -c`:
 
@@ -134,10 +139,20 @@ triage table.
    by the next call); only after that, and after the dirty-worktree guard, does the 24h age floor
    run (`kept ... age-Nh`) - a fallback for when the scratchpad cannot be resolved for the `reap`
    call, not something checked ahead of the lock.
+7. Snapshot the primary checkout so S6 can prove nothing touched it:
+   `~/.claude/pr-review/pr-review-wt.sh primary-status "$WT" > "$SCRATCH/primary.before"`
+8. Link dependencies now, not in S5: `~/.claude/pr-review/pr-review-wt.sh link-deps "$WT" "$MERGE_BASE"`.
+   Record the `linked ...` / `declined ...` line. It links the primary checkout's `node_modules`
+   (per package, for npm, pnpm, yarn and bun) only when no tracked lockfile differs between
+   `MERGE_BASE` and the head - a stale dependency tree would make "I ran it and it passed" worse
+   than no answer. The line goes to every refuter through the brief context file (S1).
+9. Find this repo's real commands - read the root `package.json` scripts, `nx.json`/`project.json`,
+   `*.csproj`/`*.sln`, `Makefile` - and record the single-file test, single-project typecheck and
+   single-file lint command. Never assume `npm run ...` exists.
 
 ## S1. Generate
 
-Snapshot the worktree registry **before** invoking the skill:
+Snapshot the worktree registry after creating `$WT` and before invoking the skill:
 
 ```bash
 mkdir -p "$SCRATCH"
@@ -147,7 +162,7 @@ git worktree list --porcelain > "$SCRATCH/worktrees.before"
 **Two different skills are named `code-review`. Invoke the BUILT-IN one, never the plugin.**
 
 - Built-in, the one to use: skill name exactly `code-review`. It takes a level
-  (`low`/`medium`/`high`/`max`/`ultra`) and honours issue-cap instructions.
+  (`low`/`medium`/`high`/`max`/`ultra`) and honors issue-cap instructions.
 - Plugin, never use: skill name `code-review:code-review`. It has no level concept, always spawns
   exactly 5 Sonnet agents, ignores cap instructions, and **posts a comment to the PR on its own** -
   which would bypass this pipeline's triage gate and publish unreviewed findings under the user's
@@ -177,36 +192,55 @@ this stage, the plugin ran: STOP, tell the user, and say whether a comment was p
 delete it. Do not proceed to S2 on a plugin-produced report - it is capped and filtered differently
 and its findings will not carry the fields the ledger needs.
 
-Then snapshot again and report any delta to the user:
+When it finishes, snapshot again and report any added worktree under `$SCRATCH` to the user:
 
 ```bash
 git worktree list --porcelain > "$SCRATCH/worktrees.after"
-diff "$SCRATCH/worktrees.before" "$SCRATCH/worktrees.after"
+comm -13 <(grep '^worktree ' "$SCRATCH/worktrees.before" | sort) \
+         <(grep '^worktree ' "$SCRATCH/worktrees.after" | sort) | grep -F "$SCRATCH" || true
 ```
 
-That the skill honours "do not create a worktree of your own" is an assumption, not a guarantee.
-Any added worktree is one this pipeline does not own and will not tear down in S5 of
-`/pr-review-post`; if the diff is non-empty, **say so explicitly** and name the added path so the
-user can decide whether to remove it, rather than letting an unowned worktree leak silently.
+That the skill honors "do not create a worktree of your own" is an assumption, not a guarantee.
+Any added worktree is one this pipeline does not own and will not tear down in step 5 of
+`/pr-review-post`; if the command prints a path, **say so explicitly** and name it so the user can
+decide whether to remove it, rather than letting an unowned worktree leak silently.
 
 Any extra instructions in $ARGUMENTS ride along verbatim - for example seeding extra findings
 from a file and placing them above the cap.
 
-## S2. Split and renumber
+### While the generator runs
+
+The skill runs in the background; a task-notification arrives when it finishes. Until then do
+preparation only:
+
+- the S3 comment fetch,
+- the obligation table (S5),
+- the posting diff: `mkdir -p "$SCRATCH/pr-review/pr<n>" && GH_REPO="$REPO" gh pr diff <n> > "$SCRATCH/pr-review/pr<n>/head.diff"`
+  (for a `.` target: `git -C "$WT" diff "$MERGE_BASE" HEAD > "$SCRATCH/pr-review/prlocal/head.diff"`),
+- the brief context file `$SCRATCH/pr-review/pr<n>/ctx.json`, written with the Write tool:
+  `{"link_deps": "...", "commands": "...", "obligations": "<the table>", "claude_md_paths":
+  ["$WT/CLAUDE.md", ...], "scratch": "$SCRATCH"}` - `link_deps` is the S0 step 8 line, `commands`
+  the S0 step 9 commands, and every path literal and absolute.
+
+Then end your turn. Do not review the code yourself, do not run the test suite, and never use
+`ScheduleWakeup`, `/loop`, `sleep`, or a placeholder command to wait.
+
+## S2. Split and number
 
 One item = one defect, with one fix, at one site. Break every composite item apart.
 
-Then renumber **globally, 1..N, ordered by severity descending then file path**. Severity
+Then number them **globally, 1..N, ordered by severity descending then file path**. Severity
 vocabulary is exactly `blocker`, `high`, `medium`, `low`.
 
-The generator does emit values outside that set - `medium-high`, `low-medium`. Normalize each to
-the **lower** neighbour (`medium-high` -> `medium`, `low-medium` -> `low`): the hyphenated form is
-a hedge, and a hedge should not inflate a severity on its way to an author. Record the normalized
-value as `severity_in` and say in the S6 report that you normalized.
+Ids assigned here are stable until S6's `renumber`. Refer to another finding only as `{{#id}}`.
 
-**Letter suffixes are forbidden.** Never produce `2a` or `30g`. If an item splits, every
-downstream number shifts. The validator (S6 step 4) enforces this and will reject the ledger
-otherwise - along with duplicate ids, non-contiguous ids, and wrong severity ordering.
+The generator does emit values outside that set - `medium-high`, `low-medium`. Normalize each to
+the **lower** neighbor (`medium-high` -> `medium`, `low-medium` -> `low`): the hyphenated form is
+a hedge, and a hedge should not inflate a severity on its way to an author. Record the normalized
+value as `severity_in` and, when you relay the S6 report, say which ones you normalized.
+
+**Letter suffixes are forbidden.** Never produce `2a` or `30g`: a split item's parts each get
+their own integer id. `validate` (S6) rejects letter-suffixed, duplicate and non-contiguous ids.
 
 ## How every finding is written
 
@@ -232,7 +266,7 @@ and specific enough to be false if the finding is wrong.
 
 This sentence leads every inline comment and fills the triage table, so it has to stand alone.
 
-### `detail` - three labelled slots, always in this order
+### `detail` - three labeled slots, always in this order
 
 - `**What happens:**` (required) - the causal chain one step at a time, each step carrying the
   `file:line` where it happens, naming the real symbols. The mechanism goes here.
@@ -262,16 +296,16 @@ Cap `detail` at about 120 words. If it needs more, you probably have two finding
 3. **Explain the mechanism in THIS code, not the concept in general.** A paragraph on how React
    effects work is not teaching; walking the specific path through this diff is.
 4. **Keep the review process out of the prose.** The author never saw this pipeline: no verdicts,
-   no refuters, no "the generator flagged", no severity revisions, no item numbers beyond the `#n`
-   cross-references `payload` adds itself. The comment header already carries a plain-English
+   no refuters, no "the generator flagged", no severity revisions, no item numbers except as a
+   `{{#id}}` token, which `payload` renders as `#n`. The comment header already carries a plain-English
    status - the prose neither repeats nor explains it.
 5. **A fix must be complete under the rules the next review will apply.** Whatever the author
    writes to satisfy this finding gets reviewed in turn - by this pipeline again, or by a human
    reading the same rule files. A fix that works but omits an obligation those rules attach to it
    buys a second round for nothing: the `// CUSTOM:` annotation on a shadcn edit, the catalog entry
-   for a new keyboard handler, every locale file for a new string, the test for a behaviour change.
-   Name each obligation the change triggers as part of the `Fix:` line. S5 derives the repo's
-   obligation table and hands it to every refuter.
+   for a new keyboard handler, every locale file for a new string, the test for a behavior change.
+   Name each obligation the change triggers as part of the `Fix:` line. The repo's obligation
+   table (S5) goes to every refuter in its brief.
 
 ### Worked example
 
@@ -284,7 +318,7 @@ Cap `detail` at about 120 words. If it needs more, you probably have two finding
 
 Skip entirely for a `.` target, or if the PR has no comments.
 
-Pull existing feedback:
+Pull existing feedback (done while the generator runs, S1):
 
 ```bash
 gh api "repos/{owner}/{repo}/pulls/<n>/comments" --paginate \
@@ -305,53 +339,119 @@ renumbering.
 **Cluster carefully - S5 dispatches one refuter per cluster.** A cluster is no longer only a way to
 present findings: it asserts that its items rest on the same premise, and the whole cluster is
 verified by one agent in one context. Two items that merely look alike, or land in the same file
-for unrelated reasons, are NOT a cluster - grouping them makes one agent's judgement on the first
-colour its answer on the rest. If you cannot write a `shared_fix` that is literally the same change
+for unrelated reasons, are NOT a cluster - grouping them makes one agent's judgment on the first
+color its answer on the rest. If you cannot write a `shared_fix` that is literally the same change
 at each site, leave the items unclustered and let them get their own refuters.
+
+Then write the draft ledger to `$SCRATCH/pr-review/pr<n>/ledger.json`, with the fields marked
+`draft` below and nothing else. This is the last time you write ledger JSON directly: from here on
+every field is written by a subcommand, and none is ever edited to clear a tool error. Match every
+field name exactly - a cluster **must** use `item_ids` (not `items`, not `ids`); a cluster whose
+`item_ids` is missing reads as empty, and its items then fail `ingest` as never dispatched.
+
+```jsonc
+{
+  "schema": 2,                                   // draft
+  "target": {"kind": "pr", "repo": "<owner>/<repo>", "number": <n>},  // draft; kind "local", repo/number omitted, for a `.` review
+  "head_sha": "<HEAD_SHA>",                      // draft
+  "merge_base": "<MERGE_BASE>",                  // draft
+  "worktree": "<WT>",                            // draft
+  "caps": {"subagent": 16, "report": 30},        // draft; the caps actually used, per S1
+  "anchored_sha": "<sha>",                       // reanchor --head, in /pr-review-post: the head the anchors were resolved against
+  "items": [
+    {
+      "id": 1,                                   // draft; global 1..N, integer only, no letter suffixes
+      "severity_in": "blocker|high|medium|low",  // draft; what the GENERATOR assigned, never overwritten
+      "severity": "blocker|high|medium|low",     // draft (= severity_in); ingest writes the refuter's revision
+      "cluster": "C3",                           // draft; or null - must match a "clusters[].id" below
+      "file": "src/foo.ts",                      // draft
+      "line": 142,                               // draft; changed-lines may move it onto the first changed line in the range
+      "line_end": 148,                           // draft
+      "claim": "one sentence in observable terms - see How every finding is written",  // draft
+      "detail": "**What happens:** / **Why it matters:** / **Fix:** - same section",   // draft
+      "evidence": ["src/bar.ts:88"],             // draft
+      "origin": "code-review|seed:<path>",       // draft
+      "dedupe": null,                            // draft; or {"prior_url": "...", "note": "..."} from S3
+      "refuter_note": "...",                     // draft, optional; your guidance to this item's refuter - deleted by ingest, never posted
+      "anchor_excerpt": "...",                   // excerpt: lines line..line_end read verbatim from $WT
+      "on_changed_line": true,                   // ingest records the refuter's answer; changed-lines overwrites it from the diff
+      "verdict": "CONFIRMED|DOWNGRADED|REFUTED|INCONCLUSIVE",  // ingest
+      "verdict_reason": "...",                   // ingest
+      "claim_verdict": "SOUND|REWRITTEN",        // ingest; absent on REFUTED
+      "claim_reason": "...",                     // ingest
+      "claim_original": "...",                   // ingest; the generator's claim before a CLAIM_REWRITE
+      "fix_verdict": "SOUND|REWRITTEN|UNVERIFIABLE",  // ingest; absent on REFUTED
+      "fix_reason": "...",                       // ingest
+      "fix_original": "...",                     // ingest; the generator's Fix: text before a FIX_REWRITE
+      "refuter_key": "C3",                       // ingest; which verdict file answered this item
+      "unanswered": true,                        // ingest --inconclusive; the refuter never answered
+      "fold_note": "folded|bookkeeping",         // edit, S6; for DOWNGRADED only
+      "old_id": 7,                               // renumber; the stable S2 id
+      "anchor_status": null,                     // reanchor: ok|moved|off-diff|dead
+      "anchor_note": null                        // reanchor: its reason string
+    }
+  ],
+  "clusters": [
+    {"id": "C3", "title": "...", "shared_fix": "...", "item_ids": [1, 12, 27]}  // draft
+  ]
+}
+```
+
+Verdict fields are written by `ingest` at the end of S5, never by hand.
 
 ## S5. Pressure-test
 
-Dispatch **one refuter subagent per cluster, and one per unclustered item**, in parallel batches,
-passing the Agent tool's `model: "sonnet"` override on each call (see Model below). Give each: every
-item it owns (id, claim, `detail`, `evidence`, `file:line`), the cluster's `shared_fix` where there
-is one, the worktree path `$WT`, `MERGE_BASE`, the relevant CLAUDE.md paths, and the obligation
-table (below).
-
-Grouping by cluster, not by item, is what keeps this stage affordable. A refuter pays the same fixed
-cost - its own context, the repo's CLAUDE.md and rules, the files it reads - whether it answers one
-claim or six, and on a real 68-item review that constant was being paid 68 times to examine 13
-files. Cluster siblings share a premise and usually share the code that settles it, so verifying the
-second site costs a fraction of the first.
-
-**Group by cluster and by nothing else.** Do not batch unrelated items to make the agent count
-smaller: that pays the full cost of a shared context - one verdict priming the next, attention
-thinning down a long list - to save only the fixed overhead. Where the S4 clustering is honest, the
-correlation a shared context introduces is correlation that *should* exist; where it is not, this
-stage is where that shows up.
-
-Refuters running in parallel share ONE worktree, so tell each: write probe files to your own temp
-directory, never to `$WT`; revert any tracked file you mutate for a mutation test; and **leave
-untracked files you did not create alone** - they belong to a sibling refuter still running.
-Without this they spend tokens reporting each other's scratch files as unexplained repo state, and
-one tidying up "stray" files will delete another's probe mid-run.
-
-First make verification actually possible, so a refuter is never reduced to guessing:
+For every refuter key - each cluster id, and `i<id>` for each unclustered item - render its brief:
 
 ```bash
-~/.claude/pr-review/pr-review-wt.sh link-deps "$WT" "$MERGE_BASE"
+python3 ~/.claude/pr-review/pr-review-anchor.py brief <ledger> --key <KEY> \
+  --context "$SCRATCH/pr-review/pr<n>/ctx.json"
 ```
 
-It prints `linked <path>` or `declined <reason>`, and links the primary checkout's `node_modules`
-only when no tracked lockfile differs between `MERGE_BASE` and the head - a stale dependency tree
-would make "I ran it and it passed" worse than no answer. **Pass the result into every refuter
-prompt**: on `linked`, say that `npm run typecheck`, `npm run lint` and `npm test` are available in
-`$WT`; on `declined`, say so and name the reason. Never tell a refuter it cannot verify anything -
-`git`, `grep` and the full history are always available, and most claims are settled with those.
+It prints the brief's path. `brief` refuses a key that is not one cluster or one unclustered item,
+an obligation row that cites no repo file, or a placeholder it could not fill. Guidance you want a
+refuter to have goes in that item's `refuter_note` in the draft ledger - never in `claim` or
+`detail`. The brief carries the refuter's whole contract - the three jobs, the verdict definitions,
+the worktree rules and the reply format - from `refuter-brief.tmpl.md`; do not restate any of it in
+the dispatch prompt.
+
+Dispatch one Agent per key, `model: "sonnet"`, with exactly this prompt:
+`Read <brief path> and follow it exactly.` Refuters always run on Sonnet. Run at most 15 at once;
+launch the next as each finishes. Ignore task-notifications whose result says the report was
+delivered as a message.
+
+After dispatching, arm the watchdog - the only wakeup this command may use:
+`ScheduleWakeup(delaySeconds=1200, prompt="pr-review watchdog: check refuter progress")`.
+On waking, stat (never read) each outstanding refuter's output file. One unchanged for 15 minutes:
+`TaskStop` it and dispatch it again once. A second stall: leave it for `ingest --inconclusive`.
+Re-arm until every verdict file exists, then stop the wakeup.
+
+When all have answered:
+
+```bash
+python3 ~/.claude/pr-review/pr-review-anchor.py ingest <ledger>
+~/.claude/pr-review/pr-review-wt.sh remove-refuters "$SCRATCH" <n>
+```
+
+`ingest` reads the dispatched set from `briefs/*.json` and the answers from `verdicts/<KEY>.txt`,
+both beside the ledger, and applies every `CLAIM_REWRITE` and `FIX_REWRITE` itself. It names every
+problem at once and changes nothing if there is one. For each refuter it names, re-dispatch once
+with the error lines appended to the prompt. If the same refuter fails again - or stalled twice -
+close its items, then run `remove-refuters` as above:
+
+```bash
+python3 ~/.claude/pr-review/pr-review-anchor.py ingest <ledger> --inconclusive <ids> \
+  --reason "<what went wrong>"
+```
+
+`<ids>` is comma-separated (`4,9,17`); use `--reason "refuter stalled"` for a stall. Never edit the
+ledger to get past `ingest`.
 
 ### The obligation table
 
-Build this once, before dispatching, and paste it into every refuter prompt. It is what makes a fix
-survive the *next* review rather than merely working.
+Build this once, while the generator runs (S1), and put it in `ctx.json`'s `obligations`; `brief`
+pastes it into every refuter's brief. It is what makes a fix survive the *next* review rather than
+merely working.
 
 Enumerate the rules this repo's reviewers actually read - `.claude/rules/**`, the standards table in
 `CLAUDE.md`, and any `AGENTS.md` - and reduce them to a table of *triggers*: the shape of a change,
@@ -360,6 +460,9 @@ these commands are used against more than one repository, the rule sets differ, 
 worse than none because it asserts obligations that no longer exist. A dozen rows is the right size;
 it is a lookup, not a summary of the standards.
 
+Every row's last cell names the repo file the obligation comes from. A preference of yours or of
+the user's that no repo file states is not an obligation.
+
 Shape it like this (the rows are illustrative - read the repo's own rules for the real ones):
 
 | If the fix ... | it must also ... | rule |
@@ -367,7 +470,7 @@ Shape it like this (the rows are illustrative - read the repo's own rules for th
 | edits a vendored component | carry the annotation that convention requires | `shadcn-discipline.md` |
 | adds or changes a keyboard handler | update the shortcuts catalog | `keyboard-shortcuts-catalog.md` |
 | adds user-facing strings | land in every locale file | `localization-locale-files.md` |
-| changes behaviour | come with a test | `testing/tdd-discipline.md` |
+| changes behavior | come with a test | `testing/tdd-discipline.md` |
 | suppresses a tool warning | justify why fixing the code is worse | `eslint-disable-discipline.md` |
 | adds a comment | be forward-facing, no PR or ticket narration | `forward-facing-comments.md` |
 | chooses among viable approaches | be recorded in the decisions log | `CLAUDE.md` |
@@ -376,408 +479,76 @@ A fix that satisfies the claim but not the table is the cheapest kind of review 
 author implements it, the next reviewer flags the omission, and a second round buys nothing that
 this one could not have said.
 
-### The refuter's job
-
-A refuter's task is to reach the truth, not to win. Instruct each one:
-
-> Establish whether each of these findings is true, and how much it matters. You are the last check
-> before they reach the PR author, so an unexamined "I could not tell" costs as much as a wrong
-> answer.
->
-> **Answer every finding separately, and expect them to differ.** The findings you were given share
-> a fix, which means they share a premise - not a verdict. The single most common defect this review
-> exists to catch is a fix that landed at one of the two sites that needed it, so a premise that
-> holds at the first site tells you nothing about whether the second site was actually changed. Go
-> to each site and check it. If you find yourself about to answer the fourth finding from what you
-> learned on the first, you have stopped verifying.
->
-> **Verify before you judge.** Work the ladder as far as the claim needs: read the anchored code
-> and everything it calls; `git diff <MERGE_BASE> HEAD -- <file>` to see what this PR actually
-> changed; `git log -S` / `git show <MERGE_BASE>:<file>` to establish what is pre-existing; grep for
-> every producer and consumer before asserting a value can or cannot occur; and, if dependencies
-> were linked, RUN the check - typecheck, lint, or the single test file that would settle it.
-> Naming a command you did not run is not evidence.
->
-> Report one of four verdicts:
->
-> - `CONFIRMED` - the claim is true and matters as stated.
-> - `DOWNGRADED` - the observation is true, but smaller than claimed: unreachable on any current
->   path, an instance of a pre-existing pattern the PR merely continues, intentional per an
->   adjacent comment or ADR, or simply less severe than first rated. **This is the right verdict
->   whenever you find yourself writing "the mechanics are right, but ..." - say what survives, and
->   downgrade it. Do not refute a finding you have just agreed with.**
-> - `REFUTED` - the claim itself is false. Reserved for a claim you have positively disproved:
->   the code does not do what the finding says, or the consequence provably cannot follow from it.
-> - `INCONCLUSIVE` - you could not settle it. Say exactly what you could not check and what would
->   settle it. Use this rather than defaulting to a verdict you cannot support.
->
-> Give `file:line` evidence for the verdict either way. You may revise the severity; give your
-> reason - **in either direction.** Lowering one is the common move and the wording above invites
-> it; raising one is equally available, and equally expected when what you found is worse than the
-> finding says. Also report whether the anchor sits on a line this PR changed.
-
-### The refuter's second job: does the claim describe what you verified?
-
-The verdict settles whether the finding is **true**. It does not settle whether the `claim`
-sentence *describes* the defect - and that sentence leads every inline comment, fills the triage
-table, and is the first thing the author reads.
-
-A truth test catches only a claim that reaches too far, because a claim NARROWER than the defect
-passes it: verifying "this breaks in Simple mode" never requires looking at Power mode. So scope
-errors survive this stage in both directions, and the narrow one is both harder to see and worse to
-ship - an overstated claim starts an argument and gets corrected, while an understated one gets
-fixed at one of the two sites that needed it, which is the failure this whole pipeline exists to
-catch.
-
-Measured on paranext-core #2825: eight of thirty claims did not match their own evidence, against
-two that were false. One managed both errors at once - "a web view whose iframe finishes loading
-**during teardown** throws an uncaught error, and a pane whose definition read fails is **never
-zoomed at all**" understated *when* (any failing definition read does it) while overstating *what
-follows* (only a pane that never reports an area). So do not ask whether the claim is true. Ask
-whether it matches:
-
-> **Does the claim describe the defect you verified - no more and no less?** Both failures count: a
-> claim that reaches past what you established, and one that names a narrower case - one interface
-> mode, one view, one caller - than the mechanism you actually found.
->
-> **The mismatch must come from evidence you already gathered while verifying.** If you have to go
-> looking for a new case in order to make the claim bigger, it is `SOUND`. This is not a hunt for
-> ways a finding could be broader - that only manufactures "this could also bite if someone writes
-> a component that ...". The real ones sit in what you already read: on #2825 both understated
-> claims were visible inside checks the refuter was already running - a pane-width check that never
-> asked about the other interface mode, and a code path already open on screen.
->
-> - `SOUND` - the claim describes what you verified.
-> - `REWRITTEN` - it does not. **Supply the replacement sentence**, in the same observable terms the
->   contract demands of the original: what goes wrong as a reader would experience it, present
->   tense, specific enough to be false if the finding is wrong. Correct only the mismatch you can
->   evidence; do not restyle a sentence that is already accurate.
-
-### The refuter's third job: the fix
-
-The block above settles whether the finding is **true**. It says nothing about whether its
-`**Fix:**` slot **works**, and nothing upstream has checked that either: the generator wrote the fix
-in S1 and it posts to the author verbatim. On paranext-core #2821, five of twenty fix lines were
-unworkable while every claim under them was sound - `structuredClone` on a menu entry carrying
-`click` closures (it throws), a symbol that exists but is not exported from the package index, a
-memo whose dependency array does not include the state the fix depends on, a moved element that was
-carrying the layout's flex sizing, and a hook named for a module-level call site. Four of those five
-named a **real symbol that was real in the wrong place**. Reading that a symbol exists is not
-checking that it is reachable from where the fix lands.
-
-Instruct each refuter, for every item it owns:
-
-> Answer separately whether this finding's `Fix:` line is something the author can actually carry
-> out, and whether carrying it out would survive the next review. Three properties:
->
-> - **Evidenced.** The fix climbs the same ladder the claim does, and the same rule applies: naming
->   a command you did not run is not evidence. Check that every symbol it names exists **and is
->   reachable from the site the fix lands on** - exported from the package index, not merely present
->   in the repo; in scope at that call site; importable under the repo's module restrictions. Check
->   that the API it invokes accepts what is being handed to it. Check that the mechanism actually
->   changes the behaviour in question - a memo that does not depend on the state, an effect that
->   does not re-run, a cache keyed on something that does not vary, all compile clean and fix
->   nothing. Check that the site is not carrying a responsibility the fix would drop. Where the
->   question is settled by a probe, **run the probe**: one `node -e` line established that
->   `structuredClone` refuses a closure.
-> - **Complete.** Apply the obligation table above. If the change trips a row, the fix must say so.
-> - **Honest.** If you cannot verify a concrete edit, do not rewrite it into a vaguer one. State the
->   **constraint** any fix must satisfy - "must preserve the `click` closures, and must land at both
->   `:207` and `:220`" - which is imperative, actionable, and cannot be wrong in the way a guessed
->   prescription can.
->
-> **Answer this separately for every item, exactly as you do the verdict.** A cluster shares a fix
-> *by definition*, so the pull to answer once and apply it to the rest is strongest here - and
-> "the same change at the other site" is precisely the assertion that keeps turning out to be
-> false. Go to each site.
->
-> Where dependencies were linked, prefer a targeted check over a broad one: the single test file,
-> a type-check of the one project, the linter on the one file, a `node -e` probe. Do **not** judge a
-> fix by a repo-wide typecheck or lint in this worktree - `node_modules` is a symlink to another
-> checkout sitting on a different commit, so those runs produce duplicate-identifier and
-> unresolved-import errors that belong to the setup, not to the fix.
->
-> Report one of three fix verdicts:
->
-> - `SOUND` - the fix works as written, and is complete under the obligation table.
-> - `REWRITTEN` - it does not, or it omits an obligation. **Supply the replacement text**; flagging
->   the problem without repairing it leaves the orchestrator to guess, which is how the bad fix got
->   there. A replacement may be a constraint rather than a prescription.
-> - `UNVERIFIABLE` - you could not establish even the constraints. Say what you could not check.
->   Rare: if you can name one thing a fix must not break, you have a constraint, and that is a
->   `REWRITTEN`.
-
-Reply format, exactly and with nothing before it - **one block per finding, in the order they were
-given, with a blank line between blocks**. A block for every id you were given, even where several
-reach the same verdict:
-
-```
-ITEM: <id>
-VERDICT: CONFIRMED|DOWNGRADED|REFUTED|INCONCLUSIVE
-SEVERITY: blocker|high|medium|low
-ON_CHANGED_LINE: true|false
-REASON: <3-6 sentences with file:line evidence>
-CLAIM_VERDICT: SOUND|REWRITTEN
-CLAIM_REASON: <what you matched the claim against, with file:line evidence>
-CLAIM_REWRITE: <the replacement claim sentence - required on REWRITTEN, omitted otherwise>
-FIX_VERDICT: SOUND|REWRITTEN|UNVERIFIABLE
-FIX_REASON: <what you checked about the fix, with file:line evidence>
-FIX_REWRITE: <the replacement Fix: text - required on REWRITTEN, omitted otherwise>
-```
-
-The `CLAIM_` and `FIX_` lines may be omitted only on a `REFUTED` item, whose text reaches nobody.
-On every other verdict they are required, and `validate` rejects the ledger without them.
-
-Write `REASON` for the PR author, not for the pipeline. On a `CONFIRMED` verdict it publishes
-verbatim under **How this was checked**, and on `INCONCLUSIVE` under **What could not be checked**,
-so say what you checked and what you found, keep the `file:line` evidence, and leave out the review
-vocabulary. A `DOWNGRADED` reason does not publish at all - see "Recording the result" below for
-where it goes instead.
-
-**Do not refute on grounds that are about posting rather than truth.** Whether the anchor sits on a
-changed line is recorded in `on_changed_line` and enforced by `payload` on its own; it is never a
-reason for a verdict. Neither is "a linter or CI would catch it" - that speaks to who reports the
-problem, not whether it exists.
-
-### Model
-
-Refuters run on **Sonnet by default**, regardless of what tier the generator ran on. A refuter
-overturns a finding the generator raised, and a weaker model's characteristic failure is exactly
-the one that matters here: unable to trace a path, it reads that as absence of a path - so do not
-drop below Sonnet as the default.
-
-An even cheaper model is allowed only for a **single unclustered item that is single-file,
-single-site, and settled by reading that file** - a localization string, a TSDoc omission, a comment
-that misdescribes adjacent code, a catalog entry. It is never allowed for a cluster: a cluster spans
-sites by definition, so "settled by reading one file" cannot be true of it. Such a refuter may not
-return `REFUTED` on a reachability argument either: any verdict resting on "nothing anywhere in the
-repo produces this" requires a whole-repo search, so escalate it to Sonnet instead. Say in the
-report which items ran on a cheaper model.
-
-### Recording the result
-
-Record `verdict`, `verdict_reason`, `on_changed_line`, `claim_verdict`, `claim_reason`,
-`fix_verdict` and `fix_reason` per item. Record the generator's severity as `severity_in` and the
-refuter's as `severity` - **never overwrite `severity_in`**.
-
-**Apply every `CLAIM_REWRITE` into the item's `claim`**, replacing the sentence outright. Do this
-as you record, for the same reason as the fix rewrite below: `claim` is what leads the inline
-comment, so a rewrite left in a refuter reply is a rewrite the author never sees. Where a refuter
-returned `REWRITTEN` with no replacement sentence, re-dispatch it once rather than writing one
-yourself. A rewritten claim does not change the finding's identity - keep its id, severity and
-`severity_in` exactly as they were; only the sentence changes.
-
-**Apply every `FIX_REWRITE` into the item's `detail`**, replacing the text after `**Fix:**` and
-leaving the other two slots alone. Do this as you record, not later: `detail` is what posts, so a
-rewrite left sitting in a refuter reply is a rewrite that never reached the author. Where a refuter
-returned `REWRITTEN` with no replacement text, re-dispatch it once for the replacement rather than
-writing one yourself - it read the site and you did not. If it still will not supply one, record
-`UNVERIFIABLE` with that as the `fix_reason` and surface the item in S6. A refuter that
-downgrades and refutes in one step otherwise leaves a triage table where every dropped finding reads
-as low-severity noise, hiding that a `high` was dropped.
-
-**Every item must end S5 with one of the four verdicts, and - unless REFUTED - a claim verdict and a
-fix verdict too.** A block that answers whether the finding is true and drops the `CLAIM_` or `FIX_`
-lines has answered part of the question; treat it exactly as you treat a missing block. Check each reply against the ids you
-dispatched: a cluster refuter that returns four blocks for a six-item cluster has silently dropped
-two findings, and an item nobody answered is indistinguishable from one nobody raised. A refuter
-that returns prose without a parseable `VERDICT:` line, or that omits ids, has not answered -
-re-dispatch it once with the format and the missing ids restated, and if it still will not answer,
-record `INCONCLUSIVE` for each unanswered item with that as the reason. Never leave a placeholder:
-`payload`'s exclusion is `REFUTED`-only, so a finding left in any other state posts to the PR as
-though it had been confirmed. `validate` rejects the ledger for this, but do not rely on it to
-catch what this step should not produce.
-
-Any item left `INCONCLUSIVE` after one escalation must be **named to the user in the S6 report**,
-with what could not be checked. Do not close out the round silently holding an unanswered finding.
-
-**Fold each downgrade's reasoning into the finding itself.** Neither `severity_in -> severity` nor
-"why this was lowered" publishes - both describe a revision the author never saw, and `payload`
-emits neither. So for every `DOWNGRADED` item, read its `verdict_reason` and ask whether it changes
-what the author needs to know. When it does - the path is gated, unreachable, pre-existing, or
-intentional - rewrite it into that item's `Why it matters:` slot in the author's terms, so the
-severity it posts at reads as sensible rather than arbitrary. When it is only bookkeeping ("less
-severe than first rated"), drop it. Either way leave `verdict_reason` itself untouched: it is the
-refuter's record, and the S6 terminal report still prints it.
-
-Then apply any severity revisions and **re-sort and renumber** so the 1..N ordering still holds.
-
-Note for later: `REFUTED` is sticky downstream but not final. `/pr-review-post`'s
-`payload --include-refuted <ids>` lets the user overrule specific REFUTED ids, per id, at post time -
-without touching the ledger's `verdict`/`verdict_reason`, so the refuter's recorded reasoning stays
-intact. `DOWNGRADED` and `INCONCLUSIVE` need no overrule: they are carried into the review body
-automatically.
-
 ## S6. Report
 
-1. Write `$SCRATCH/pr-review/pr<n>/ledger.json` with every field named below - `validate`
-   and `payload` only check a subset of these keys, so a wrong or missing key elsewhere fails
-   silently rather than loudly. In particular: a cluster **must** use `item_ids` - not `items`,
-   not `ids`. `validate` does not catch a wrong key name (an absent `item_ids` defaults to empty,
-   which is legal), and `payload --select C3` against a cluster with no working `item_ids` silently
-   emits `"comments": []` at exit 0. Match every field name exactly:
+Run, in order, stopping on any `error:`:
 
-   ```jsonc
-   {
-     "schema": 1,
-     "target": {"kind": "pr", "repo": "<owner>/<repo>", "number": <n>},  // kind "local", repo/number omitted, for a `.` review
-     "head_sha": "<HEAD_SHA>",
-     "merge_base": "<MERGE_BASE>",
-     "worktree": "<WT>",
-     "caps": {"subagent": 16, "report": 30},        // the caps actually used, per S1
-     "items": [
-       {
-         "id": 1,                              // global 1..N, integer only, no letter suffixes
-         "severity": "blocker|high|medium|low",   // AFTER the S5 refuter's revision
-         "severity_in": "blocker|high|medium|low",// what the GENERATOR assigned; never overwritten
-         "cluster": "C3",                      // or null - must match a "clusters[].id" below
-         "file": "src/foo.ts",
-         "line": 142,
-         "line_end": 148,
-         "anchor_excerpt": "verbatim source lines this finding sits on - survives head drift",
-         "on_changed_line": true,              // VERIFY against the diff - see step 2. Not the
-                                               // refuter's word: false = body-only, and a wrong
-                                               // true fails the WHOLE review, not just its comment.
-                                               // Missing/null is treated as "not excluded", so
-                                               // fill it in for every item.
-         "claim": "one sentence in observable terms - see How every finding is written",
-         "detail": "**What happens:** / **Why it matters:** / **Fix:** - same section",
-         "evidence": ["src/bar.ts:88"],
-         "verdict": "CONFIRMED|DOWNGRADED|REFUTED|INCONCLUSIVE",  // no placeholders; see S5
-         "verdict_reason": "the S5 refuter's reasoning, whichever verdict it reached",
-         "claim_verdict": "SOUND|REWRITTEN",   // the refuter's SEPARATE answer on whether `claim`
-                                               // DESCRIBES the verified defect - overstated and
-                                               // understated both fail. Required unless `verdict`
-                                               // is REFUTED; `validate` rejects a missing or
-                                               // unknown value. A REWRITE is applied into `claim`
-                                               // before the ledger is written, never stored beside it.
-         "claim_reason": "what the refuter matched the claim against, with file:line evidence",
-         "fix_verdict": "SOUND|REWRITTEN|UNVERIFIABLE",  // the refuter's SEPARATE answer on the
-                                               // `**Fix:**` slot. Required unless `verdict` is
-                                               // REFUTED; `validate` rejects a missing or unknown
-                                               // value. A REWRITE is applied into `detail` before
-                                               // the ledger is written, never stored beside it.
-         "fix_reason": "what the refuter checked about the fix, with file:line evidence",
-         "origin": "code-review|seed:<path>",
-         "dedupe": null,                       // or {"prior_url": "...", "note": "..."} from S3
-         "anchor_status": null,                 // ok|moved|dead - written by `reanchor` in /pr-review-post, not here
-         "anchor_note": null                    // reanchor's reason string - written alongside anchor_status
-       }
-     ],
-     "clusters": [
-       {"id": "C3", "title": "...", "shared_fix": "...", "item_ids": [1, 12, 27]}
-     ]
-   }
-   ```
+```bash
+set -e; A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
+python3 $A excerpt $L --worktree "$WT"
+python3 $A changed-lines $L --diff "$SCRATCH/pr-review/pr<n>/head.diff" --worktree "$WT"
+```
 
-2. **Derive `on_changed_line` from the diff, overwriting what S5 recorded.** Refuters get this
-   wrong in both directions, and one contradicting its own stated evidence is not unusual - it is a
-   mechanical property of the diff, not a judgement, so the diff wins. A wrong `false` silently
-   demotes a good finding to the body; a wrong `true` makes GitHub reject the **entire** review.
+`excerpt` copies each anchor verbatim from `$WT`, so an excerpt is never retyped; `changed-lines`
+overwrites the refuters' `on_changed_line` from the posting diff, since a wrong `true` fails the
+**entire** review POST. Relay every `moved` and `flipped` line it prints: a flip means a refuter
+asserted something the diff contradicts, which is worth weighing against its other answers.
 
-   Judge against the **posting base** (GitHub's merge-base), not the review base - `gh pr diff <n>`
-   is exactly that diff. Parse the `+` hunk ranges per file and set the field for every item:
+Each tool call runs in a fresh shell, so start every later block with the same
+`A=...; L=...` line. Then the two judgment steps, each written back with `edit` (never
+`python -c`, never a JSON edit). `edit` replaces the whole field with the file's contents, so
+write the complete new text to a file under `$SCRATCH/pr-review/pr<n>/edits/` with the Write
+tool, never under `/tmp`:
+
+1. For each DOWNGRADED item, fold what its `verdict_reason` means for the author into
+   `Why it matters:` (`python3 $A edit $L <id> --field detail --text-file <f>`), and record
+   `python3 $A edit $L <id> --field fold_note --text-file <f>` with `folded` or `bookkeeping`. Neither
+   `severity_in -> severity` nor the refuter's reason publishes, so when the reason changes what
+   the author needs to know - the path is gated, unreachable, pre-existing, or intentional - fold it
+   in, in the author's terms, so the severity it posts at reads as sensible rather than arbitrary.
+   When it is only bookkeeping ("less severe than first rated"), leave `detail` alone and record
+   `bookkeeping`.
+2. The quantifier sweep:
+   `grep -inP '(?<![\w-])(every|all|any|always|never|only|whole|entire|cannot|no [a-z]+)(?![\w-])'`
+   over the claims - case-insensitive, since a claim often opens with `Every` or `No`. For each
+   hit, cite the evidence or reword via `python3 $A edit $L <id> --field claim --text-file <f>`.
+   Write each hit and its disposition into `$SCRATCH/pr-review/pr<n>/quantifiers.md`. To see
+   each hit with its id:
 
    ```bash
-   GH_REPO="$REPO" gh pr diff <n> > "$SCRATCH/pr-review/pr<n>/head.diff"
+   A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
+   grep -P '^\s*"(id|claim)": ' $L \
+     | grep -B1 -iP '^\s*"claim": .*(?<![\w-])(every|all|any|always|never|only|whole|entire|cannot|no [a-z]+)(?![\w-])'
    ```
 
-   Report any item whose recorded value you had to flip, and treat it as a signal about that
-   refuter's other answers. (`/pr-review-post`'s `reanchor` does this too, but the ledger should
-   not be wrong in the meantime.)
+   These are the stable S2 ids; `renumber` below prints the old -> new map (and records each
+   item's `old_id`), so give both in `quantifiers.md`. The net
+   is one-directional: overstatement needs a quantifier, understatement usually does not, so a
+   clean sweep says nothing about understated claims - that half rests on `claim_verdict`.
 
-3. **Sweep the claims for unsupported quantifiers**, as the deterministic backstop to S5's claim
-   verdict - this repo's `grep-safety-net.md` rule applied to the review's own output:
+Then:
 
-   ```bash
-   grep -nE '\b(every|all|any|always|never|only|whole|entire|cannot|no [a-z]+)\b' \
-     <(python3 -c "import json,sys;[print(i['id'],i['claim']) for i in json.load(open(sys.argv[1]))['items']]" <ledger>)
-   ```
+```bash
+set -e; A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
+python3 $A renumber $L
+python3 $A validate $L --worktree "$WT"
+python3 $A reanchor $L --worktree "$WT" --diff "$SCRATCH/pr-review/pr<n>/head.diff" --dry-run
+~/.claude/pr-review/pr-review-wt.sh primary-status "$WT" | diff "$SCRATCH/primary.before" -
+```
 
-   For each hit, either cite the evidence that supports the quantifier or delete it. Most will be
-   fine; the point is that each one gets looked at rather than skimmed.
+On a `validate` error: an excerpt mismatch means re-run `excerpt`; a wording error (process
+vocabulary, a hedged `Fix:`, a claim over one sentence) means `edit` that text; then re-run from
+`renumber`. Never delete a finding or hand-edit the ledger to get past it. `reanchor --dry-run`
+writes nothing; it shows how each anchor will resolve at post time.
 
-   **This net is one-directional, and that is not a gap to paper over.** Overstatement needs a
-   quantifier, so it is greppable. Understatement usually has none - "in the Simple-mode Comments
-   panel" is a narrowing noun phrase, and no regex reliably finds those, because the words that
-   narrow a claim are the same words that legitimately make it specific. So a clean sweep says
-   nothing at all about understated claims; that half rests entirely on `claim_verdict`, and this
-   step must not be read as covering it.
+If the primary-status diff is non-empty, stop and show the user the changed paths; do not restore
+anything without approval. Otherwise:
 
-4. Validate it, and fix any error it reports before continuing - do not proceed on a failing
-   validate:
-   `python3 ~/.claude/pr-review/pr-review-anchor.py validate <ledger>`
-   Failures print `error: ...` lines to stderr and exit 1 (letter-suffixed ids, non-contiguous or
-   duplicate ids, wrong severity ordering, a cluster/item referencing an unknown id, a missing or
-   unknown `severity_in`, an empty `verdict_reason`, a `verdict` outside the four terminal values -
-   a leftover `PENDING` included - or a non-dict ledger root are all rejected this way; a wrong
-   cluster key name like `items` instead of `item_ids` is NOT, since it just reads as an empty
-   cluster). Fix the ledger and re-run
-   validate; never report a ledger as ready while validate is failing.
-5. Write `report.md` alongside it.
-6. Print, in this order. **This goes to a terminal, not to GitHub. Emit plain text and
-   GitHub-flavoured markdown only - never raw HTML.** No `<details>`, `<summary>`, `<br>`, or entities:
-   the terminal prints those literally as tags instead of rendering them. Use a plain heading and
-   an indented or bulleted list wherever you want a section to read as secondary.
+```bash
+A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
+python3 $A report $L
+```
 
-   - the triage table: id, severity, cluster, `file:line`, one-line claim. Where the refuter
-     changed the severity, show it as `<severity_in> -> <severity>`, never just the survivor - a
-     table that prints only the revised value hides that a `high` was downgraded on its way out.
-     This arrow is **terminal-only**: it is how you judge whether the pressure-test is calibrated.
-     `payload` publishes the final severity alone, so never carry the arrow into `claim`, `detail`,
-     or the review body.
-   - a `Verdict summary` line: counts of CONFIRMED / DOWNGRADED / REFUTED / INCONCLUSIVE, and the
-     refutation rate as `REFUTED / total`. State it plainly; it is the number that tells you
-     whether the pressure-test is calibrated.
-   - a `Claim audit` line and section: counts of SOUND / REWRITTEN, then every REWRITTEN item -
-     id, the sentence as the generator wrote it, and the replacement. Report the severity revisions
-     as `N lowered / M raised` on the same line. Both numbers are calibration, and both are
-     one-sided by construction: a run that rewrites no claims, or that lowers several severities and
-     raises none, is a claim about the generator that deserves the same suspicion as a 0 %
-     refutation rate. It was 8 in 30 on the review that prompted this stage, and 4 lowered / 0
-     raised.
-   - a `Fix audit` line and section: counts of SOUND / REWRITTEN / UNVERIFIABLE, then every
-     REWRITTEN item - id, what was wrong with the generator's fix, and the replacement in one line -
-     and every UNVERIFIABLE item with what could not be established. The rate is the calibration
-     number for this stage, exactly as the refutation rate is for the verdicts: it was 5 in 20 on
-     the review that prompted the stage, and a run reporting 0 in 30 is a claim about the
-     generator that deserves the same suspicion as a 0% refutation rate. Say plainly that an
-     UNVERIFIABLE fix needs a human before it posts.
-   - a `Downgraded` section: every DOWNGRADED item - id, `<severity_in> -> <severity>`, claim, and
-     the refuter's reason. These post inline with `all` like any other anchorable finding; they are
-     not dropped and need no `--include-refuted`. Say for each whether you folded its reason into
-     the item's `Why it matters:` text or judged it bookkeeping and dropped it, since neither the
-     arrow nor the reason reaches the author.
-   - an `Unresolved` section: every INCONCLUSIVE item, with what the refuter could not check and
-     what would settle it. **Never omit this section when it is non-empty**, and say plainly that
-     these need a human judgement.
-   - a `Refuted (not posted unless you name them)` section: each id, its claim, and the refuter's
-     reason, so they can be overruled
-   - a `Previously reported` section: each id with a link to the existing comment
-   - the count of items not on a changed line (body-only, cannot be posted inline)
-   - which items, if any, ran their refuter on a cheaper model (S5)
-   - a `Pressure-test dispatch` line: how many refuter agents ran for how many items, and the
-     largest cluster any one of them owned. This is the stage's cost driver, and the cluster size
-     is where a shared context starts thinning - record it so the grouping stays checkable against
-     what it is buying.
-   - a `Files` section giving the absolute paths, so they can be opened directly:
-     ```
-     Ledger:   <SCRATCH>/pr-review/pr<n>/ledger.json
-     Report:   <SCRATCH>/pr-review/pr<n>/report.md
-     Worktree: $WT
-     ```
-   - a `To post` section giving ready-to-run commands, with the real counts substituted:
-
-     ```
-     /pr-review-post all          # N confirmed inline + M carried in the body; refuted excluded
-     /pr-review-post 1 3 7        # a chosen subset
-     /pr-review-post all --include-refuted 4   # also post refuted #4, per id
-     ```
-
-     Say explicitly what `all` covers: CONFIRMED findings post inline; DOWNGRADED and INCONCLUSIVE
-     findings are carried in the review body automatically; REFUTED items are excluded unless named
-     with `--include-refuted`; dead anchors are demoted to the body and never posted inline.
-   - the teardown one-liner, if abandoning the round:
-     `~/.claude/pr-review/pr-review-wt.sh remove $WT`
-
+Relay `report`'s output in full, then the quantifier dispositions, then the teardown one-liner in
+case the user abandons the round: `~/.claude/pr-review/pr-review-wt.sh remove $WT`.
 Then **stop**. Do not post anything.
