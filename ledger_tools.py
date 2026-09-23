@@ -132,8 +132,10 @@ PROCESS_PATTERNS = (
     r"\bNote for the\b",
     r"\bthis batch\b",
     r"\bitems?\s+#\d+",
-    r"(?<![\w{])#\d+\b(?!\}\})",
 )
+# A bare `#123` outside a `{{#n}}` token. In `claim`/`detail` it can only be
+# a stale finding number; in a refuter's reason it is usually a PR or issue.
+BARE_REF_PATTERN = r"(?<![\w{])#\d+\b(?!\}\})"
 _ABBREV = re.compile(r"\b(?:e\.g|i\.e|etc|vs|cf)\.", re.IGNORECASE)
 _ELLIPSIS_LINE = re.compile(r"^\s*(?://\s*|#\s*|/\*\s*)?(?:\.\.\.|…)(?:\s*\*/)?\s*$")
 
@@ -142,12 +144,13 @@ def strip_code_spans(text):
     return _CODE_SPAN.sub("``", text or "")
 
 
-def process_vocabulary_in(text):
-    """Review-process wording that must never reach a PR author. `{{#n}}` tokens
-    and code spans are exempt."""
+def process_vocabulary_in(text, bare_refs=True):
+    """Read-only. Review-process wording that must never reach a PR author.
+    `{{#n}}` tokens and code spans are exempt; `bare_refs=False` also exempts
+    a bare `#123`, for text that legitimately cites a PR or issue."""
     plain = strip_code_spans(text)
     found = []
-    for pat in PROCESS_PATTERNS:
+    for pat in PROCESS_PATTERNS + ((BARE_REF_PATTERN,) if bare_refs else ()):
         m = re.search(pat, plain, re.IGNORECASE)
         if m:
             found.append(m.group(0))
@@ -256,6 +259,8 @@ def mark_changed_lines(ledger, worktree, changed):
 
 
 TOKEN = re.compile(r"\{\{#(\d+)\}\}")
+# The fields that publish and may carry `{{#n}}` cross-references.
+TOKEN_FIELDS = ("claim", "detail", "verdict_reason")
 EDITABLE_FIELDS = ("claim", "detail", "fold_note", "verdict_reason", "fix_reason", "fix_verdict")
 # fix_verdict may only be set to this value: a fix that no longer holds at a
 # new head can be demoted to UNVERIFIABLE, but nothing short of a refuter may
@@ -279,7 +284,7 @@ def renumber(ledger):
 
     Re-sorts `items` by (severity, file, id) - the same order `validate`
     requires - and remaps every id to its new 1..N position, rewriting
-    `{{#n}}` cross-references in `claim`/`detail` and cluster `item_ids` to
+    `{{#n}}` cross-references in `TOKEN_FIELDS` and cluster `item_ids` to
     match. Each item's `old_id` records its id from before the *first* time
     it was renumbered, so re-running `renumber` after a further edit still
     traces back to the original id. All-or-nothing: every `{{#n}}` token is
@@ -288,7 +293,7 @@ def renumber(ledger):
     items = ledger.get("items", [])
     ids = {it["id"] for it in items}
     bad = [f"item {it['id']} references {{{{#{m}}}}}, which is not in this ledger"
-           for it in items for f in ("claim", "detail")
+           for it in items for f in TOKEN_FIELDS
            for m in TOKEN.findall(it.get(f) or "") if int(m) not in ids]
     if bad:
         raise LedgerError("\n".join(bad))
@@ -299,7 +304,7 @@ def renumber(ledger):
     for it in order:
         it.setdefault("old_id", it["id"])
         it["id"] = mapping[it["id"]]
-        for f in ("claim", "detail"):
+        for f in TOKEN_FIELDS:
             if it.get(f):
                 it[f] = sub(it[f])
     ledger["items"] = order

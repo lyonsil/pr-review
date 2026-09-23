@@ -100,6 +100,11 @@ VERDICT_REASON_LABEL = {
 }
 
 
+# The verdicts whose verdict_reason publishes by default. REFUTED's footer
+# only posts when --include-refuted names it, and DOWNGRADED has none.
+FOOTER_PUBLISHES = ("CONFIRMED", "INCONCLUSIVE")
+
+
 def severity_text(it):
     """The severity a finding is posted at, and only that.
 
@@ -221,6 +226,13 @@ def validate(ledger, worktree=None):
                 for phrase in lt.process_vocabulary_in(it.get(field)):
                     errs.append(f"item {iid!r} {field} contains review-process wording "
                                 f"{phrase!r} - the author never saw this pipeline")
+            # The reason posts as the comment's footer on these verdicts (see
+            # verdict_reason_block). A bare `#123` is allowed there: reasons
+            # cite PRs and issues that way.
+            if it.get("verdict") in FOOTER_PUBLISHES:
+                for phrase in lt.process_vocabulary_in(it.get("verdict_reason"), bare_refs=False):
+                    errs.append(f"item {iid!r} verdict_reason contains review-process wording "
+                                f"{phrase!r} - it posts under the finding; reword it with `edit`")
         if it.get("verdict") == "DOWNGRADED":
             if lt.SEV_RANK.get(it.get("severity"), -1) <= lt.SEV_RANK.get(it.get("severity_in"), 99):
                 errs.append(f"item {iid!r} is DOWNGRADED but severity {it.get('severity')!r} is "
@@ -267,6 +279,50 @@ def validate(ledger, worktree=None):
     return errs
 
 
+def draft_errors(ledger):
+    """Read-only. The checks a draft ledger (S4, before any brief) must pass:
+    what `brief` and `ingest` rely on and nothing a refuter or later step
+    fills in. Every item's `cluster` and every cluster's `item_ids` must
+    agree both ways, because refuter units are built from both - an item a
+    cluster does not list is never dispatched, and an unclustered item a
+    cluster lists is dispatched twice."""
+    if ledger.get("schema") != lt.SCHEMA:
+        return [f"ledger schema {ledger.get('schema')!r} is not supported; {lt.SCHEMA} is required"]
+    errs = [f"draft is missing '{f}'" for f in ("head_sha", "merge_base", "worktree")
+            if not ledger.get(f)]
+    items, ids = ledger.get("items", []), set()
+    for n, it in enumerate(items):
+        iid = it.get("id")
+        if not isinstance(iid, int) or isinstance(iid, bool):
+            errs.append(f"item[{n}] id {iid!r} is not an integer")
+        elif iid in ids:
+            errs.append(f"duplicate item id {iid}")
+        ids.add(iid)
+        if it.get("severity_in") not in SEVERITIES:
+            errs.append(f"item {iid!r} severity_in {it.get('severity_in')!r} not one of {SEVERITIES}")
+    by_id = {it.get("id"): it for it in items}
+    listed = {}
+    for c in ledger.get("clusters", []):
+        cid = c.get("id")
+        if not isinstance(c.get("item_ids"), list):
+            errs.append(f"{cid} has no item_ids list")
+            continue
+        listed[cid] = set(c["item_ids"])
+        for ref in c["item_ids"]:
+            if ref not in by_id:
+                errs.append(f"{cid} lists item {ref}, which is not in items")
+            elif by_id[ref].get("cluster") != cid:
+                errs.append(f"{cid} lists item {ref}, whose cluster is {by_id[ref].get('cluster')!r}")
+    known = {c.get("id") for c in ledger.get("clusters", [])}
+    for it in items:
+        cl = it.get("cluster")
+        if cl and cl not in known:
+            errs.append(f"item {it.get('id')} has cluster {cl!r}, which is not in clusters")
+        elif cl in listed and it.get("id") not in listed[cl]:
+            errs.append(f"item {it.get('id')} has cluster {cl!r}, but {cl}'s item_ids do not list it")
+    return errs
+
+
 def load(path):
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
@@ -284,12 +340,17 @@ def cmd_validate(args):
     except json.JSONDecodeError as exc:
         print(f"error: ledger file {args.ledger} is not valid JSON: {exc}", file=sys.stderr)
         return 1
-    errs = validate(led, getattr(args, "worktree", None))
+    if not isinstance(led, dict):
+        print(f"error: ledger root must be a JSON object, got {type(led).__name__}", file=sys.stderr)
+        return 1
+    draft = getattr(args, "draft", False)
+    errs = draft_errors(led) if draft else validate(led, getattr(args, "worktree", None))
     if errs:
         for e in errs:
             print(f"error: {e}", file=sys.stderr)
         return 1
-    print(f"ledger ok: {len(led.get('items', []))} items, {len(led.get('clusters', []))} clusters")
+    print(f"{'draft' if draft else 'ledger'} ok: {len(led.get('items', []))} items, "
+          f"{len(led.get('clusters', []))} clusters")
     return 0
 
 
@@ -713,7 +774,7 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
                 text += "\n\n" + detail
             # Carries the pressure-test's reasoning when it is about the code.
             # Empty for a downgrade - see verdict_reason_block.
-            block = verdict_reason_block(it)
+            block = tok(it, verdict_reason_block(it))
             if block:
                 text += "\n\n" + block
             cl = it.get("cluster")
@@ -754,7 +815,7 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
                 lines.append(""); lines.append(detail)
             # These are here only because they could not anchor, so they carry
             # the same verdict reasoning an inline comment would have shown.
-            block = verdict_reason_block(it)
+            block = tok(it, verdict_reason_block(it))
             if block:
                 lines.append(""); lines.append(block)
             lines.append(""); lines.append(f"_Not attached to a line: {note}_"); lines.append("")
@@ -774,7 +835,7 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
             detail = tok(it, (it.get("detail") or "").strip())
             if detail:
                 lines.append(""); lines.append(detail)
-            block = verdict_reason_block(it)
+            block = tok(it, verdict_reason_block(it))
             if block:
                 lines.append(""); lines.append(block)
             lines.append("")
@@ -1057,7 +1118,11 @@ def main():
     p = argparse.ArgumentParser(prog="pr-review-anchor.py")
     sub = p.add_subparsers(dest="cmd", required=True)
     v = sub.add_parser("validate"); v.add_argument("ledger")
-    v.add_argument("--worktree"); v.set_defaults(fn=cmd_validate)
+    v.add_argument("--worktree")
+    v.add_argument("--draft", action="store_true",
+                   help="Check a draft ledger (S4) instead: ids, severity_in, root fields, and "
+                        "cluster/item_ids agreement")
+    v.set_defaults(fn=cmd_validate)
     r = sub.add_parser("reanchor")
     r.add_argument("ledger"); r.add_argument("--worktree", required=True)
     r.add_argument("--diff", required=True)

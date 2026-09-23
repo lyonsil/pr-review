@@ -1783,6 +1783,27 @@ class TestPayloadV2(unittest.TestCase):
                                  ["all"], "intro")
         self.assertIn("#1 references #2, which is not in this review", err.getvalue())
 
+    def test_tokens_render_in_the_verdict_reason_footer_everywhere_it_posts(self):
+        l = self.led(item(1, verdict_reason="same guard as {{#2}}"),
+                     item(2, sev="low", line=20, verdict="INCONCLUSIVE",
+                          verdict_reason="needs {{#1}}", anchor_status="dead"),
+                     item(3, sev="low", line=30, verdict="INCONCLUSIVE",
+                          verdict_reason="as {{#1}}"))
+        p = anchor.build_payload(l, ["all"], "intro", body_only_verdicts=["INCONCLUSIVE"])
+        text = " ".join(c["body"] for c in p["comments"]) + p["body"]
+        self.assertIn("_How this was checked: same guard as #2_", text)
+        self.assertIn("_What could not be checked: needs #1_", text)
+        self.assertIn("_What could not be checked: as #1_", text)
+        self.assertNotIn("{{#", text)
+
+    def test_a_footer_token_pointing_outside_the_review_is_warned(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            anchor.build_payload(self.led(item(1, verdict_reason="same as {{#2}}"),
+                                          item(2, sev="low", line=20, verdict="REFUTED")),
+                                 ["all"], "intro")
+        self.assertIn("#1 references #2, which is not in this review", err.getvalue())
+
     def test_count_placeholder_counts_inline_and_body_findings(self):
         p = anchor.build_payload(self.led(item(1), item(2, sev="low", on_changed_line=False)),
                                  ["all"], "{count} findings.")
@@ -1841,3 +1862,109 @@ class TestPayloadV2(unittest.TestCase):
         with contextlib.redirect_stderr(err):
             anchor.build_payload(led, ["all"], "intro", body_only_verdicts=["DOWNGRADED"])
         self.assertNotIn("which is not in this review", err.getvalue())
+
+
+class TestVerdictReasonLint(unittest.TestCase):
+    """verdict_reason publishes as the footer on CONFIRMED and INCONCLUSIVE,
+    so it is held to the process-vocabulary lint there - except a bare
+    `#123`, which real reasons use for a PR or issue reference."""
+
+    def led(self, **kw):
+        return {"schema": 2, "items": [item(1, **kw)], "clusters": []}
+
+    def test_process_wording_in_a_published_footer_is_rejected(self):
+        for verdict in ("CONFIRMED", "INCONCLUSIVE"):
+            errs = anchor.validate(self.led(verdict=verdict, verdict_reason="refuter stalled"))
+            self.assertTrue(any("verdict_reason contains review-process wording 'refuter'" in e
+                                for e in errs), (verdict, errs))
+
+    def test_a_bare_pr_reference_in_a_footer_is_allowed(self):
+        self.assertEqual(anchor.validate(self.led(verdict_reason="introduced in #2798 at a.ts:3")),
+                         [])
+
+    def test_an_item_reference_in_a_footer_is_still_rejected(self):
+        errs = anchor.validate(self.led(verdict_reason="same as item #4"))
+        self.assertTrue(any("item #4" in e for e in errs), errs)
+
+    def test_footers_that_never_publish_are_not_linted(self):
+        for verdict, extra in (("DOWNGRADED", {"severity": "low", "fold_note": "bookkeeping"}),
+                               ("REFUTED", {})):
+            errs = anchor.validate(self.led(verdict=verdict, verdict_reason="refuter says so",
+                                            **extra))
+            self.assertFalse(any("verdict_reason" in e for e in errs), (verdict, errs))
+
+
+def draft(**root):
+    d = {"schema": 2, "head_sha": "h" * 40, "merge_base": "m" * 40, "worktree": "/wt",
+         "items": [item(1, cluster="C1"), item(2, cluster="C1"), item(3, sev="low")],
+         "clusters": [{"id": "C1", "title": "t", "shared_fix": "s", "item_ids": [1, 2]}]}
+    for it in d["items"]:
+        for k in ("verdict", "verdict_reason", "claim_verdict", "claim_reason",
+                  "fix_verdict", "fix_reason", "anchor_excerpt"):
+            it.pop(k)
+    d.update(root); return d
+
+
+class TestValidateDraft(unittest.TestCase):
+    def assertDraftError(self, led, pattern):
+        errs = anchor.draft_errors(led)
+        self.assertTrue(any(re.search(pattern, e) for e in errs), errs)
+
+    def test_a_consistent_draft_has_no_errors(self):
+        self.assertEqual(anchor.draft_errors(draft()), [])
+
+    def test_an_item_whose_cluster_does_not_list_it_is_rejected(self):
+        d = draft(); d["clusters"][0]["item_ids"] = [1]
+        self.assertDraftError(d, r"item 2 has cluster 'C1', but C1's item_ids do not list it")
+
+    def test_a_cluster_listing_an_item_not_in_it_is_rejected(self):
+        d = draft(); d["clusters"][0]["item_ids"] = [1, 2, 3]
+        self.assertDraftError(d, r"C1 lists item 3, whose cluster is None")
+
+    def test_an_unknown_cluster_is_rejected(self):
+        d = draft(); d["items"][2]["cluster"] = "C9"
+        self.assertDraftError(d, r"item 3 has cluster 'C9', which is not in clusters")
+
+    def test_a_cluster_listing_an_unknown_item_is_rejected(self):
+        d = draft(); d["clusters"][0]["item_ids"] = [1, 2, 7]
+        self.assertDraftError(d, r"C1 lists item 7, which is not in items")
+
+    def test_a_cluster_without_item_ids_is_rejected(self):
+        d = draft(); d["clusters"][0]["items"] = d["clusters"][0].pop("item_ids")
+        self.assertDraftError(d, r"C1 has no item_ids list")
+
+    def test_ids_must_be_unique_integers(self):
+        d = draft(); d["items"][2]["id"] = "3a"
+        self.assertDraftError(d, r"item\[2\] id '3a' is not an integer")
+        d = draft(); d["items"][2]["id"] = 2
+        self.assertDraftError(d, r"duplicate item id 2")
+
+    def test_severity_in_must_be_a_severity(self):
+        d = draft(); d["items"][0]["severity_in"] = "medium-high"
+        self.assertDraftError(d, r"item 1 severity_in 'medium-high' not one of")
+
+    def test_root_fields_the_briefs_need_are_required(self):
+        for field in ("head_sha", "merge_base", "worktree"):
+            d = draft(); del d[field]
+            self.assertDraftError(d, f"draft is missing '{field}'")
+
+    def test_schema_must_be_2(self):
+        self.assertDraftError(draft(schema=1), r"schema")
+
+    def test_cli_draft_flag_runs_the_draft_check_not_the_full_one(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(draft(), fh); path = fh.name
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_validate(SimpleNamespace(ledger=path, worktree=None, draft=True))
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertIn("draft ok: 3 items, 1 clusters", out.getvalue())
+        d = draft(); d["clusters"][0]["item_ids"] = [1]
+        with open(path, "w") as fh:
+            json.dump(d, fh)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_validate(SimpleNamespace(ledger=path, worktree=None, draft=True))
+        os.remove(path)
+        self.assertEqual(code, 1)
+        self.assertTrue(err.getvalue().startswith("error: item 2 has cluster"), err.getvalue())

@@ -838,6 +838,16 @@ class TestRenumber(unittest.TestCase):
         self.assertEqual(l["clusters"][0]["item_ids"], [1])
         self.assertEqual(anchor.validate(l), [])
 
+    def test_tokens_in_verdict_reason_are_renumbered_and_checked(self):
+        l = led(item(1, sev="low", f="b.ts", verdict_reason="same guard as {{#2}}"),
+                item(2, sev="high", f="a.ts"))
+        lt.renumber(l)
+        self.assertEqual({it["id"]: it["verdict_reason"] for it in l["items"]}[2],
+                         "same guard as {{#1}}")
+        bad = led(item(1, verdict_reason="see {{#9}}"))
+        with self.assertRaisesRegex(lt.LedgerError, r"item 1 references \{\{#9\}\}"):
+            lt.renumber(bad)
+
     def test_running_twice_keeps_the_first_old_id(self):
         l = led(item(1, sev="low"), item(2, sev="high"))
         lt.renumber(l); lt.renumber(l)
