@@ -63,7 +63,8 @@ This sentence leads every inline comment and fills the triage table, so it has t
 - `**Fix:**` (always required, always last) - the concrete change at this site, imperative,
   naming the file and symbol to change.
 
-Cap `detail` at about 120 words. If it needs more, you probably have two findings - go back to S2.
+Cap `detail` at about 120 words. A finding that needs more usually bundles two defects. If one you
+own does, answer for the defect its `claim` names, and say in `REASON` what the other one is.
 
 ### Five rules that keep the fix actionable
 
@@ -220,26 +221,33 @@ problem, not whether it exists.
 ## Your reply
 
 Write your reply to `{{VERDICT_PATH}}` - create the directory if needed. The file must start with
-exactly these three lines:
+exactly these four lines:
 
-    BRIEF: {{BRIEF_HASH}}
-    KEY: {{KEY}}
-    OWNS: {{OWNS}}
+```text
+BRIEF: {{BRIEF_HASH}}
+RUN: {{RUN_ID}}
+KEY: {{KEY}}
+OWNS: {{OWNS}}
+```
 
 followed by one block per finding you own, in the order given, blank line between blocks, nothing
 else in the file:
 
-    ITEM: <id>
-    VERDICT: CONFIRMED|DOWNGRADED|REFUTED|INCONCLUSIVE
-    SEVERITY: blocker|high|medium|low
-    ON_CHANGED_LINE: true|false
-    REASON: <3-6 sentences with file:line evidence>
-    CLAIM_VERDICT: SOUND|REWRITTEN
-    CLAIM_REASON: <what you matched the claim against, with file:line evidence>
-    CLAIM_REWRITE: <replacement claim sentence - only when CLAIM_VERDICT is REWRITTEN>
-    FIX_VERDICT: SOUND|REWRITTEN|UNVERIFIABLE
-    FIX_REASON: <what you checked about the fix, with file:line evidence>
-    FIX_REWRITE: <replacement text for after "**Fix:**" - only when FIX_VERDICT is REWRITTEN>
+```text
+ITEM: <id>
+VERDICT: CONFIRMED|DOWNGRADED|REFUTED|INCONCLUSIVE
+SEVERITY: blocker|high|medium|low
+ON_CHANGED_LINE: true|false
+REASON: <3-6 sentences with file:line evidence>
+CLAIM_VERDICT: SOUND|REWRITTEN
+CLAIM_REASON: <what you matched the claim against, with file:line evidence>
+CLAIM_REWRITE: <replacement claim sentence - only when CLAIM_VERDICT is REWRITTEN>
+FIX_VERDICT: SOUND|REWRITTEN|UNVERIFIABLE
+FIX_REASON: <what you checked about the fix, with file:line evidence>
+FIX_REWRITE: <replacement text for after "**Fix:**" - only when FIX_VERDICT is REWRITTEN>
+```
+
+Write the lines themselves, not the ```` ``` ```` fence lines around them.
 
 Rules the file is checked against:
 - A value may run over several lines; it ends at the next line that starts with a field label.

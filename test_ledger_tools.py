@@ -241,7 +241,9 @@ class TestBrief(unittest.TestCase):
         self.assertIn("/s/wt-pr13-rc1", text)
         self.assertIn("check the second site", text)
         self.assertIn('"shared_fix": "sf"', text)
-        self.assertEqual(meta, {"key": "C1", "owns": [1, 2], "hash": lt.template_hash()})
+        self.assertEqual(meta, {"key": "C1", "owns": [1, 2], "hash": lt.template_hash(),
+                                "run": lt.run_id(brief_ledger())})
+        self.assertIn(f"RUN: {lt.run_id(brief_ledger())}", text)
         self.assertIn(f"BRIEF: {lt.template_hash()}", text)
 
     def test_an_unknown_key_cannot_batch_unrelated_items(self):
@@ -281,6 +283,34 @@ class TestBrief(unittest.TestCase):
         text, _ = lt.render_brief(l, "C1", CTX, "/s")
         self.assertNotIn("SECRET", text)
 
+    def test_the_reply_header_the_brief_shows_is_accepted_by_ingest(self):
+        # Template, parser and ingest must agree on the header: copy the
+        # fenced header exactly as the rendered brief shows it and ingest it.
+        d = tmpdir()
+        l = brief_ledger()
+        text, meta = lt.render_brief(l, "C1", CTX, d)
+        head = text.split("```text\n", 1)[1].split("\n```", 1)[0]
+        body = GOOD.split("OWNS: 1, 2\n", 1)[1]
+        write(os.path.join(d, "briefs", "C1.json"), json.dumps(meta))
+        write(os.path.join(d, "briefs", "i3.json"), json.dumps(
+            lt.render_brief(l, "i3", CTX, d)[1]))
+        write(os.path.join(d, "verdicts", "C1.txt"), head + "\n" + body)
+        l["items"][0]["detail"] = "**Fix:** old"
+        lt.ingest(l, os.path.join(d, "briefs"), os.path.join(d, "verdicts"), lt.template_hash(),
+                  inconclusive=[3], reason="Not verified: the automated check did not complete.")
+        self.assertEqual(l["items"][0]["verdict"], "CONFIRMED")
+
+    def test_placeholder_shaped_text_in_values_is_left_alone(self):
+        l = brief_ledger()
+        l["items"][0]["claim"] = "Renders {{TITLE}} literally, and {{KEY}} too."
+        text, _ = lt.render_brief(l, "C1", CTX, "/s")
+        self.assertIn("Renders {{TITLE}} literally, and {{KEY}} too.", text)
+
+    def test_claude_md_paths_must_be_a_list_of_strings(self):
+        for bad in ("/wt/CLAUDE.md", [1], None):
+            with self.assertRaisesRegex(lt.LedgerError, "claude_md_paths must be a list"):
+                lt.render_brief(brief_ledger(), "C1", dict(CTX, claude_md_paths=bad), "/s")
+
     def test_a_leftover_placeholder_is_rejected(self):
         # Every placeholder the real template uses has a matching key in
         # render_brief's values dict, so this path is never exercised by the
@@ -294,6 +324,7 @@ class TestBrief(unittest.TestCase):
 
 
 GOOD = """BRIEF: abc
+RUN: @RUN@
 KEY: C1
 OWNS: 1, 2
 
@@ -320,7 +351,7 @@ REASON: nothing produces it
 class TestParseVerdictFile(unittest.TestCase):
     def test_parses_header_blocks_and_multiline_values(self):
         header, blocks = lt.parse_verdict_file(GOOD)
-        self.assertEqual(header, {"BRIEF": "abc", "KEY": "C1", "OWNS": "1, 2"})
+        self.assertEqual(header, {"BRIEF": "abc", "RUN": "@RUN@", "KEY": "C1", "OWNS": "1, 2"})
         self.assertEqual([b["ITEM"] for b in blocks], ["1", "2"])
         self.assertEqual(blocks[0]["REASON"],
                          "line one\nline two mentions VERDICT: inline, which is fine")
@@ -334,25 +365,59 @@ class TestParseVerdictFile(unittest.TestCase):
         with self.assertRaisesRegex(lt.LedgerError, "given twice"):
             lt.parse_verdict_file(GOOD.replace("SEVERITY: low", "SEVERITY: low\nSEVERITY: high"))
 
+    def test_indented_labels_parse_like_unindented_ones(self):
+        indented = "\n".join("    " + l if l else l for l in GOOD.splitlines())
+        self.assertEqual(lt.parse_verdict_file(indented), lt.parse_verdict_file(GOOD))
+
+    def test_labels_indented_unevenly_still_parse(self):
+        # Header flush left, blocks indented: no common indent to remove, so
+        # each label must be recognized after its own leading whitespace.
+        head, rest = GOOD.split("\n\n", 1)
+        mixed = head + "\n\n" + "\n".join("  " + l if l.startswith(("ITEM", "VERDICT")) else l
+                                            for l in rest.splitlines())
+        self.assertEqual(lt.parse_verdict_file(mixed), lt.parse_verdict_file(GOOD))
+
+    def test_indented_continuation_lines_keep_their_indentation(self):
+        _, blocks = lt.parse_verdict_file(GOOD.replace("line two mentions", "    line two mentions"))
+        self.assertEqual(blocks[0]["REASON"],
+                         "line one\n    line two mentions VERDICT: inline, which is fine")
+
+    def test_a_file_wrapped_in_a_code_fence_parses_without_the_fence(self):
+        self.assertEqual(lt.parse_verdict_file("```\n" + GOOD + "```\n"),
+                         lt.parse_verdict_file(GOOD))
+        self.assertEqual(lt.parse_verdict_file("```text\n" + GOOD + "```"),
+                         lt.parse_verdict_file(GOOD))
+
+    def test_a_fence_inside_a_value_is_kept(self):
+        text = GOOD.replace("REASON: nothing produces it",
+                            "REASON: nothing produces it\n```\ncode\n```")
+        _, blocks = lt.parse_verdict_file(text)
+        self.assertEqual(blocks[1]["REASON"], "nothing produces it\n```\ncode\n```")
+
     def test_a_header_after_a_block_is_rejected(self):
         with self.assertRaisesRegex(lt.LedgerError, "header line after"):
             lt.parse_verdict_file(GOOD + "KEY: C2\n")
 
 
 def ingest_env(verdict_text, owns=(1, 2), key="C1"):
+    """A draft ledger plus one brief meta and (unless `verdict_text` is None)
+    its verdict file. `@RUN@` in `verdict_text` becomes this draft's run id,
+    which the meta carries too, as `brief` would have written it."""
     d = tmpdir()
-    write(os.path.join(d, "briefs", f"{key}.json"),
-          json.dumps({"key": key, "owns": list(owns), "hash": "abc"}))
-    if verdict_text is not None:
-        write(os.path.join(d, "verdicts", f"{key}.txt"), verdict_text)
     l = led(item(1, cluster="C1", detail="**What happens:** x\n\n**Fix:** old fix",
                  refuter_note="hint"),
             item(2, cluster="C1", sev="low"),
-            clusters=[{"id": "C1", "title": "t", "shared_fix": "s", "item_ids": [1, 2]}])
+            clusters=[{"id": "C1", "title": "t", "shared_fix": "s", "item_ids": [1, 2]}],
+            head_sha="h" * 40)
     for it in l["items"]:
         for k in ("verdict", "verdict_reason", "claim_verdict", "claim_reason",
                   "fix_verdict", "fix_reason"):
             it.pop(k, None)
+    run = lt.run_id(l)
+    write(os.path.join(d, "briefs", f"{key}.json"),
+          json.dumps({"key": key, "owns": list(owns), "hash": "abc", "run": run}))
+    if verdict_text is not None:
+        write(os.path.join(d, "verdicts", f"{key}.txt"), verdict_text.replace("@RUN@", run))
     return d, l
 
 
@@ -471,6 +536,106 @@ class TestIngest(unittest.TestCase):
             lt.ingest(l, os.path.join(d, "briefs"), os.path.join(d, "verdicts"), "abc")
 
 
+class TestIngestInconclusiveMalformed(unittest.TestCase):
+    """--inconclusive is the sanctioned way to close a refuter that failed
+    twice, so a verdict file that is present but unusable must not block it."""
+
+    def ingest(self, text, inconclusive, reason="Not verified: the automated check did not complete."):
+        d, l = ingest_env(text)
+        lt.ingest(l, os.path.join(d, "briefs"), os.path.join(d, "verdicts"), "abc",
+                  inconclusive=inconclusive, reason=reason)
+        return {it["id"]: it for it in l["items"]}
+
+    def test_an_unparseable_file_closes_when_every_owned_id_is_inconclusive(self):
+        out = self.ingest("The verdict is above.\n", [1, 2])
+        self.assertEqual((out[1]["verdict"], out[2]["verdict"]), ("INCONCLUSIVE", "INCONCLUSIVE"))
+
+    def test_a_file_missing_claim_and_fix_lines_closes_when_every_owned_id_is_inconclusive(self):
+        text = "\n".join(l for l in GOOD.splitlines() if not l.startswith(("CLAIM_", "FIX_")))
+        out = self.ingest(text, [1, 2])
+        self.assertTrue(out[1]["unanswered"])
+        self.assertEqual(out[2]["verdict"], "INCONCLUSIVE")
+
+    def test_a_block_error_for_an_inconclusive_id_is_dropped_and_the_rest_is_ingested(self):
+        text = "\n".join(l for l in GOOD.splitlines() if not l.startswith(("CLAIM_", "FIX_")))
+        out = self.ingest(text, [1])
+        self.assertEqual(out[1]["verdict"], "INCONCLUSIVE")
+        self.assertTrue(out[1]["unanswered"])
+        self.assertEqual(out[2]["verdict"], "REFUTED")
+
+    def test_a_block_error_for_an_id_not_named_still_fails(self):
+        text = GOOD.replace("SEVERITY: low", "SEVERITY: huge")
+        with self.assertRaisesRegex(lt.LedgerError, "item 2: SEVERITY"):
+            self.ingest(text, [1])
+
+
+def two_unit_env(text_c1, text_i2):
+    """Item 2 sits in C1's item_ids but carries no cluster, so it is also its
+    own unit `i2` - two refuters are dispatched for it."""
+    d = tmpdir()
+    l = led(item(1, cluster="C1", detail="**Fix:** f"), item(2, sev="low", detail="**Fix:** g"),
+            clusters=[{"id": "C1", "title": "t", "shared_fix": "s", "item_ids": [1, 2]}])
+    run = lt.run_id(l)
+    for key, owns, text in (("C1", [1, 2], text_c1), ("i2", [2], text_i2)):
+        write(os.path.join(d, "briefs", f"{key}.json"),
+              json.dumps({"key": key, "owns": owns, "hash": "abc", "run": run}))
+        write(os.path.join(d, "verdicts", f"{key}.txt"), text.replace("@RUN@", run))
+    return d, l
+
+
+class TestIngestRunChecks(unittest.TestCase):
+    def assertFails(self, d, l, pattern):
+        before = json.dumps(l, sort_keys=True)
+        with self.assertRaisesRegex(lt.LedgerError, pattern):
+            lt.ingest(l, os.path.join(d, "briefs"), os.path.join(d, "verdicts"), "abc")
+        self.assertEqual(json.dumps(l, sort_keys=True), before)
+
+    def test_an_id_answered_in_two_files_fails(self):
+        i2 = GOOD.split("ITEM: 2")[1]
+        text_i2 = "BRIEF: abc\nRUN: @RUN@\nKEY: i2\nOWNS: 2\n\nITEM: 2" + i2
+        d, l = two_unit_env(GOOD, text_i2)
+        self.assertFails(d, l, r"item 2 answered in both C1 and i2")
+
+    def test_a_meta_whose_owns_differs_from_the_ledger_unit_fails(self):
+        d, l = ingest_env(GOOD.split("ITEM: 2")[0].replace("OWNS: 1, 2", "OWNS: 1"), owns=(1,))
+        self.assertFails(d, l, r"C1: brief owns \[1\] but this ledger's C1 is \[1, 2\]")
+
+    def test_a_meta_for_a_key_this_ledger_does_not_have_fails(self):
+        d, l = ingest_env(GOOD)
+        write(os.path.join(d, "briefs", "C9.json"),
+              json.dumps({"key": "C9", "owns": [1], "hash": "abc", "run": lt.run_id(l)}))
+        self.assertFails(d, l, r"C9: not a refuter unit of this ledger")
+
+    def test_an_owns_header_that_differs_from_the_meta_fails(self):
+        d, l = ingest_env(GOOD.replace("OWNS: 1, 2", "OWNS: 1, 3"))
+        self.assertFails(d, l, r"C1: OWNS header is '1, 3', expected '1, 2'")
+
+    def test_a_meta_from_another_draft_fails(self):
+        d, l = ingest_env(GOOD)
+        l["items"][0]["claim"] = "A different claim from a later draft."
+        self.assertFails(d, l, r"C1: brief was rendered for a different draft")
+
+    def test_a_meta_without_a_run_id_fails(self):
+        d, l = ingest_env(GOOD)
+        write(os.path.join(d, "briefs", "C1.json"),
+              json.dumps({"key": "C1", "owns": [1, 2], "hash": "abc"}))
+        self.assertFails(d, l, r"C1: brief was rendered for a different draft")
+
+    def test_a_run_header_that_differs_from_the_meta_fails(self):
+        d, l = ingest_env(GOOD.replace("RUN: @RUN@", "RUN: 000000000000"))
+        self.assertFails(d, l, r"C1: RUN header is '000000000000'")
+
+    def test_the_run_id_covers_head_ids_and_claims(self):
+        base = lt.run_id(ingest_env(None)[1])
+        for change in (lambda l: l.update(head_sha="x" * 40),
+                       lambda l: l["items"][0].update(claim="other"),
+                       lambda l: l["items"][0].update(id=9)):
+            l = ingest_env(None)[1]; change(l)
+            self.assertNotEqual(lt.run_id(l), base)
+        l = ingest_env(None)[1]; l["items"][0]["detail"] = "changed"
+        self.assertEqual(lt.run_id(l), base)
+
+
 class TestIngestCli(unittest.TestCase):
     def test_cmd_ingest_writes_the_ledger_and_a_backup_on_success_and_leaves_it_untouched_on_failure(self):
         # cmd_ingest hashes the real template (unlike lt.ingest() in the tests
@@ -538,7 +703,8 @@ class TestBriefCli(unittest.TestCase):
             self.assertIn("check the second site", fh.read())
         with open(json_path, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh), {"key": "C1", "owns": [1, 2],
-                                              "hash": lt.template_hash()})
+                                              "hash": lt.template_hash(),
+                                              "run": lt.run_id(brief_ledger())})
 
 
 class TestExcerptAndChangedLines(unittest.TestCase):

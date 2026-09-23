@@ -2,7 +2,7 @@
 
 pr-review-anchor.py is the only CLI the command prompts call; it imports this
 module and re-exports the shared primitives so both files agree on them."""
-import hashlib, json, os, re, shutil, tempfile
+import hashlib, json, os, re, shutil, tempfile, textwrap
 
 SCHEMA = 2
 SEVERITIES = ("blocker", "high", "medium", "low")
@@ -327,13 +327,14 @@ def edit_field(ledger, iid, field, text):
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "refuter-brief.tmpl.md")
 VERDICT_FIELDS = ("ITEM", "VERDICT", "SEVERITY", "ON_CHANGED_LINE", "REASON", "CLAIM_VERDICT",
                   "CLAIM_REASON", "CLAIM_REWRITE", "FIX_VERDICT", "FIX_REASON", "FIX_REWRITE")
-HEADER_FIELDS = ("BRIEF", "KEY", "OWNS")
+HEADER_FIELDS = ("BRIEF", "RUN", "KEY", "OWNS")
 _LABEL = re.compile(r"^(%s):[ \t]?(.*)$" % "|".join(HEADER_FIELDS + VERDICT_FIELDS))
 # Fields a refuter sees. Verdict fields are deliberately absent: a refuter must
 # not be primed by an earlier answer.
 BRIEF_ITEM_FIELDS = ("id", "severity_in", "cluster", "file", "line", "line_end", "claim",
                      "detail", "evidence", "refuter_note")
 CONTEXT_KEYS = ("link_deps", "commands", "obligations", "claude_md_paths", "scratch")
+_PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
 _REPO_FILE = re.compile(r"[\w./-]+\.(?:md|mdc|txt|json|ya?ml|toml)\b|CLAUDE\.md|AGENTS\.md")
 
 
@@ -342,11 +343,25 @@ def template_hash(path=TEMPLATE_PATH):
         return hashlib.sha256(fh.read()).hexdigest()[:12]
 
 
+def run_id(ledger):
+    """Read-only. Identifies one draft: the head it was reviewed at and every
+    item's id and claim, in ledger order. `brief` writes it into each brief
+    and its meta, the refuter copies it into its reply, and `ingest` refuses
+    a brief or reply whose run id is not this ledger's - so a brief or verdict
+    left over from an earlier draft in the same session can never be merged
+    into this one. Taken before `ingest`, the only step between `brief` and
+    `ingest` that rewrites a claim."""
+    basis = [ledger.get("head_sha") or "",
+             [[it.get("id"), it.get("claim")] for it in ledger.get("items", [])]]
+    return hashlib.sha256(json.dumps(basis, default=str).encode("utf-8")).hexdigest()[:12]
+
+
 def refuter_units(ledger):
-    units = {c["id"]: sorted(c.get("item_ids", [])) for c in ledger.get("clusters", [])}
+    units = {c.get("id"): sorted(c.get("item_ids") or [], key=str)
+             for c in ledger.get("clusters", [])}
     for it in ledger.get("items", []):
         if not it.get("cluster"):
-            units[f"i{it['id']}"] = [it["id"]]
+            units[f"i{it.get('id')}"] = [it.get("id")]
     return units
 
 
@@ -392,6 +407,9 @@ def render_brief(ledger, key, context, ledger_dir, template_path=TEMPLATE_PATH):
     if missing:
         raise LedgerError(f"context file is missing {', '.join(missing)}")
     _check_obligations(context["obligations"])
+    paths = context["claude_md_paths"]
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        raise LedgerError(f"claude_md_paths must be a list of path strings, got {paths!r}")
     owns = units[key]
     by_id = {it["id"]: it for it in ledger.get("items", [])}
     payload = [{k: by_id[i][k] for k in BRIEF_ITEM_FIELDS if k in by_id[i]} for i in owns]
@@ -404,12 +422,13 @@ def render_brief(ledger, key, context, ledger_dir, template_path=TEMPLATE_PATH):
     scratch = context["scratch"].rstrip("/")
     h = template_hash(template_path)
     values = {
-        "BRIEF_HASH": h, "KEY": key, "OWNS": ", ".join(str(i) for i in owns),
+        "BRIEF_HASH": h, "RUN_ID": run_id(ledger), "KEY": key,
+        "OWNS": ", ".join(str(i) for i in owns),
         "WT": ledger.get("worktree", ""), "HEAD_SHA": ledger.get("head_sha", ""),
         "MERGE_BASE": ledger.get("merge_base", ""),
         "LINK_DEPS": context["link_deps"], "COMMANDS": context["commands"],
         "OBLIGATIONS": context["obligations"],
-        "CLAUDE_MD_PATHS": ", ".join(f"`{p}`" for p in context["claude_md_paths"]),
+        "CLAUDE_MD_PATHS": ", ".join(f"`{p}`" for p in paths),
         "ITEMS": "```json\n" + json.dumps(payload, indent=2) + "\n```",
         "VERDICT_PATH": os.path.join(ledger_dir, "verdicts", f"{key}.txt"),
         "PROBE_DIR": f"{scratch}/probes/{key}",
@@ -417,18 +436,40 @@ def render_brief(ledger, key, context, ledger_dir, template_path=TEMPLATE_PATH):
     }
     with open(template_path, encoding="utf-8") as fh:
         text = fh.read()
-    for k, v in values.items():
-        text = text.replace("{{" + k + "}}", str(v))
-    left = sorted(set(re.findall(r"\{\{[A-Z_]+\}\}", text)))
+    # One pass over the template: a value is never re-scanned, so item text
+    # that happens to contain `{{KEY}}` or `{{TITLE}}` is copied literally,
+    # and "unfilled" means a placeholder in the template itself.
+    left = sorted({m for m in _PLACEHOLDER.findall(text) if m not in values})
     if left:
-        raise LedgerError(f"template placeholders left unfilled: {', '.join(left)}")
-    return text, {"key": key, "owns": owns, "hash": h}
+        raise LedgerError("template placeholders left unfilled: "
+                          + ", ".join("{{%s}}" % m for m in left))
+    text = _PLACEHOLDER.sub(lambda m: str(values[m.group(1)]), text)
+    return text, {"key": key, "owns": owns, "hash": h, "run": values["RUN_ID"]}
+
+
+_FENCE = re.compile(r"^\s*```[\w-]*\s*$")
+
+
+def _unfence(lines):
+    """`lines` without one code fence wrapping the whole reply, which a
+    refuter copying the fenced reply format from its brief may include. Only
+    a fence that is both the first and the last non-blank line is removed, so
+    a fence inside a multi-line value is kept."""
+    body = [n for n, l in enumerate(lines) if l.strip()]
+    if len(body) >= 2 and _FENCE.match(lines[body[0]]) and _FENCE.match(lines[body[-1]]):
+        return lines[body[0] + 1:body[-1]]
+    return lines
 
 
 def parse_verdict_file(text):
+    """Read-only. Split a refuter's reply into its header fields and one dict
+    per `ITEM` block. Labels may be indented (the brief's reply format may be
+    copied with its indentation): an indent common to every line is removed,
+    and a label is recognized after any remaining leading whitespace. A
+    continuation line otherwise keeps its own indentation."""
     header, blocks, cur, field = {}, [], None, None
-    for raw in text.splitlines():
-        m = _LABEL.match(raw)
+    for raw in _unfence(textwrap.dedent(text).splitlines()):
+        m = _LABEL.match(raw.lstrip())
         if m:
             name, val = m.group(1), m.group(2)
             if name in HEADER_FIELDS:
@@ -505,12 +546,51 @@ def _block_errors(b, it):
     return e
 
 
+def _meta_errors(m, units, run):
+    """Why brief meta `m` does not belong to this draft, or [] when it does:
+    its key must be one of this ledger's refuter units, it must own exactly
+    that unit's ids, and it must carry this draft's run id. A meta that fails
+    here is from an earlier run (or hand-written) and is not read further."""
+    key, owns = m.get("key"), m.get("owns")
+    if key not in units:
+        return [f"{key}: not a refuter unit of this ledger - a brief left over from an "
+                "earlier run; clear briefs/ and render them again with `brief`"]
+    if not isinstance(owns, list) or sorted(owns, key=str) != units[key]:
+        return [f"{key}: brief owns {owns!r} but this ledger's {key} is {units[key]} - "
+                "render the brief again with `brief`"]
+    if m.get("run") != run:
+        return [f"{key}: brief was rendered for a different draft (run {m.get('run')!r}, "
+                f"this ledger is {run}) - render the brief again with `brief`"]
+    return []
+
+
+def _read_verdict_file(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except UnicodeDecodeError as exc:
+        raise LedgerError(f"verdict file {path} is not valid UTF-8: {exc}")
+    except OSError as exc:
+        raise LedgerError(f"could not read verdict file {path}: {exc}")
+
+
 def ingest(ledger, briefs_dir, verdicts_dir, expected_hash, inconclusive=(), reason=""):
-    """Merge refuter verdict files into `ledger` in place and apply the
+    """Mutating: call inside the `ingest` subcommand, before `write_ledger`.
+
+    Merge refuter verdict files into `ledger` in place and apply the
     mechanical claim/fix rewrites. Raises `LedgerError` listing every problem
     found across all briefs/verdicts at once, and only mutates `ledger` once
-    no problems remain, so a failed call leaves it untouched."""
-    by_id = {it["id"]: it for it in ledger.get("items", [])}
+    no problems remain, so a failed call leaves it untouched.
+
+    Every brief meta must belong to this draft (see `_meta_errors`), and every
+    verdict file's `RUN`/`OWNS` headers must match its meta, so nothing from
+    an earlier run in the same session is merged. An id may be answered by
+    one file only. Ids in `inconclusive` are closed INCONCLUSIVE unless a
+    valid answer for them exists: a unit whose ids are all in `inconclusive`
+    is not read at all, and a block error for an `inconclusive` id is dropped
+    rather than failing the run - that is what closing a refuter that failed
+    twice means."""
+    by_id = {it.get("id"): it for it in ledger.get("items", [])}
     inconclusive = {int(i) for i in inconclusive}
     if inconclusive and not reason.strip():
         raise LedgerError("--inconclusive needs --reason")
@@ -525,27 +605,40 @@ def ingest(ledger, briefs_dir, verdicts_dir, expected_hash, inconclusive=(), rea
                 metas.append(load_json(os.path.join(briefs_dir, f), what="brief meta"))
     if not metas:
         raise LedgerError(f"no briefs in {briefs_dir} - render them with `brief` before dispatch")
-    errors, answers = [], {}
-    dispatched = {i for m in metas for i in m["owns"]}
-    for iid in sorted(set(by_id) - dispatched):
-        errors.append(f"item {iid} was never dispatched")
+    units, run = refuter_units(ledger), run_id(ledger)
+    errors, answers, answered_by = [], {}, {}
+    valid = []
     for m in metas:
+        errs = _meta_errors(m, units, run)
+        errors.extend(errs)
+        if not errs:
+            valid.append(m)
+    dispatched = {i for m in metas if isinstance(m.get("owns"), list) for i in m["owns"]}
+    for iid in sorted(set(by_id) - dispatched, key=str):
+        errors.append(f"item {iid} was never dispatched")
+    for m in valid:
         key, owns = m["key"], set(m["owns"])
+        if owns <= inconclusive:
+            continue
         path = os.path.join(verdicts_dir, f"{key}.txt")
         if not os.path.isfile(path):
-            if not owns <= inconclusive:
-                errors.append(f"{key}: no verdict file at {path} (owns {sorted(owns)})")
+            errors.append(f"{key}: no verdict file at {path} (owns {sorted(owns)})")
             continue
-        with open(path, encoding="utf-8") as fh:
-            try:
-                header, blocks = parse_verdict_file(fh.read())
-            except LedgerError as exc:
-                errors.append(f"{key}: {exc}"); continue
+        try:
+            header, blocks = parse_verdict_file(_read_verdict_file(path))
+        except LedgerError as exc:
+            errors.append(f"{key}: {exc}"); continue
         if header.get("BRIEF") != expected_hash:
             errors.append(f"{key}: BRIEF {header.get('BRIEF')!r} does not match the current "
                           f"template ({expected_hash}) - render the brief with `brief`")
+        if header.get("RUN") != run:
+            errors.append(f"{key}: RUN header is {header.get('RUN')!r}, expected {run!r} - "
+                          "a reply to a brief from another draft")
         if header.get("KEY") != key:
             errors.append(f"{key}: KEY header is {header.get('KEY')!r}")
+        want_owns = ", ".join(str(i) for i in m["owns"])
+        if header.get("OWNS") != want_owns:
+            errors.append(f"{key}: OWNS header is {header.get('OWNS')!r}, expected {want_owns!r}")
         seen = set()
         for b in blocks:
             try:
@@ -557,7 +650,13 @@ def ingest(ledger, briefs_dir, verdicts_dir, expected_hash, inconclusive=(), rea
             seen.add(iid)
             if iid not in owns:
                 errors.append(f"{key}: does not own item {iid}"); continue
+            if iid in answered_by:
+                errors.append(f"item {iid} answered in both {answered_by[iid]} and {key}")
+                continue
+            answered_by[iid] = key
             errs = _block_errors(b, by_id[iid])
+            if errs and iid in inconclusive:
+                continue
             errors.extend(f"{key}: {x}" for x in errs)
             if not errs:
                 answers[iid] = (key, b)
