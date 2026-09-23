@@ -15,7 +15,12 @@ EXPECT = {  # (source index, id) -> substring the new validate must report
     # referencing "item #5" from the review batch, which process_vocabulary_in
     # catches. Corrected per Controller Ruling R2 - see the commit message.
     (0, 4): "review-process wording", (0, 14): "hedged", (0, 19): "review-process wording",
-    (1, 8): "DOWNGRADED", (1, 19): "REFUTED",
+    # Narrowed from "DOWNGRADED": that substring is also satisfied by the
+    # fold_note-missing error that fires for every schema-1 fixture item here
+    # (none carries fold_note), so it stayed green even with the
+    # severity-not-lowered rule deleted. This item's real, distinguishing
+    # defect is severity == severity_in on a DOWNGRADED verdict.
+    (1, 8): "not lower than severity_in", (1, 19): "REFUTED",
     (2, 11): "ellipsis",
 }
 

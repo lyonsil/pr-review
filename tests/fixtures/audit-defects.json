@@ -122,7 +122,7 @@
       "fix_verdict": "REWRITTEN",
       "fix_reason": "Applied in a scratch copy: seeding a third file not named in the selector and pinning a two-element list passes at baseline, now fails under the `return scannedPaths;` no-op (the extra file appears), and still fails under `return requestedPaths.ToList();`. Scan order comes from `filePaths.Sort(StringComparer.Ordinal)` at c-sharp/Projects/Pt9InterlinearReader.cs:502, which orders the three fixtures en, es, fr. One correction: a single-line `new[] { ... }` array literal here exceeds csharpier's width and is reformatted, so the multi-line form should be written directly."
     },
-    "expect": "DOWNGRADED"
+    "expect": "not lower than severity_in"
   },
   {
     "source": 1,
