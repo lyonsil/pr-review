@@ -94,19 +94,25 @@ def load_json(path, what="ledger"):
 def write_ledger(path, ledger, step):
     """Write atomically (temp file in the same directory, then rename), keeping
     the previous content as `<path>.bak-<step>` so a bad step can be inspected
-    and a failed one never leaves a half-written ledger."""
+    and a failed one never leaves a half-written ledger. A failed write
+    raises `LedgerError`."""
     d = os.path.dirname(os.path.abspath(path))
-    if os.path.exists(path):
-        shutil.copyfile(path, f"{path}.bak-{step}")
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".ledger-", suffix=".tmp")
+    try:
+        if os.path.exists(path):
+            shutil.copyfile(path, f"{path}.bak-{step}")
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".ledger-", suffix=".tmp")
+    except OSError as exc:
+        raise LedgerError(f"could not write ledger file {path}: {exc}")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(ledger, fh, indent=2)
             fh.write("\n")
         os.replace(tmp, path)
-    except BaseException:
+    except BaseException as exc:
         if os.path.exists(tmp):
             os.remove(tmp)
+        if isinstance(exc, OSError):
+            raise LedgerError(f"could not write ledger file {path}: {exc}")
         raise
 
 
@@ -291,6 +297,10 @@ def renumber(ledger):
     checked against the current ids first, and `ledger` is only mutated once
     none of them are unknown, so a failed call leaves it untouched."""
     items = ledger.get("items", [])
+    noid = [f"item[{n}] has no integer id" for n, it in enumerate(items)
+            if not isinstance(it.get("id"), int) or isinstance(it.get("id"), bool)]
+    if noid:
+        raise LedgerError("\n".join(noid))
     ids = {it["id"] for it in items}
     bad = [f"item {it['id']} references {{{{#{m}}}}}, which is not in this ledger"
            for it in items for f in TOKEN_FIELDS
@@ -298,7 +308,7 @@ def renumber(ledger):
     if bad:
         raise LedgerError("\n".join(bad))
     order = sorted(items, key=lambda it: (SEV_RANK.get(it.get("severity"), 99),
-                                          it.get("file", ""), it["id"]))
+                                          it.get("file") or "", it["id"]))
     mapping = {it["id"]: n for n, it in enumerate(order, start=1)}
     sub = lambda text: TOKEN.sub(lambda m: "{{#%d}}" % mapping[int(m.group(1))], text or "")
     for it in order:
@@ -725,7 +735,7 @@ def render_report(ledger, ledger_path):
     out = ["## Triage", "", "| id | severity | verdict | cluster | location | claim |",
            "| --- | --- | --- | --- | --- | --- |"]
     for it in items:
-        out.append(f"| {it['id']} | {sev(it)} | {it.get('verdict')} | {it.get('cluster') or ''} | "
+        out.append(f"| {it.get('id')} | {sev(it)} | {it.get('verdict')} | {it.get('cluster') or ''} | "
                    f"`{it.get('file')}:{it.get('line')}` | {_esc_cell(it.get('claim'))} |")
     n = len(items)
     out += ["", "## Verdict summary", "",
@@ -741,33 +751,35 @@ def render_report(ledger, ledger_path):
     out += ["", "## Claim audit", "",
             f"SOUND {sum(it.get('claim_verdict') == 'SOUND' for it in items)} / REWRITTEN {len(rc)}; "
             f"severity {lowered} lowered / {raised} raised"]
-    out += [f"- #{it['id']}: {it.get('claim_original')} -> {it.get('claim')}" for it in rc]
+    out += [f"- #{it.get('id')}: {it.get('claim_original')} -> {it.get('claim')}" for it in rc]
     rf = [it for it in items if it.get("fix_verdict") == "REWRITTEN"]
     uf = [it for it in items if it.get("fix_verdict") == "UNVERIFIABLE"]
     out += ["", "## Fix audit", "",
             f"SOUND {sum(it.get('fix_verdict') == 'SOUND' for it in items)} / REWRITTEN {len(rf)} / "
             f"UNVERIFIABLE {len(uf)}"]
-    out += [f"- #{it['id']}: {it.get('fix_original')} -> {fix_slot(it.get('detail'))}" for it in rf]
-    out += [f"- #{it['id']} UNVERIFIABLE (needs a human before it posts): {it.get('fix_reason')}"
+    out += [f"- #{it.get('id')}: {it.get('fix_original')} -> {fix_slot(it.get('detail'))}" for it in rf]
+    out += [f"- #{it.get('id')} UNVERIFIABLE (needs a human before it posts): {it.get('fix_reason')}"
             for it in uf]
     out += ["", "## Downgraded", ""]
-    out += [f"- #{it['id']} {sev(it)} - {it.get('claim')} - {it.get('verdict_reason')} "
+    out += [f"- #{it.get('id')} {sev(it)} - {it.get('claim')} - {it.get('verdict_reason')} "
             f"[{it.get('fold_note')}]" for it in by_v["DOWNGRADED"]] or ["none"]
     out += ["", "## Unresolved", ""]
-    out += [f"- #{it['id']} - {it.get('claim')} - {it.get('verdict_reason')} (needs a human call)"
+    out += [f"- #{it.get('id')} - {it.get('claim')} - {it.get('verdict_reason')} (needs a human call)"
             for it in by_v["INCONCLUSIVE"]] or ["none"]
     out += ["", "## Refuted (not posted unless you name them)", ""]
-    out += [f"- #{it['id']} - {it.get('claim')} - {it.get('verdict_reason')}"
+    out += [f"- #{it.get('id')} - {it.get('claim')} - {it.get('verdict_reason')}"
             for it in by_v["REFUTED"]] or ["none"]
     dd = [it for it in items if it.get("dedupe")]
     out += ["", "## Previously reported", ""]
-    out += [f"- #{it['id']} - {it['dedupe'].get('prior_url')}" for it in dd] or ["none"]
+    out += [f"- #{it.get('id')} - " + (str(it["dedupe"].get("prior_url"))
+                                       if isinstance(it["dedupe"], dict) else str(it["dedupe"]))
+            for it in dd] or ["none"]
     live = [it for it in items if it.get("verdict") != "REFUTED"]
     inline = sum(demotion_reason(it) is None for it in live)
     body = len(live) - inline
     owners = {}
     for it in items:
-        owners.setdefault(it.get("refuter_key"), []).append(it["id"])
+        owners.setdefault(it.get("refuter_key"), []).append(it.get("id"))
     largest = max((len(v) for k, v in owners.items() if k not in (None, "none")), default=0)
     real = [k for k in owners if k not in (None, "none")]
     out += ["", "## Pressure-test dispatch", "",

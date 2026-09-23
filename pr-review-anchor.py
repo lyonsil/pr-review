@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Ledger validation, head-drift re-anchoring, and GitHub review payload building
 for the PR review pipeline. Standard library only."""
-import argparse, json, os, re, sys
+import argparse, functools, json, os, re, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ledger_tools as lt  # noqa: E402
@@ -259,7 +259,7 @@ def validate(ledger, worktree=None):
         errs.append(f"ids are not contiguous 1..N in list order (got {int_ids[:6]})")
 
     rank = {s: n for n, s in enumerate(SEVERITIES)}
-    keyed = [(rank.get(it.get("severity"), 99), it.get("file", "")) for it in items]
+    keyed = [(rank.get(it.get("severity"), 99), it.get("file") or "") for it in items]
     if keyed != sorted(keyed):
         errs.append("items are not ordered by severity descending then file path")
 
@@ -323,11 +323,35 @@ def draft_errors(ledger):
     return errs
 
 
+def _lt_errors(exc):
+    for line in str(exc).splitlines():
+        print(f"error: {line}", file=sys.stderr)
+    return 1
+
+
+def _cli(fn):
+    """Every subcommand's error contract in one place: a `LedgerError`, a
+    failed file operation, or undecodable input becomes `error:` lines on
+    stderr and exit 1, never a traceback."""
+    @functools.wraps(fn)
+    def run(args):
+        try:
+            return fn(args)
+        except lt.LedgerError as exc:
+            return _lt_errors(exc)
+        except UnicodeDecodeError as exc:
+            return _lt_errors(f"input is not valid UTF-8: {exc}")
+        except OSError as exc:
+            return _lt_errors(exc)
+    return run
+
+
 def load(path):
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
+@_cli
 def cmd_validate(args):
     try:
         led = load(args.ledger)
@@ -405,6 +429,7 @@ def reanchor_item(item, worktree, changed):
     return status, line, why
 
 
+@_cli
 def cmd_reanchor(args):
     try:
         led = load(args.ledger)
@@ -468,11 +493,7 @@ def cmd_reanchor(args):
     if getattr(args, "dry_run", False):
         print("dry run: ledger not written")
     else:
-        try:
-            lt.write_ledger(args.ledger, led, "reanchor")
-        except OSError as exc:
-            print(f"error: could not write ledger file {args.ledger}: {exc}", file=sys.stderr)
-            return 1
+        lt.write_ledger(args.ledger, led, "reanchor")
 
     if corrected:
         # on_changed_line is derived from the diff, not trusted from the
@@ -853,6 +874,7 @@ def build_payload(ledger, tokens, body_intro, include_refuted=None,
     return {"body": body, "event": "COMMENT", "comments": comments}
 
 
+@_cli
 def cmd_payload(args):
     try:
         led = load(args.ledger)
@@ -947,120 +969,104 @@ def preview_pages(payload, limit=PAGE_LIMIT):
     return out
 
 
-def _lt_errors(exc):
-    for line in str(exc).splitlines():
-        print(f"error: {line}", file=sys.stderr)
-    return 1
-
-
+@_cli
 def cmd_brief(args):
-    try:
-        led = lt.load_json(args.ledger)
-        ctx = lt.load_json(args.context, what="context")
-        ldir = os.path.dirname(os.path.abspath(args.ledger))
-        text, meta = lt.render_brief(led, args.key, ctx, ldir)
-    except lt.LedgerError as exc:
-        return _lt_errors(exc)
-    bdir = os.path.join(ldir, "briefs"); os.makedirs(bdir, exist_ok=True)
+    led = lt.load_json(args.ledger)
+    ctx = lt.load_json(args.context, what="context")
+    ldir = os.path.dirname(os.path.abspath(args.ledger))
+    text, meta = lt.render_brief(led, args.key, ctx, ldir)
+    bdir = os.path.join(ldir, "briefs")
     md = os.path.join(bdir, f"{args.key}.md")
-    with open(md, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    with open(os.path.join(bdir, f"{args.key}.json"), "w", encoding="utf-8") as fh:
-        json.dump(meta, fh)
+    try:
+        os.makedirs(bdir, exist_ok=True)
+        with open(md, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        with open(os.path.join(bdir, f"{args.key}.json"), "w", encoding="utf-8") as fh:
+            json.dump(meta, fh)
+    except OSError as exc:
+        raise lt.LedgerError(f"could not write the brief under {bdir}: {exc}")
     print(md)
     return 0
 
 
+@_cli
 def cmd_ingest(args):
+    led = lt.load_json(args.ledger)
+    ldir = os.path.dirname(os.path.abspath(args.ledger))
+    tokens = [t for t in re.split(r"[,\s]+", args.inconclusive or "") if t]
     try:
-        led = lt.load_json(args.ledger)
-        ldir = os.path.dirname(os.path.abspath(args.ledger))
-        tokens = [t for t in re.split(r"[,\s]+", args.inconclusive or "") if t]
-        try:
-            ids = [int(t) for t in tokens]
-        except ValueError:
-            raise lt.LedgerError(f"--inconclusive must be a list of integer ids, "
-                                 f"got {args.inconclusive!r}")
-        notes = lt.ingest(led, os.path.join(ldir, "briefs"), os.path.join(ldir, "verdicts"),
-                          lt.template_hash(), inconclusive=ids, reason=args.reason or "")
-        lt.write_ledger(args.ledger, led, "ingest")
-    except lt.LedgerError as exc:
-        return _lt_errors(exc)
+        ids = [int(t) for t in tokens]
+    except ValueError:
+        raise lt.LedgerError(f"--inconclusive must be a list of integer ids, "
+                             f"got {args.inconclusive!r}")
+    notes = lt.ingest(led, os.path.join(ldir, "briefs"), os.path.join(ldir, "verdicts"),
+                      lt.template_hash(), inconclusive=ids, reason=args.reason or "")
+    lt.write_ledger(args.ledger, led, "ingest")
     print("\n".join(notes))
     return 0
 
 
+@_cli
 def cmd_excerpt(args):
-    try:
-        led = lt.load_json(args.ledger)
-        lt.fill_excerpts(led, args.worktree)
-        lt.write_ledger(args.ledger, led, "excerpt")
-    except lt.LedgerError as exc:
-        return _lt_errors(exc)
+    led = lt.load_json(args.ledger)
+    lt.fill_excerpts(led, args.worktree)
+    lt.write_ledger(args.ledger, led, "excerpt")
     print(f"excerpted {len(led.get('items', []))} item(s)")
     return 0
 
 
+@_cli
 def cmd_changed_lines(args):
+    led = lt.load_json(args.ledger)
     try:
-        led = lt.load_json(args.ledger)
-        try:
-            with open(args.diff, encoding="utf-8", errors="replace") as fh:
-                diff_text = fh.read()
-        except FileNotFoundError:
-            raise lt.LedgerError(f"diff file not found: {args.diff}")
-        except OSError as exc:
-            raise lt.LedgerError(f"could not read diff file {args.diff}: {exc}")
-        notes = lt.mark_changed_lines(led, args.worktree, parse_changed_lines(diff_text))
-        lt.write_ledger(args.ledger, led, "changed-lines")
-    except lt.LedgerError as exc:
-        return _lt_errors(exc)
+        with open(args.diff, encoding="utf-8", errors="replace") as fh:
+            diff_text = fh.read()
+    except FileNotFoundError:
+        raise lt.LedgerError(f"diff file not found: {args.diff}")
+    except OSError as exc:
+        raise lt.LedgerError(f"could not read diff file {args.diff}: {exc}")
+    notes = lt.mark_changed_lines(led, args.worktree, parse_changed_lines(diff_text))
+    lt.write_ledger(args.ledger, led, "changed-lines")
     print("\n".join(notes))
     return 0
 
 
+@_cli
 def cmd_renumber(args):
-    try:
-        led = lt.load_json(args.ledger)
-        mapping = lt.renumber(led)
-        lt.write_ledger(args.ledger, led, "renumber")
-    except lt.LedgerError as exc:
-        return _lt_errors(exc)
+    led = lt.load_json(args.ledger)
+    mapping = lt.renumber(led)
+    lt.write_ledger(args.ledger, led, "renumber")
     for old in sorted(old for old, new in mapping.items() if old != new):
         print(f"{old} -> {mapping[old]}")
     return 0
 
 
+@_cli
 def cmd_edit(args):
+    led = lt.load_json(args.ledger)
     try:
-        led = lt.load_json(args.ledger)
-        try:
-            iid = int(args.id)
-        except ValueError:
-            raise lt.LedgerError(f"id must be an integer, got {args.id!r}")
-        try:
-            with open(args.text_file, encoding="utf-8") as fh:
-                text = fh.read()
-        except FileNotFoundError:
-            raise lt.LedgerError(f"text file not found: {args.text_file}")
-        except UnicodeDecodeError as exc:
-            raise lt.LedgerError(f"text file {args.text_file} is not valid UTF-8: {exc}")
-        except OSError as exc:
-            raise lt.LedgerError(f"could not read text file {args.text_file}: {exc}")
-        lt.edit_field(led, iid, args.field, text)
-        lt.write_ledger(args.ledger, led, "edit")
-    except lt.LedgerError as exc:
-        return _lt_errors(exc)
+        iid = int(args.id)
+    except ValueError:
+        raise lt.LedgerError(f"id must be an integer, got {args.id!r}")
+    try:
+        with open(args.text_file, encoding="utf-8") as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        raise lt.LedgerError(f"text file not found: {args.text_file}")
+    except UnicodeDecodeError as exc:
+        raise lt.LedgerError(f"text file {args.text_file} is not valid UTF-8: {exc}")
+    except OSError as exc:
+        raise lt.LedgerError(f"could not read text file {args.text_file}: {exc}")
+    lt.edit_field(led, iid, args.field, text)
+    lt.write_ledger(args.ledger, led, "edit")
     print(f"item {iid} {args.field} updated")
     return 0
 
 
+@_cli
 def cmd_report(args):
-    try:
-        led = lt.load_json(args.ledger)
-        text = lt.render_report(led, args.ledger)
-    except lt.LedgerError as exc:
-        return _lt_errors(exc)
+    led = lt.load_json(args.ledger)
+    text = lt.render_report(led, args.ledger)
     path = os.path.join(os.path.dirname(os.path.abspath(args.ledger)), "report.md")
     try:
         with open(path, "w", encoding="utf-8") as fh:
@@ -1072,6 +1078,7 @@ def cmd_report(args):
     return 0
 
 
+@_cli
 def cmd_preview(args):
     try:
         payload = load(args.payload)

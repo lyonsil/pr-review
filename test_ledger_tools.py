@@ -989,6 +989,127 @@ class TestEditCli(unittest.TestCase):
         self.assertFalse(os.path.isfile(ledger_path + ".bak-edit"))
 
 
+class TestErrorContract(unittest.TestCase):
+    """Every subcommand turns a bad input or a failed write into `error:`
+    lines and exit 1 - never a traceback."""
+
+    def assertCleanFailure(self, fn, **kw):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = fn(SimpleNamespace(**kw))
+        lines = err.getvalue().splitlines()
+        self.assertEqual(code, 1, err.getvalue())
+        self.assertTrue(lines and all(l.startswith("error: ") for l in lines), lines)
+        return err.getvalue()
+
+    def cli_ingest_env(self, text):
+        good = text.replace("BRIEF: abc", f"BRIEF: {lt.template_hash()}")
+        d, l = ingest_env(good)
+        return d, write(os.path.join(d, "ledger.json"), json.dumps(l))
+
+    def readonly(self, d):
+        os.chmod(d, 0o555)
+        self.addCleanup(os.chmod, d, 0o755)
+
+    def test_ingest_names_a_verdict_file_that_is_not_utf8(self):
+        d, path = self.cli_ingest_env(GOOD)
+        with open(os.path.join(d, "verdicts", "C1.txt"), "wb") as fh:
+            fh.write(b"BRIEF: \xff\xfe\n")
+        err = self.assertCleanFailure(anchor.cmd_ingest, ledger=path, inconclusive=None, reason=None)
+        self.assertIn(f"C1: verdict file {os.path.join(d, 'verdicts', 'C1.txt')} is not valid UTF-8",
+                      err)
+
+    def test_ingest_names_a_meta_without_owns_or_owning_an_unknown_id(self):
+        for meta in ({"key": "C1", "hash": "abc"}, {"key": "C1", "owns": [1, 99], "hash": "abc"}):
+            d, path = self.cli_ingest_env(GOOD)
+            write(os.path.join(d, "briefs", "C1.json"), json.dumps(meta))
+            err = self.assertCleanFailure(anchor.cmd_ingest, ledger=path, inconclusive=None,
+                                          reason=None)
+            self.assertIn("C1: brief owns", err)
+
+    def test_ingest_reports_a_ledger_it_cannot_write(self):
+        d, path = self.cli_ingest_env(GOOD)
+        self.readonly(d)
+        err = self.assertCleanFailure(anchor.cmd_ingest, ledger=path, inconclusive=None, reason=None)
+        self.assertIn("could not write ledger file", err)
+
+    def test_excerpt_reports_a_ledger_it_cannot_write(self):
+        d = tmpdir(); write(os.path.join(d, "a.ts"), "l1\nl2\n")
+        path = write(os.path.join(d, "ledger.json"), json.dumps(led(item(1, line=1, line_end=1))))
+        self.readonly(d)
+        err = self.assertCleanFailure(anchor.cmd_excerpt, ledger=path, worktree=d)
+        self.assertIn("could not write ledger file", err)
+
+    def test_changed_lines_reports_a_ledger_it_cannot_write(self):
+        d = tmpdir(); write(os.path.join(d, "a.ts"), "l1\nl2\n")
+        path = write(os.path.join(d, "ledger.json"), json.dumps(led(item(1, line=1, line_end=1))))
+        diff = write(os.path.join(d, "head.diff"), "--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n+l1\n")
+        self.readonly(d)
+        err = self.assertCleanFailure(anchor.cmd_changed_lines, ledger=path, diff=diff, worktree=d)
+        self.assertIn("could not write ledger file", err)
+
+    def test_renumber_names_an_item_without_an_id_or_with_a_null_file(self):
+        d = tmpdir()
+        no_id = led(item(1), item(2, sev="low")); del no_id["items"][1]["id"]
+        null_file = led(item(1, f=None), item(2, f="a.ts"))
+        for bad, want in ((no_id, "item[1] has no integer id"), (null_file, None)):
+            path = write(os.path.join(d, "ledger.json"), json.dumps(bad))
+            if want:
+                self.assertIn(want, self.assertCleanFailure(anchor.cmd_renumber, ledger=path))
+            else:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(anchor.cmd_renumber(SimpleNamespace(ledger=path)), 0)
+
+    def test_renumber_reports_a_ledger_it_cannot_write(self):
+        d = tmpdir()
+        path = write(os.path.join(d, "ledger.json"), json.dumps(led(item(1))))
+        self.readonly(d)
+        err = self.assertCleanFailure(anchor.cmd_renumber, ledger=path)
+        self.assertIn("could not write ledger file", err)
+
+    def test_edit_reports_a_ledger_it_cannot_write(self):
+        d = tmpdir()
+        path = write(os.path.join(d, "ledger.json"), json.dumps(led(item(1))))
+        text = write(os.path.join(d, "t.txt"), "new claim")
+        self.readonly(d)
+        err = self.assertCleanFailure(anchor.cmd_edit, ledger=path, id="1", field="claim",
+                                      text_file=text)
+        self.assertIn("could not write ledger file", err)
+
+    def test_report_survives_an_item_without_an_id_and_a_string_dedupe(self):
+        d = tmpdir()
+        l = report_ledger(); del l["items"][0]["id"]; l["items"][1]["dedupe"] = "see the old thread"
+        path = write(os.path.join(d, "ledger.json"), json.dumps(l))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = anchor.cmd_report(SimpleNamespace(ledger=path))
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertIn("see the old thread", out.getvalue())
+
+    def test_brief_reports_a_briefs_directory_it_cannot_write(self):
+        d = tmpdir()
+        path = write(os.path.join(d, "ledger.json"), json.dumps(brief_ledger()))
+        ctx = write(os.path.join(d, "ctx.json"), json.dumps(CTX))
+        write(os.path.join(d, "briefs"), "a file where the directory should be")
+        err = self.assertCleanFailure(anchor.cmd_brief, ledger=path, key="C1", context=ctx)
+        self.assertIn(f"could not write the brief under {os.path.join(d, 'briefs')}", err)
+
+    def test_validate_names_a_ledger_that_is_not_utf8(self):
+        d = tmpdir()
+        path = os.path.join(d, "ledger.json")
+        with open(path, "wb") as fh:
+            fh.write(b'{"schema": 2, "items": [], "x": "\xff"}')
+        err = self.assertCleanFailure(anchor.cmd_validate, ledger=path, worktree=None, draft=False)
+        self.assertIn("not valid UTF-8", err)
+
+    def test_validate_names_a_null_file_instead_of_failing_to_sort(self):
+        d = tmpdir()
+        path = write(os.path.join(d, "ledger.json"),
+                     json.dumps(led(item(1, f=None), item(2, f="a.ts"))))
+        err = self.assertCleanFailure(anchor.cmd_validate, ledger=path, worktree=None, draft=False)
+        self.assertIn("missing required field 'file'", err)
+
+
 def report_ledger():
     return led(
         item(1, verdict="CONFIRMED", claim_verdict="REWRITTEN", claim_original="Old claim.",
