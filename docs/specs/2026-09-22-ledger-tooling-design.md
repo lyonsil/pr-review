@@ -104,19 +104,27 @@ match, fix), the verdict definitions, the finding-writing contract, the worktree
 reply format. Its placeholders:
 
 `{{WT}}`, `{{HEAD_SHA}}`, `{{MERGE_BASE}}`, `{{LINK_DEPS}}`, `{{COMMANDS}}`, `{{OBLIGATIONS}}`,
-`{{CLAUDE_MD_PATHS}}` (paths under `$WT`), `{{ITEMS}}` (JSON), `{{VERDICT_PATH}}`, `{{KEY}}`.
+`{{CLAUDE_MD_PATHS}}` (a list of paths under `$WT`), `{{ITEMS}}` (JSON), `{{VERDICT_PATH}}`,
+`{{KEY}}`, `{{OWNS}}`, `{{BRIEF_HASH}}`, `{{RUN_ID}}`. Placeholders are filled in one pass, so text
+inside a value (an item's claim, the obligation table) is never itself substituted.
 
 Briefs are rendered by a subcommand, not by hand:
 `brief <ledger> --key KEY --context ctx.json` fills every placeholder - `WT`, SHAs and `ITEMS` from
 the ledger; `LINK_DEPS`, `COMMANDS`, `OBLIGATIONS`, `CLAUDE_MD_PATHS` and the scratch path from a
 small context file the orchestrator writes once - and writes `briefs/<key>.md` plus
-`briefs/<key>.json` (`key`, `owns`, `hash`). `KEY` must be a cluster id or `i<id>` of an
+`briefs/<key>.json` (`key`, `owns`, `hash`, `run`). `KEY` must be a cluster id or `i<id>` of an
 unclustered item, so batching unrelated items cannot be expressed. `brief` also rejects an
 obligation-table row whose last cell does not cite a repo file, and any placeholder left unfilled.
 
 The template hash (first 12 hex digits of its sha256) is written into the brief; the refuter copies
 it into its verdict file header. `ingest` rejects a verdict file whose header lacks the current
 hash, and takes the dispatched set from `briefs/*.json`.
+
+The run id (first 12 hex digits of the sha256 of `head_sha` plus every item's id and claim, in
+ledger order) ties a brief to one draft. `brief` writes it into the brief and its meta; the refuter
+copies it into the `RUN` header line. `ingest` rejects a meta or reply whose run id is not the
+ledger's, so a brief or verdict left from an earlier run in the same session is never merged. S4
+also clears `briefs/`, `verdicts/` and `edits/` before writing the draft.
 
 ### Verdict file
 
@@ -125,6 +133,7 @@ Path: `$SCRATCH/pr-review/pr<n>/verdicts/<key>.txt`, where `<key>` is the cluste
 
 ```
 BRIEF: <template hash>
+RUN: <run id>
 KEY: C3
 OWNS: 4, 9, 17
 ```
@@ -132,7 +141,8 @@ OWNS: 4, 9, 17
 followed by one block per owned id in the existing format (`ITEM`, `VERDICT`, `SEVERITY`,
 `ON_CHANGED_LINE`, `REASON`, `CLAIM_VERDICT`, `CLAIM_REASON`, `CLAIM_REWRITE`, `FIX_VERDICT`,
 `FIX_REASON`, `FIX_REWRITE`). Multi-line values continue until the next recognized field label.
-The hand-back message is the path and nothing else.
+The template shows the format unindented in a fenced block; the parser also accepts indented
+labels and one fence wrapping the whole reply. The hand-back message is the path and nothing else.
 
 ### Worktree rules (in the template)
 
@@ -165,8 +175,10 @@ are ignored.
 After S5 dispatch the orchestrator arms one `ScheduleWakeup` of ~1200 s whose prompt is
 `pr-review watchdog: check refuter progress` - never the command text. On wake it stats (does not
 read) each outstanding refuter's output file. One unchanged for 15 minutes is stopped with
-`TaskStop` and re-dispatched once; a second stall is recorded INCONCLUSIVE, reason "refuter
-stalled". It re-arms until every verdict file exists, then stops the wakeup. The generator has no
+`TaskStop` and re-dispatched once; a second stall is closed with `ingest --inconclusive` and an
+author-facing reason ("Not verified: the automated check did not complete."). It re-arms until
+every verdict file exists, then stops the wakeup; a refuter re-dispatched after an `ingest` error
+re-arms it. The generator has no
 watchdog. No other `ScheduleWakeup`, `/loop`, `sleep`, or placeholder tool call is permitted
 anywhere in either command.
 
@@ -202,23 +214,32 @@ SHAs, worktree, clusters, and each item's generator fields (`id`, `severity_in`,
 optional `refuter_note` per item. `refuter_note` is the only place orchestrator guidance to a
 refuter may go: it is rendered into `{{ITEMS}}` and deleted by `ingest`, and `payload` never emits
 it. Verdict fields are absent until `ingest`. This is the last point at which the orchestrator
-writes ledger JSON directly.
+writes ledger JSON directly, and it does so until `excerpt` and `validate --draft` pass on the
+draft: a bad `file`/`line`, a non-integer or duplicate id, an unknown `severity_in`, a missing
+`head_sha`/`merge_base`/`worktree`, or a `cluster` and `item_ids` that disagree is fixed here,
+before any refuter runs, while a direct write is still allowed.
 
 - **`edit <ledger> <id> --field claim|detail|fold_note|verdict_reason|fix_reason|fix_verdict
   --text-file FILE`** - replaces one field from a file (no shell quoting). Refuses any other
   field. `fix_verdict` accepts only `UNVERIFIABLE` - a stale fix can be demoted, never promoted.
   Used for the judgement steps (folding downgrade reasons into `Why it matters:`, quantifier-sweep
   rewording, lint fixes) and for `/pr-review-post`'s post-rebase re-verification, where
-  `verdict_reason`/`fix_reason` are replaced with the original text plus a dated
-  `_Re-checked at <sha>: ..._` note.
+  `verdict_reason`/`fix_reason` are replaced with the original text plus a re-check line:
+  `Re-checked at <sha>: ...` in `fix_reason`, which never posts, and an author-facing
+  `Re-checked against the latest push: ...` (no SHA, no markdown) in `verdict_reason`, which posts
+  inside the italic footer. `validate` runs again after these edits, before `payload`.
 - **`ingest <ledger> [--inconclusive IDS --reason TEXT]`** - merges verdict files into items,
   reading `briefs/` and `verdicts/` from the ledger's own directory. Saves
   `claim_original`/`fix_original`, then applies `CLAIM_REWRITE` into `claim` and `FIX_REWRITE`
   into the `Fix:` slot of `detail`. Never writes `severity_in`. Fails on: a dispatched id with no
-  answer, an id answered twice, a key owning more than one cluster or a cluster plus a stray item,
-  a missing required field, a rewrite in the wrong slot, a stale or missing `BRIEF` hash.
-  `--inconclusive` records INCONCLUSIVE with the given reason for ids whose refuter failed twice -
-  the only sanctioned way to close an unanswered item.
+  answer, an id answered twice (in one file or across files), a brief meta whose key is not a
+  refuter unit of the ledger or whose `owns` differs from that unit, a meta or reply from another
+  draft (run id), an `OWNS` header that differs from the meta, a missing required field, a rewrite
+  in the wrong slot, a stale or missing `BRIEF` hash. `--inconclusive` records INCONCLUSIVE with
+  the given reason for ids whose refuter failed twice - the only sanctioned way to close an
+  unanswered item. A unit whose ids are all named is not read at all, and a block error for a
+  named id is dropped, so a reply that exists but cannot be parsed still closes. The reason
+  publishes on an INCONCLUSIVE item, so it is author-facing.
 - **`excerpt <ledger> --worktree WT`** - sets each `anchor_excerpt` to lines `line..line_end` read
   from the file in `WT`.
 - **`changed-lines <ledger> --diff FILE --worktree WT`** - sets `on_changed_line` from
@@ -226,14 +247,18 @@ writes ledger JSON directly.
   changed but a later line in `[line, line_end]` is, moves `line` to the first changed line and
   re-cuts the excerpt. Prints every move and every flip.
 - **`renumber <ledger>`** - sorts by severity then file, assigns 1..N, records `old_id`, rewrites
-  cluster `item_ids` and every `{{#id}}` token in `claim`/`detail`, prints the old -> new map.
+  cluster `item_ids` and every `{{#id}}` token in `claim`/`detail`/`verdict_reason`, prints the
+  old -> new map.
   Fails on a `{{#id}}` naming an unknown id.
-- **`report <ledger> [--diff FILE]`** - writes `report.md` and prints the terminal report, both
-  generated from the ledger: triage table with a verdict column and `severity_in -> severity`
+- **`report <ledger>`** - writes `report.md` and prints the terminal report, both generated from
+  the ledger alone (it reads `on_changed_line`/`anchor_status`, which `changed-lines` already
+  wrote, rather than a diff): triage table with a verdict column and `severity_in -> severity`
   arrows; verdict summary with a calibration warning when REFUTED is 0 or raised is 0; claim audit
   (original -> rewrite); fix audit; downgraded (with `fold_note`); unresolved; refuted; previously
-  reported; off-diff count; dispatch line (refuters / items / largest cluster); files; ready-to-run
-  post commands with real counts, stating that placement follows anchoring.
+  reported; dispatch line (refuters / items / largest cluster); files; ready-to-run post commands
+  with real counts, stating that placement follows anchoring. The post line's
+  "N inline + M in the body" split is computed with the same demotion predicate `payload` uses
+  (`demotion_reason`), so it is the off-diff count; there is no separate one.
 
 ## `validate` additions
 
@@ -241,7 +266,12 @@ writes ledger JSON directly.
   lines are rejected outright.
 - Process-vocabulary lint on `claim` and `detail`, with code spans stripped first: `refuter`,
   `pressure-test`, `Note for the`, `this batch`, `\bitems? #\d+`, and any `#\d+` outside a
-  `{{#...}}` token. (`rewrite` and `downgrad` were dropped after checking the audited ledgers: they
+  `{{#...}}` token. The same lint applies to `verdict_reason` on CONFIRMED and INCONCLUSIVE items,
+  where it publishes as the footer, except a bare `#\d+` (reasons cite PRs and issues that way).
+  `payload` renders `{{#id}}` tokens in that footer too.
+- `--draft`: the checks a draft ledger must pass before any brief - integer, unique ids;
+  `severity_in` in the vocabulary; `head_sha`, `merge_base` and `worktree` present; and every
+  item's `cluster` agreeing with the clusters' `item_ids` in both directions. (`rewrite` and `downgrad` were dropped after checking the audited ledgers: they
   occur in legitimate author-facing fixes - "rewrite the `@returns`", "the never-downgrade rule".)
 - Extended `HEDGE_PATTERNS`: `no code change`, `not required for/in this PR|change`,
   `should be downgraded|closed|dropped`, `if ... then downgrade|close|drop`. (A bare `optional` or
@@ -308,7 +338,7 @@ do a now-tooled step by hand is removed. Additionally:
 | Failure | Tool behavior | Orchestrator response |
 | --- | --- | --- |
 | Verdict file malformed / id missing | `ingest` names key and field | re-dispatch once with the error; then `ingest --inconclusive` |
-| Refuter stalls | watchdog detects 15 min without growth | `TaskStop`, re-dispatch once; then INCONCLUSIVE "refuter stalled" |
+| Refuter stalls | watchdog detects 15 min without growth | `TaskStop`, re-dispatch once; then `ingest --inconclusive` with an author-facing reason |
 | Concurrency limit | Agent tool errors | queue; wait for a notification; never retry in a loop |
 | Excerpt not verbatim | `validate --worktree` | re-run `excerpt`; never retype |
 | Process-vocabulary / hedge lint | `validate` names id and phrase | reword that text; never delete the finding to pass |

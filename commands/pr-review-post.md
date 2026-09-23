@@ -217,8 +217,22 @@ python3 $A edit $L <id> --field fix_reason --text-file <f>    # or --field verdi
 
 `fix_verdict` accepts only `UNVERIFIABLE`: a stale fix can be demoted, never promoted. Do not
 silently rewrite a refuter's recorded `verdict_reason` or `fix_reason` to paper over any of this:
-the file you pass is the original text unchanged, plus a new last line
-`_Re-checked at <sha>: ..._`, so the original reasoning and the correction are both visible.
+the file you pass is the original text unchanged, plus one new last line, so the original
+reasoning and the correction are both visible. The two fields differ in who reads that line:
+
+- `fix_reason` never posts. End it with `Re-checked at <sha>: <what changed and what you
+  found>.`
+- `verdict_reason` posts on a `CONFIRMED` or `INCONCLUSIVE` finding, inside the italic
+  `_How this was checked: ..._` / `_What could not be checked: ..._` footer. Write the new line for
+  the author, with no SHA and no underscores or other markdown (they would break the footer's
+  italics): `Re-checked against the latest push: <what still holds, with file:line>.` No review
+  vocabulary - `validate` rejects it there.
+
+After the last edit, re-run `validate` before building the payload, and stop on any `error:`:
+
+```bash
+python3 ~/.claude/pr-review/pr-review-anchor.py validate <ledger>
+```
 
 ## 3. Build the posting plan
 

@@ -347,11 +347,31 @@ for unrelated reasons, are NOT a cluster - grouping them makes one agent's judgm
 color its answer on the rest. If you cannot write a `shared_fix` that is literally the same change
 at each site, leave the items unclustered and let them get their own refuters.
 
+First clear what an earlier run in this session left beside the ledger - `ctx.json` and
+`head.diff` stay:
+
+```bash
+rm -rf "$SCRATCH/pr-review/pr<n>/briefs" "$SCRATCH/pr-review/pr<n>/verdicts" \
+       "$SCRATCH/pr-review/pr<n>/edits"
+```
+
 Then write the draft ledger to `$SCRATCH/pr-review/pr<n>/ledger.json`, with the fields marked
-`draft` below and nothing else. This is the last time you write ledger JSON directly: from here on
-every field is written by a subcommand, and none is ever edited to clear a tool error. Match every
-field name exactly - a cluster **must** use `item_ids` (not `items`, not `ids`); a cluster whose
-`item_ids` is missing reads as empty, and its items then fail `ingest` as never dispatched.
+`draft` below and nothing else. Match every field name exactly - a cluster **must** use `item_ids`
+(not `items`, not `ids`), and every item's `cluster` must agree with the `item_ids` that list it.
+
+Check the draft before any refuter sees it:
+
+```bash
+A=~/.claude/pr-review/pr-review-anchor.py; L="$SCRATCH/pr-review/pr<n>/ledger.json"
+python3 $A excerpt $L --worktree "$WT" && python3 $A validate $L --draft
+```
+
+`excerpt` fails on a `file` or `line`/`line_end` that does not exist in `$WT`; `validate --draft`
+fails on a non-integer or duplicate id, a `severity_in` outside the vocabulary, a missing
+`head_sha`/`merge_base`/`worktree`, or a `cluster` and `item_ids` that disagree. On any `error:`,
+fix the draft JSON directly and re-run both. This is the last time you write ledger JSON directly:
+once both pass, every field is written by a subcommand, and none is ever edited to clear a tool
+error.
 
 ```jsonc
 {
@@ -440,18 +460,25 @@ python3 ~/.claude/pr-review/pr-review-anchor.py ingest <ledger>
 ```
 
 `ingest` reads the dispatched set from `briefs/*.json` and the answers from `verdicts/<KEY>.txt`,
-both beside the ledger, and applies every `CLAIM_REWRITE` and `FIX_REWRITE` itself. It names every
-problem at once and changes nothing if there is one. For each refuter it names, re-dispatch once
-with the error lines appended to the prompt. If the same refuter fails again - or stalled twice -
-close its items, then run `remove-refuters` as above:
+both beside the ledger, and applies every `CLAIM_REWRITE` and `FIX_REWRITE` itself. It refuses a
+brief or reply from another draft (the run id each brief carries, echoed in the reply's `RUN:`
+line) and an item answered by more than one refuter. It names every problem at once and changes
+nothing if there is one. For each refuter it names, re-dispatch once with the error lines appended
+to the prompt, and arm the watchdog again for the re-dispatched refuters exactly as above - the
+earlier wakeup may already have stopped re-arming. If the same refuter fails again - or stalled
+twice - close its items, then run `remove-refuters` as above:
 
 ```bash
 python3 ~/.claude/pr-review/pr-review-anchor.py ingest <ledger> --inconclusive <ids> \
-  --reason "<what went wrong>"
+  --reason "Not verified: the automated check did not complete."
 ```
 
-`<ids>` is comma-separated (`4,9,17`); use `--reason "refuter stalled"` for a stall. Never edit the
-ledger to get past `ingest`.
+`<ids>` is comma-separated (`4,9,17`). `--inconclusive` closes those items even when their reply
+file exists but cannot be read. The reason is the item's `verdict_reason`, and on an INCONCLUSIVE
+item that publishes under **What could not be checked**, so write it for the PR author: say what
+was not verified, never "refuter", "stalled" or other review vocabulary - `validate` rejects it.
+Use the sentence above for a stall or a reply that never parsed. Never edit the ledger to get
+past `ingest`.
 
 ### The obligation table
 
@@ -543,8 +570,8 @@ python3 $A reanchor $L --worktree "$WT" --diff "$SCRATCH/pr-review/pr<n>/head.di
 ```
 
 On a `validate` error: an excerpt mismatch means re-run `excerpt`; a wording error (process
-vocabulary, a hedged `Fix:`, a claim over one sentence) means `edit` that text; then re-run from
-`renumber`. Never delete a finding or hand-edit the ledger to get past it. `reanchor --dry-run`
+vocabulary in a `claim`, `detail` or published `verdict_reason`, a hedged `Fix:`, a claim over one
+sentence) means `edit` that text; then re-run from `renumber`. Never delete a finding or hand-edit the ledger to get past it. `reanchor --dry-run`
 writes nothing; it shows how each anchor will resolve at post time.
 
 If the primary-status diff is non-empty, stop and show the user the changed paths; do not restore
