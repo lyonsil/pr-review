@@ -249,7 +249,11 @@ def mark_changed_lines(ledger, worktree, changed):
 
 
 TOKEN = re.compile(r"\{\{#(\d+)\}\}")
-EDITABLE_FIELDS = ("claim", "detail", "fold_note")
+EDITABLE_FIELDS = ("claim", "detail", "fold_note", "verdict_reason", "fix_reason", "fix_verdict")
+# fix_verdict may only be set to this value: a fix that no longer holds at a
+# new head can be demoted to UNVERIFIABLE, but nothing short of a refuter may
+# mark a fix SOUND or REWRITTEN.
+FIX_VERDICT_DEMOTION = "UNVERIFIABLE"
 
 
 def render_tokens(text):
@@ -303,13 +307,19 @@ def edit_field(ledger, iid, field, text):
     Replaces one editable text field of item `iid` verbatim (a single
     trailing newline is trimmed; nothing else is touched, so apostrophes,
     quotes and backticks survive byte-for-byte) - the safe alternative to an
-    inline `python -c` edit, which has corrupted this text before."""
+    inline `python -c` edit, which has corrupted this text before.
+    `fix_verdict` is the one non-text field here, and only as a demotion to
+    `FIX_VERDICT_DEMOTION` - used when a fix no longer holds at a new head."""
     if field not in EDITABLE_FIELDS:
         raise LedgerError(f"field {field!r} is not editable; only {EDITABLE_FIELDS}")
     it = next((x for x in ledger.get("items", []) if x.get("id") == iid), None)
     if it is None:
         raise LedgerError(f"no item {iid} in this ledger")
-    it[field] = text.rstrip("\n")
+    value = text.rstrip("\n")
+    if field == "fix_verdict" and value != FIX_VERDICT_DEMOTION:
+        raise LedgerError(f"fix_verdict can only be set to {FIX_VERDICT_DEMOTION}, got {value!r} - "
+                          "a stale fix can be demoted, never promoted")
+    it[field] = value
 
 
 # --- Refuter brief -----------------------------------------------------

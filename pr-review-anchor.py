@@ -1084,7 +1084,10 @@ def main():
     n.add_argument("ledger"); n.set_defaults(fn=cmd_renumber)
     ed = sub.add_parser("edit")
     ed.add_argument("ledger"); ed.add_argument("id")
-    ed.add_argument("--field", required=True); ed.add_argument("--text-file", required=True)
+    ed.add_argument("--field", required=True,
+                    help="one of: " + ", ".join(lt.EDITABLE_FIELDS)
+                    + f" (fix_verdict only to {lt.FIX_VERDICT_DEMOTION})")
+    ed.add_argument("--text-file", required=True)
     ed.set_defaults(fn=cmd_edit)
     rp = sub.add_parser("report")
     rp.add_argument("ledger"); rp.set_defaults(fn=cmd_report)

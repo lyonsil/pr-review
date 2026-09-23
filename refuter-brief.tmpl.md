@@ -208,8 +208,9 @@ The obligation table for this repo - a fix that trips a row must say so:
 Write `REASON` for the PR author, not for the pipeline. On a `CONFIRMED` verdict it publishes
 verbatim under **How this was checked**, and on `INCONCLUSIVE` under **What could not be checked**,
 so say what you checked and what you found, keep the `file:line` evidence, and leave out the review
-vocabulary. A `DOWNGRADED` reason does not publish at all - see "Recording the result" below for
-where it goes instead.
+vocabulary. A `DOWNGRADED` reason does not publish at all: your reply file is applied to the
+findings mechanically, and whatever a `DOWNGRADED` reason means for the author is folded into that
+finding's `Why it matters:` text afterward.
 
 **Do not refute on grounds that are about posting rather than truth.** Whether the anchor sits on a
 changed line is recorded in `on_changed_line` and enforced by `payload` on its own; it is never a

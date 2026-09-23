@@ -197,13 +197,24 @@ holds. Three separate passes, all required whenever `$NOW` differed from the led
    downstream notices. Re-check every selected item's fix against the new head with the same three
    properties S5 used: does every symbol it names still exist and stay reachable from the site, does
    the mechanism still apply, does the obligation table still bind the same way. Downgrade anything
-   you cannot re-establish to a constraint rather than posting a stale prescription (write the new
-   `detail` with `python3 ~/.claude/pr-review/pr-review-anchor.py edit <ledger> <id> --field
-   detail --text-file <f>`, the file under `$SCRATCH`), and set its `fix_verdict` to match.
+   you cannot re-establish to a constraint rather than posting a stale prescription, and demote
+   its `fix_verdict` to `UNVERIFIABLE` (the edits are below).
 
-Do not silently rewrite a refuter's recorded `verdict_reason` or `fix_reason` to paper over any of
-this. Append a dated `_Re-checked at <sha>: ..._` note so the original reasoning and the correction
-are both visible.
+Every change here goes through `edit`, never a hand edit of the JSON. `edit` replaces a whole field
+with a file's contents, so write each file under `$SCRATCH/pr-review/pr$NUMBER/edits/` with the
+Write tool:
+
+```bash
+A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
+python3 $A edit $L <id> --field detail --text-file <f>        # the reworded Fix: slot, whole detail
+python3 $A edit $L <id> --field fix_verdict --text-file <f>   # the file holds exactly UNVERIFIABLE
+python3 $A edit $L <id> --field fix_reason --text-file <f>    # or --field verdict_reason
+```
+
+`fix_verdict` accepts only `UNVERIFIABLE`: a stale fix can be demoted, never promoted. Do not
+silently rewrite a refuter's recorded `verdict_reason` or `fix_reason` to paper over any of this:
+the file you pass is the original text unchanged, plus a new last line
+`_Re-checked at <sha>: ..._`, so the original reasoning and the correction are both visible.
 
 ## 3. Build the posting plan
 

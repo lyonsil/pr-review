@@ -693,6 +693,23 @@ class TestEdit(unittest.TestCase):
         with self.assertRaisesRegex(lt.LedgerError, "no item 5"):
             lt.edit_field(led(item(1)), 5, "claim", "x")
 
+    def test_reason_fields_are_replaced_in_full(self):
+        for field in ("verdict_reason", "fix_reason"):
+            l = led(item(1))
+            text = "checked at a.ts:10.\n_Re-checked at abc123: still holds._\n"
+            lt.edit_field(l, 1, field, text)
+            self.assertEqual(l["items"][0][field], text.rstrip("\n"))
+
+    def test_fix_verdict_can_only_be_demoted_to_unverifiable(self):
+        l = led(item(1, fix_verdict="SOUND"))
+        lt.edit_field(l, 1, "fix_verdict", "UNVERIFIABLE\n")
+        self.assertEqual(l["items"][0]["fix_verdict"], "UNVERIFIABLE")
+        for value in ("SOUND", "REWRITTEN", "unverifiable", ""):
+            l = led(item(1, fix_verdict="UNVERIFIABLE"))
+            with self.assertRaisesRegex(lt.LedgerError, "demoted, never promoted"):
+                lt.edit_field(l, 1, "fix_verdict", value)
+            self.assertEqual(l["items"][0]["fix_verdict"], "UNVERIFIABLE")
+
 
 class TestRenumberCli(unittest.TestCase):
     def test_cmd_renumber_writes_the_ledger_and_a_backup_on_success_and_leaves_it_untouched_on_failure(self):
