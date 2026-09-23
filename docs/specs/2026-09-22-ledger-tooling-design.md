@@ -204,17 +204,21 @@ refuter may go: it is rendered into `{{ITEMS}}` and deleted by `ingest`, and `pa
 it. Verdict fields are absent until `ingest`. This is the last point at which the orchestrator
 writes ledger JSON directly.
 
-- **`edit <ledger> <id> --field claim|detail|fold_note --text-file FILE`** - replaces one
-  author-facing text field from a file (no shell quoting). Refuses any other field. Used for the
-  judgement steps: folding downgrade reasons into `Why it matters:`, quantifier-sweep rewording,
-  and lint fixes.
-- **`ingest <ledger> <verdicts-dir> [--inconclusive IDS --reason TEXT]`** - merges verdict files
-  into items. Saves `claim_original`/`fix_original`, then applies `CLAIM_REWRITE` into `claim` and
-  `FIX_REWRITE` into the `Fix:` slot of `detail`. Never writes `severity_in`. Fails on: a
-  dispatched id with no answer, an id answered twice, a key owning more than one cluster or a
-  cluster plus a stray item, a missing required field, a rewrite in the wrong slot, a stale or
-  missing `BRIEF` hash. `--inconclusive` records INCONCLUSIVE with the given reason for ids whose
-  refuter failed twice - the only sanctioned way to close an unanswered item.
+- **`edit <ledger> <id> --field claim|detail|fold_note|verdict_reason|fix_reason|fix_verdict
+  --text-file FILE`** - replaces one field from a file (no shell quoting). Refuses any other
+  field. `fix_verdict` accepts only `UNVERIFIABLE` - a stale fix can be demoted, never promoted.
+  Used for the judgement steps (folding downgrade reasons into `Why it matters:`, quantifier-sweep
+  rewording, lint fixes) and for `/pr-review-post`'s post-rebase re-verification, where
+  `verdict_reason`/`fix_reason` are replaced with the original text plus a dated
+  `_Re-checked at <sha>: ..._` note.
+- **`ingest <ledger> [--inconclusive IDS --reason TEXT]`** - merges verdict files into items,
+  reading `briefs/` and `verdicts/` from the ledger's own directory. Saves
+  `claim_original`/`fix_original`, then applies `CLAIM_REWRITE` into `claim` and `FIX_REWRITE`
+  into the `Fix:` slot of `detail`. Never writes `severity_in`. Fails on: a dispatched id with no
+  answer, an id answered twice, a key owning more than one cluster or a cluster plus a stray item,
+  a missing required field, a rewrite in the wrong slot, a stale or missing `BRIEF` hash.
+  `--inconclusive` records INCONCLUSIVE with the given reason for ids whose refuter failed twice -
+  the only sanctioned way to close an unanswered item.
 - **`excerpt <ledger> --worktree WT`** - sets each `anchor_excerpt` to lines `line..line_end` read
   from the file in `WT`.
 - **`changed-lines <ledger> --diff FILE --worktree WT`** - sets `on_changed_line` from

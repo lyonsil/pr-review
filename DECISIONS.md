@@ -11,8 +11,7 @@ is still being iterated on and the reasoning is not recoverable from the diffs.
 - **Session-scoped ledger, in the scratchpad.** Chosen for zero cleanup burden. The triage gate
   must therefore close same-day; a `/clear` between the two commands loses the review.
   *If wrong:* re-run `/pr-review`; moving the ledger to `~/.claude/` touches two paths.
-- **v1 covers fresh reviews only.** The "author responded, check their updates against my prior
-  feedback" round stays manual.
+- **Fresh reviews only until re-review mode lands (spec part B).**
 
 ## Safety of the destructive path
 
@@ -313,3 +312,32 @@ four times more common than the one three things looked for.
   as unexplained repo state; one tidying up "stray" files would have deleted another's probe
   mid-run. They are now told to use their own temp dir and never touch untracked files they did not
   create.
+
+## Pipeline v2: ledger tooling (2026-09-22)
+
+- **Mechanical steps are tools, not prose.** Seven of eight audited runs hand-built the ledger and
+  the defects that reached approval came from those scripts. *If wrong:* the subcommands are thin
+  and the prompt can call fewer of them.
+- **Schema 2, no migration.** Ledgers are session-scoped, so an old one is re-run, not upgraded.
+- **The cheaper-model refuter allowance is gone.** Broken in three runs; the saving was small.
+- **Refuter worktrees are disposable by name.** `wt-pr<n>-r<key>` skips the reaper's dirty guard;
+  the main `wt-pr<n>` keeps it. *If wrong:* a live refuter in a dead session loses probes, never
+  review state.
+- **One watchdog, no other waiting.** A replayed `ScheduleWakeup` re-entered the whole command
+  three times in one run; polling burned turns in six.
+- **DOWNGRADED means a lower severity.** A narrowed claim at the same severity is CONFIRMED with a
+  rewritten claim. REFUTED never carries a rewrite.
+- **Lint wording checked against real ledgers.** `rewrite`, `downgrad`, bare `optional` and bare
+  `not required` were dropped from the lints after they matched legitimate author-facing fixes.
+- **Obligations cite a repo file.** A user preference once posted as "the project convention".
+- **Preview prints no "written" line, and `preview.txt`'s path is deterministic**
+  (`<payload dir>/preview.txt`) - keeps an existing no-stderr guard intact. *If wrong:* one line of
+  output.
+- **The oversize-page label is chunk-neutral** ("this page exceeds the page limit; shown whole"),
+  since chunk 0 is the review body and "one comment" would mislabel it. *If wrong:* wording only.
+- **One shared demotion predicate, in `ledger_tools`, drives both `report`'s and `payload`'s
+  inline/body split.** Two copies of the routing rule had already diverged once. *If wrong:* a
+  small refactor of `build_payload`'s branch.
+- **`edit` may set `verdict_reason`, `fix_reason`, and `fix_verdict` - the last only to
+  `UNVERIFIABLE`.** `/pr-review-post`'s re-verification step needs these three without a hand edit
+  of the ledger. *If wrong:* three more editable fields.
