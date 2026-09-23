@@ -378,8 +378,15 @@ def run_id(ledger):
     return hashlib.sha256(json.dumps(basis, default=str).encode("utf-8")).hexdigest()[:12]
 
 
+def _id_order(iid):
+    """Sort key for item ids: integers numerically, anything malformed after
+    them, so a bad id is reported rather than breaking the sort."""
+    ok = isinstance(iid, int) and not isinstance(iid, bool)
+    return (0, iid, "") if ok else (1, 0, str(iid))
+
+
 def refuter_units(ledger):
-    units = {c.get("id"): sorted(c.get("item_ids") or [], key=str)
+    units = {c.get("id"): sorted(c.get("item_ids") or [], key=_id_order)
              for c in ledger.get("clusters", [])}
     for it in ledger.get("items", []):
         if not it.get("cluster"):
@@ -577,7 +584,7 @@ def _meta_errors(m, units, run):
     if key not in units:
         return [f"{key}: not a refuter unit of this ledger - a brief left over from an "
                 "earlier run; clear briefs/ and render them again with `brief`"]
-    if not isinstance(owns, list) or sorted(owns, key=str) != units[key]:
+    if not isinstance(owns, list) or sorted(owns, key=_id_order) != units[key]:
         return [f"{key}: brief owns {owns!r} but this ledger's {key} is {units[key]} - "
                 "render the brief again with `brief`"]
     if m.get("run") != run:
@@ -636,7 +643,7 @@ def ingest(ledger, briefs_dir, verdicts_dir, expected_hash, inconclusive=(), rea
         if not errs:
             valid.append(m)
     dispatched = {i for m in metas if isinstance(m.get("owns"), list) for i in m["owns"]}
-    for iid in sorted(set(by_id) - dispatched, key=str):
+    for iid in sorted(set(by_id) - dispatched, key=_id_order):
         errors.append(f"item {iid} was never dispatched")
     for m in valid:
         key, owns = m["key"], set(m["owns"])

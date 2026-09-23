@@ -234,6 +234,11 @@ class TestBrief(unittest.TestCase):
     def test_units_are_clusters_and_unclustered_items(self):
         self.assertEqual(lt.refuter_units(brief_ledger()), {"C1": [1, 2], "i3": [3]})
 
+    def test_units_list_ids_in_numeric_order(self):
+        l = led(item(2, cluster="C1"), item(10, cluster="C1"),
+                clusters=[{"id": "C1", "item_ids": [10, 2]}])
+        self.assertEqual(lt.refuter_units(l), {"C1": [2, 10]})
+
     def test_renders_every_placeholder(self):
         text, meta = lt.render_brief(brief_ledger(), "C1", CTX, "/s/pr-review/pr13")
         self.assertNotRegex(text, r"\{\{[A-Z_]+\}\}")
