@@ -186,9 +186,11 @@ false. Go to each site.
 
 Where dependencies were linked, prefer a targeted check over a broad one: the single test file,
 a type-check of the one project, the linter on the one file, a `node -e` probe. Do **not** judge a
-fix by a repo-wide typecheck or lint in this worktree - `node_modules` is a symlink to another
-checkout sitting on a different commit, so those runs produce duplicate-identifier and
-unresolved-import errors that belong to the setup, not to the fix.
+fix by a repo-wide typecheck or lint in this worktree - installed packages in `node_modules` are
+shared with another checkout sitting on a different commit, so those runs can produce
+duplicate-identifier and unresolved-import errors that belong to the setup, not to the fix.
+Workspace packages (`node_modules/<pkg>` links to the repo's own packages) point at THIS worktree,
+so a test here runs the head under review.
 
 Report one of three fix verdicts:
 

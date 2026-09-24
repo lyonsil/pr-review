@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test harness for pr-review-wt.sh. Creates throwaway git repos under $TMPDIR.
-# Expected: passed=80 failed=0
+# Expected: passed=87 failed=0
 set -uo pipefail
 # Resolve to an absolute path before any test cd's into a throwaway repo dir.
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/pr-review-wt.sh"
@@ -341,5 +341,33 @@ check "existing node_modules stays a real dir" "$([ -L "$WT/libs/a/node_modules"
 # link-deps would silently drop a stray node_modules/node_modules symlink
 # into the pre-existing directory rather than leaving it alone.
 check "no stray nested symlink is dropped in"  "$([ -e "$WT/libs/a/node_modules/node_modules" ] && echo yes || echo no)" "no"
+
+echo "== link-deps: workspace packages resolve to the worktree, not the primary checkout =="
+# A pnpm workspace links each workspace package into node_modules with a relative
+# symlink (node_modules/a -> ../libs/a). Linking the whole node_modules directory
+# resolves that link against the PRIMARY checkout, so a test in the worktree
+# silently imports the primary checkout's source instead of the head under review.
+setup_repo
+mkdir -p libs/a libs/b node_modules/@s node_modules/dep libs/b/node_modules
+echo node_modules > .gitignore
+echo '{}' > libs/a/package.json; echo '{}' > libs/b/package.json
+echo head > libs/a/index.js
+git add .gitignore libs; git commit -qm pkgs
+echo primary > libs/a/index.js   # the primary checkout's working copy differs from the head
+ln -s ../libs/a node_modules/a
+ln -s ../../libs/a node_modules/@s/a
+ln -s ../../a libs/b/node_modules/a
+echo x > node_modules/dep/index.js
+BASE=$(git rev-parse HEAD)
+WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
+OUT=$("$SCRIPT" link-deps "$WT" "$BASE" 2>&1)
+check "reports linked"                        "$(echo "$OUT" | grep -c '^linked ')" "1"
+check "root workspace link reads the head"    "$(cat "$WT/node_modules/a/index.js" 2>/dev/null)" "head"
+check "scoped workspace link reads the head"  "$(cat "$WT/node_modules/@s/a/index.js" 2>/dev/null)" "head"
+check "package workspace link reads the head" "$(cat "$WT/libs/b/node_modules/a/index.js" 2>/dev/null)" "head"
+check "third-party dep still reachable"       "$(cat "$WT/node_modules/dep/index.js" 2>/dev/null)" "x"
+check "third-party dep is the primary's"      "$(readlink -f "$WT/node_modules/dep")" "$(readlink -f "$R/node_modules/dep")"
+mkdir -p "$WT/node_modules/.vite"; echo cache > "$WT/node_modules/.vite/c"
+check "a cache written in the worktree stays out of the primary" "$([ -e "$R/node_modules/.vite/c" ] && echo leaked || echo kept)" "kept"
 
 echo; echo "passed=$PASS failed=$FAIL"; [ "$FAIL" -eq 0 ]

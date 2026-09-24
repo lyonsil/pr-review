@@ -257,17 +257,71 @@ cmd_link_deps() {
     fi
   fi
 
-  ln -s "$main_repo/node_modules" "$wt/node_modules" || {
+  # The physical path, since mirror_modules_entry compares it against `readlink -f` output.
+  local main_real wt_real
+  main_real=$(cd "$main_repo" && pwd -P) && wt_real=$(cd "$wt" && pwd -P) || {
+    echo "error: cannot resolve the physical paths of $main_repo and $wt" >&2; return 1; }
+
+  local relinked=0
+  mirror_modules_dir "$main_repo/node_modules" "$wt/node_modules" || {
     echo "error: could not link node_modules into $wt" >&2; return 1; }
 
   local extra=0 pkg
   while IFS= read -r pkg; do
     pkg=$(dirname "$pkg"); [ "$pkg" = "." ] && continue
     if [ -d "$main_repo/$pkg/node_modules" ] && [ ! -e "$wt/$pkg/node_modules" ]; then
-      ln -s "$main_repo/$pkg/node_modules" "$wt/$pkg/node_modules" && extra=$((extra+1))
+      mirror_modules_dir "$main_repo/$pkg/node_modules" "$wt/$pkg/node_modules" && extra=$((extra+1))
     fi
   done < <(git -C "$wt" ls-files -- '*package.json')
-  echo "linked $wt/node_modules (+$extra package node_modules)"
+  echo "linked $wt/node_modules (+$extra package node_modules, $relinked workspace links into the worktree)"
+}
+
+# Rebuild one node_modules directory in the worktree as a real directory whose
+# entries link back to the primary checkout's, one by one. Linking the whole
+# directory instead would resolve every workspace-package link inside it
+# (pnpm's `node_modules/shared -> ../libs/shared`) against the PRIMARY
+# checkout, so a test run in the worktree would import the primary's source
+# for every workspace package rather than the head under review - and caches a
+# tool writes into node_modules (vite's `.vite`) would land in the primary.
+# A scope directory (`@scope/`) is mirrored the same way, one level down.
+# Reads `main_real`, `wt_real` and increments `relinked` from cmd_link_deps.
+mirror_modules_dir() {
+  local src="$1" dst="$2" entry name
+  mkdir "$dst" || return 1
+  for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name=${entry##*/}
+    if [[ "$name" == @* ]] && [ -d "$entry" ] && [ ! -L "$entry" ]; then
+      mirror_modules_dir "$entry" "$dst/$name" || return 1
+    else
+      mirror_modules_entry "$entry" "$dst/$name" || return 1
+    fi
+  done
+}
+
+# Link one node_modules entry. An entry that resolves to a tracked path of the
+# primary checkout outside any node_modules is a workspace package (or a
+# `file:` dependency): point it at the same path in the worktree, when the
+# head still has it. Everything else - installed third-party packages, `.bin`,
+# the `.pnpm` store - is shared with the primary checkout as before.
+mirror_modules_entry() {
+  local src="$1" dst="$2" target rel
+  if [ -L "$src" ]; then
+    target=$(readlink -f "$src")
+    case "$target" in
+      "$main_real"/*)
+        rel=${target#"$main_real"/}
+        case "/$rel/" in
+          */node_modules/*) ;;
+          *)
+            if [ -e "$wt_real/$rel" ]; then
+              ln -s "$wt_real/$rel" "$dst" || return 1
+              relinked=$((relinked+1)); return 0
+            fi ;;
+        esac ;;
+    esac
+  fi
+  ln -s "$src" "$dst"
 }
 
 cmd_scratchpad() {

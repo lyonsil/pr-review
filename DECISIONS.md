@@ -103,6 +103,16 @@ author removed exactly that line three days later). Rulings taken in response:
   differs between the merge base and the head - a stale `node_modules` makes "I ran it and it
   passed" worse than no answer. *If wrong:* it declines more often than it needs to, which is the
   safe direction.
+- **`link-deps` mirrors each `node_modules` entry by entry instead of linking the directory.** A
+  whole-directory symlink resolves pnpm's relative workspace links (`node_modules/shared ->
+  ../libs/shared`) against the primary checkout, so every test a refuter ran in `$WT` imported the
+  primary's workspace source, not the head under review. On paranext/scripture-editors #11 that
+  broke every refuter's platform test run (`collapseSpaceRuns is not a function`), several fell
+  back to reading code, and one refuted a real defect from a static trace. Now an entry resolving to
+  a tracked path outside any `node_modules` is pointed at the same path in `$WT`, while installed
+  packages, `.bin` and the `.pnpm` store are still shared. Tool caches written into `node_modules`
+  (vite's `.vite`) stay in `$WT` instead of landing in the primary. *If wrong:* a workspace
+  package missing from the head falls back to the primary's copy, the old behavior.
 - **`severity_in` is recorded and never overwritten.** Refuters revise severity in the same
   response as the verdict, so on PR #2730 all four `high` findings were refuted AND rewritten to
   `low`. The triage table then read as though only low-severity noise had been filtered. The pair
@@ -166,8 +176,8 @@ exists is not checking it is reachable from where the fix lands. Rulings:
   no longer exist) and passes it to every refuter. Two of the six #2821 corrections were this class:
   a locale key named in one file instead of all, and the hedged fix.
 - **Rejected: apply-the-fix-and-build as the gate.** It would have caught 2 of the 5 - the other
-  three compile clean. And `link-deps` symlinks the primary checkout's `node_modules` into `$WT`
-  (`pr-review-wt.sh:215`), which is the known cause of spurious `TS6200`/`TS2300` floods and
+  three compile clean. And `link-deps` used to symlink the primary checkout's whole `node_modules`
+  into `$WT` (now mirrored per entry; see above), which was the known cause of spurious `TS6200`/`TS2300` floods and
   `import/no-unresolved` in workspace typecheck and lint, so a repo-wide check there reports the
   setup, not the fix. Refuters are pointed at targeted checks instead: the one test file, one
   project's typecheck, the linter on one file, a `node -e` probe. Reading plus probes caught 5 of 5.

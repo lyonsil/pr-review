@@ -146,8 +146,9 @@ text, copied verbatim where it says so.
 7. Snapshot the primary checkout so S6 can prove nothing touched it:
    `~/.claude/pr-review/pr-review-wt.sh primary-status "$WT" > "$SCRATCH/primary.before"`
 8. Link dependencies now, not in S5: `~/.claude/pr-review/pr-review-wt.sh link-deps "$WT" "$MERGE_BASE"`.
-   Record the `linked ...` / `declined ...` line. It links the primary checkout's `node_modules`
-   (per package, for npm, pnpm, yarn and bun) only when no tracked lockfile differs between
+   Record the `linked ...` / `declined ...` line. It links the primary checkout's installed
+   `node_modules` entries (per package, for npm, pnpm, yarn and bun), with workspace-package links
+   pointed at `$WT` so tests run the head under review, only when no tracked lockfile differs between
    `MERGE_BASE` and the head - a stale dependency tree would make "I ran it and it passed" worse
    than no answer. The line goes to every refuter through the brief context file (S1).
 9. Find this repo's real commands - read the root `package.json` scripts, `nx.json`/`project.json`,
