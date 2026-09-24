@@ -177,7 +177,7 @@ Invoke it with the level as the FIRST token of the arguments. The built-in reuse
 the user typed when none is given, so an unspecified level silently downgrades the review:
 
 ```
-Skill(skill="code-review", args="max <PR-url-or-target> - <the instructions below>")
+Skill(skill="code-review", args="high <PR-url-or-target> - <the instructions below>")
 ```
 
 Tell it explicitly:
@@ -190,7 +190,7 @@ Tell it explicitly:
   Quote the section into the arguments rather than referring to it; the skill cannot read this
   file. Findings that arrive in that shape need no rewriting in S2.
 
-**Verify the right one ran before continuing.** A `max` review spawns well more than 5 subagents and
+**Verify the right one ran before continuing.** A `high` review spawns well more than 5 subagents and
 posts nothing. If you see exactly 5 parallel Sonnet reviewers, or anything gets posted to the PR at
 this stage, the plugin ran: STOP, tell the user, and say whether a comment was posted so they can
 delete it. Do not proceed to S2 on a plugin-produced report - it is capped and filtered differently
