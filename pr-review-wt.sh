@@ -9,6 +9,19 @@ MAX_AGE_HOURS="${REVIEW_WT_MAX_AGE_HOURS:-24}"
 # error/stranded-branch line always prints.
 VERBOSE="${REVIEW_WT_VERBOSE:-0}"
 
+# Paths reach this script in two spellings. bash computes POSIX form
+# (/tmp/..., /c/Users/...); git always reports its own native form, which on
+# Windows is C:/Users/.... Any comparison between the two must pass through
+# here first, or it silently never matches. cygpath ships only with
+# MSYS/Cygwin, so on Linux and macOS this returns its argument unchanged.
+native_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -m "$1" 2>/dev/null || printf '%s' "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 # This session's scratchpad directory, or nothing.
 #
 # $CLAUDE_SCRATCHPAD wins if the harness ever sets it, but today it does not
@@ -29,6 +42,11 @@ scratchpad_path() {
   local sp
   if [ -n "${CLAUDE_SCRATCHPAD:-}" ]; then
     sp="$CLAUDE_SCRATCHPAD"
+    # A drive-letter value has to become POSIX before the absolute-path check
+    # below, which only recognizes a leading slash and would reject it.
+    case "$sp" in
+      [A-Za-z]:[\\/]*) command -v cygpath >/dev/null 2>&1 && sp=$(cygpath -u "$sp") ;;
+    esac
   elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
     sp="/tmp/claude-$(id -u)/$(pwd -P | tr / -)/$CLAUDE_CODE_SESSION_ID/scratchpad"
   else
@@ -36,6 +54,10 @@ scratchpad_path() {
   fi
   while [ "${sp%/}" != "$sp" ]; do sp="${sp%/}"; done
   case "$sp" in /?*) ;; *) return 1 ;; esac
+  # Emit the form git reports, since consider() prefix-matches this against
+  # paths taken straight from `git worktree list`, and callers grep it against
+  # that same output.
+  sp=$(native_path "$sp")
   printf '%s\n' "$sp"
 }
 
@@ -77,7 +99,9 @@ primary_repo_of() {
   local wt="$1" common
   common=$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null) || {
     echo "error: not a git worktree: $wt" >&2; return 1; }
-  case "$common" in /*) ;; *) common="$wt/$common" ;; esac
+  # A drive letter is absolute too; read as relative it would be joined onto
+  # $wt, yielding a path that cannot exist.
+  case "$common" in /*|[A-Za-z]:[\\/]*) ;; *) common="$wt/$common" ;; esac
   printf '%s\n' "$common/.."
 }
 
@@ -184,9 +208,14 @@ cmd_create() {
 cmd_remove() {
   local path="$1"
   # pwd -P (not pwd): a symlinked path won't string-match the registered
-  # worktree's real path unless symlink components are resolved.
-  if git worktree list --porcelain | grep -qxF "worktree $path" \
-  || git worktree list --porcelain | grep -qxF "worktree $(cd "$path" 2>/dev/null && pwd -P)"; then
+  # worktree's real path unless symlink components are resolved. Both
+  # candidates are converted to git's own path form, which is what the
+  # registration they are matched against is spelled in.
+  local registered real
+  registered=$(native_path "$path")
+  real=$(cd "$path" 2>/dev/null && pwd -P) && real=$(native_path "$real")
+  if git worktree list --porcelain | grep -qxF "worktree $registered" \
+  || { [ -n "$real" ] && git worktree list --porcelain | grep -qxF "worktree $real"; }; then
     git worktree unlock "$path" >/dev/null 2>&1
     git worktree remove --force "$path" >/dev/null 2>&1
   fi
@@ -304,6 +333,12 @@ mirror_modules_dir() {
 # `file:` dependency): point it at the same path in the worktree, when the
 # head still has it. Everything else - installed third-party packages, `.bin`,
 # the `.pnpm` store - is shared with the primary checkout as before.
+#
+# Every link here must be a real symlink. Git Bash's `ln -s` copies the target
+# instead unless MSYS opts in, which would duplicate the whole of the primary
+# checkout's node_modules into the worktree and sever the sharing this exists
+# for; nativestrict also fails loudly rather than falling back to that copy.
+# The variable is meaningless off MSYS.
 mirror_modules_entry() {
   local src="$1" dst="$2" target rel
   if [ -L "$src" ]; then
@@ -315,13 +350,13 @@ mirror_modules_entry() {
           */node_modules/*) ;;
           *)
             if [ -e "$wt_real/$rel" ]; then
-              ln -s "$wt_real/$rel" "$dst" || return 1
+              MSYS=winsymlinks:nativestrict ln -s "$wt_real/$rel" "$dst" || return 1
               relinked=$((relinked+1)); return 0
             fi ;;
         esac ;;
     esac
   fi
-  ln -s "$src" "$dst"
+  MSYS=winsymlinks:nativestrict ln -s "$src" "$dst"
 }
 
 cmd_scratchpad() {

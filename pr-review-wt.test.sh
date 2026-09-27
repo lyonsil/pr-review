@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Test harness for pr-review-wt.sh. Creates throwaway git repos under $TMPDIR.
-# Expected: passed=87 failed=0
+# Expected: passed=99 failed=0
 set -uo pipefail
 # Resolve to an absolute path before any test cd's into a throwaway repo dir.
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/pr-review-wt.sh"
@@ -17,6 +17,20 @@ setup_repo() {
 }
 
 age_dir() { touch -d "$2 hours ago" "$1"; }
+
+# Paths the script reports are spelled in git's own path form, so a POSIX
+# expectation has to be converted the same way the script converts it.
+# cygpath ships only with MSYS/Cygwin, so this is identity off Windows and
+# every such expectation stays byte-for-byte what it was there.
+native() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+
+# Git Bash's `ln -s` copies the target instead of linking unless MSYS opts in,
+# which would leave a fixture that asserts on a symlink with a directory copy
+# and make the test vacuous. Scoped to each call, never exported: the script
+# under test has to opt in for itself or its own bare `ln -s` goes undetected.
+ln_s() { MSYS=winsymlinks:nativestrict ln -s "$@"; }
 
 echo "== reap: removes an old, unlocked review worktree =="
 setup_repo
@@ -121,7 +135,7 @@ echo "== remove: resolves a symlinked path to the registered worktree =="
 setup_repo
 mkdir -p scratchpad
 "$SCRIPT" create "$R/scratchpad/wt-real" "$SHA" >/dev/null
-ln -s "$R/scratchpad/wt-real" "$R/scratchpad/wt-link"
+ln_s "$R/scratchpad/wt-real" "$R/scratchpad/wt-link"
 "$SCRIPT" remove "$R/scratchpad/wt-link"
 check "worktree deregistered" "$(git worktree list | grep -c wt-real)" "0"
 check "real dir gone" "$([ -d "$R/scratchpad/wt-real" ] && echo yes || echo no)" "no"
@@ -129,14 +143,14 @@ check "real dir gone" "$([ -d "$R/scratchpad/wt-real" ] && echo yes || echo no)"
 echo "== scratchpad: honours an explicit \$CLAUDE_SCRATCHPAD =="
 setup_repo
 OUT=$(CLAUDE_SCRATCHPAD=/some/where/scratchpad "$SCRIPT" scratchpad)
-check "echoes it verbatim" "$OUT" "/some/where/scratchpad"
+check "echoes it in git path form" "$OUT" "$(native /some/where/scratchpad)"
 OUT=$(CLAUDE_SCRATCHPAD=/some/where/scratchpad/ "$SCRIPT" scratchpad)
-check "strips a trailing slash" "$OUT" "/some/where/scratchpad"
+check "strips a trailing slash" "$OUT" "$(native /some/where/scratchpad)"
 
 echo "== scratchpad: derives the path from \$CLAUDE_CODE_SESSION_ID =="
 setup_repo
 CWD=$(pwd -P)
-WANT="/tmp/claude-$(id -u)/$(printf '%s' "$CWD" | tr / -)/sess-abc/scratchpad"
+WANT=$(native "/tmp/claude-$(id -u)/$(printf '%s' "$CWD" | tr / -)/sess-abc/scratchpad")
 OUT=$(env -u CLAUDE_SCRATCHPAD CLAUDE_CODE_SESSION_ID=sess-abc "$SCRIPT" scratchpad)
 check "derived path"    "$OUT" "$WANT"
 OUT=$(env -u CLAUDE_SCRATCHPAD -u CLAUDE_CODE_SESSION_ID "$SCRIPT" scratchpad 2>/dev/null)
@@ -151,7 +165,7 @@ mkdir -p "$SP"
 git worktree add -q --detach "$SP/wt-pr88" "$SHA"
 age_dir "$SP/wt-pr88" 999
 OUT=$(env -u CLAUDE_SCRATCHPAD CLAUDE_CODE_SESSION_ID=sess-derive "$SCRIPT" reap 2>&1)
-check "reports current-session"  "$(echo "$OUT" | grep -c "^kept $SP/wt-pr88 current-session$")" "1"
+check "reports current-session"  "$(echo "$OUT" | grep -c "^kept $(native "$SP")/wt-pr88 current-session$")" "1"
 check "still registered"         "$(git worktree list | grep -c wt-pr88)" "1"
 check "directory survives"       "$([ -d "$SP/wt-pr88" ] && echo yes || echo no)" "yes"
 # Same worktree, no session id to derive from: the exclusion cannot resolve and
@@ -189,9 +203,9 @@ check "bad explicit value does not fall back to derivation" "$OUT" ""
 
 echo "== scratchpad: derives from the REAL cwd through a symlink =="
 setup_repo
-mkdir -p "$R/real"; ln -s "$R/real" "$R/link"
+mkdir -p "$R/real"; ln_s "$R/real" "$R/link"
 OUT=$(cd "$R/link" && env -u CLAUDE_SCRATCHPAD CLAUDE_CODE_SESSION_ID=sess-sym "$SCRIPT" scratchpad)
-WANT="/tmp/claude-$(id -u)/$(cd "$R/real" && pwd -P | tr / -)/sess-sym/scratchpad"
+WANT=$(native "/tmp/claude-$(id -u)/$(cd "$R/real" && pwd -P | tr / -)/sess-sym/scratchpad")
 check "uses pwd -P not pwd" "$OUT" "$WANT"
 
 echo "== reap: rejects an unrecognized argument =="
@@ -258,7 +272,7 @@ echo dirt > "$SP/wt-pr5-rc3/probe.txt"; echo dirt > "$SP/wt-pr5/probe.txt"
 age_dir "$SP/wt-pr5-rc3" 30; age_dir "$SP/wt-pr5" 30
 OUT=$(CLAUDE_SCRATCHPAD=/elsewhere/scratchpad "$SCRIPT" reap 2>&1)
 check "dirty refuter wt reaped"   "$(git worktree list | grep -c wt-pr5-rc3)" "0"
-check "dirty main wt kept"        "$(echo "$OUT" | grep -c "kept $SP/wt-pr5 dirty-")" "1"
+check "dirty main wt kept"        "$(echo "$OUT" | grep -c "kept $(native "$SP")/wt-pr5 dirty-")" "1"
 
 echo "== reap: current-session refuter worktree is kept even when dirty =="
 setup_repo
@@ -354,9 +368,9 @@ echo '{}' > libs/a/package.json; echo '{}' > libs/b/package.json
 echo head > libs/a/index.js
 git add .gitignore libs; git commit -qm pkgs
 echo primary > libs/a/index.js   # the primary checkout's working copy differs from the head
-ln -s ../libs/a node_modules/a
-ln -s ../../libs/a node_modules/@s/a
-ln -s ../../a libs/b/node_modules/a
+ln_s ../libs/a node_modules/a
+ln_s ../../libs/a node_modules/@s/a
+ln_s ../../a libs/b/node_modules/a
 echo x > node_modules/dep/index.js
 BASE=$(git rev-parse HEAD)
 WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
@@ -369,5 +383,73 @@ check "third-party dep still reachable"       "$(cat "$WT/node_modules/dep/index
 check "third-party dep is the primary's"      "$(readlink -f "$WT/node_modules/dep")" "$(readlink -f "$R/node_modules/dep")"
 mkdir -p "$WT/node_modules/.vite"; echo cache > "$WT/node_modules/.vite/c"
 check "a cache written in the worktree stays out of the primary" "$([ -e "$R/node_modules/.vite/c" ] && echo leaked || echo kept)" "kept"
+
+echo "== scratchpad: prints the same spelling git registers a worktree under =="
+setup_repo
+SP="$R/scratchpad"; mkdir -p "$SP"
+git worktree add -q --detach "$SP/wt-pr91" "$SHA"
+# Callers filter `git worktree list` by this value, and consider() prefix-
+# matches it against the same output, so the two spellings of one directory
+# have to collapse to a single spelling before either comparison happens.
+OUT=$(env -u CLAUDE_CODE_SESSION_ID CLAUDE_SCRATCHPAD="$SP" "$SCRIPT" scratchpad)
+check "prefixes the registered worktree" \
+  "$(git worktree list --porcelain | grep -cxF "worktree $OUT/wt-pr91")" "1"
+
+echo "== scratchpad: honours a \$CLAUDE_SCRATCHPAD in git's own path form =="
+setup_repo
+SP="$R/scratchpad"; mkdir -p "$SP"
+git worktree add -q --detach "$SP/wt-pr92" "$SHA"
+age_dir "$SP/wt-pr92" 999
+# Either spelling names the same directory, and a value the platform hands
+# over in the other one must not read as "not an absolute path" and be
+# discarded - that would drop the exclusion protecting the live worktree.
+OUT=$(env -u CLAUDE_CODE_SESSION_ID CLAUDE_SCRATCHPAD="$(native "$SP")" "$SCRIPT" scratchpad); RC=$?
+check "accepted, not rejected"          "$RC" "0"
+check "resolves to the same directory"  "$OUT" "$(native "$SP")"
+OUT=$(env -u CLAUDE_CODE_SESSION_ID CLAUDE_SCRATCHPAD="$(native "$SP")" "$SCRIPT" reap 2>&1)
+check "protects the session's worktree" "$(git worktree list | grep -c wt-pr92)" "1"
+
+echo "== primary-status resolves the primary checkout without a git error =="
+setup_repo
+echo change >> f.txt
+WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
+ERR=$("$SCRIPT" primary-status "$WT" 2>&1 >/dev/null); RC=$?
+# An absolute --git-common-dir mistaken for a relative one is joined onto the
+# worktree path, and git then fails on a directory that cannot exist.
+check "exits 0"                 "$RC" "0"
+check "nothing on stderr"       "$ERR" ""
+
+echo "== remove: unlocks and deregisters, not just deletes the directory =="
+setup_repo
+mkdir -p scratchpad
+"$SCRIPT" create "$R/scratchpad/wt-pr93" "$SHA" >/dev/null
+"$SCRIPT" remove "$R/scratchpad/wt-pr93"
+# `git worktree prune` skips a locked worktree, so a lock still standing here
+# means the path never matched its registration and nothing but the directory
+# was removed - leaving a registration no later prune can ever clear.
+check "no lock left behind" "$(git worktree list --porcelain | grep -c '^locked')" "0"
+check "deregistered"        "$(git worktree list | grep -c wt-pr93)" "0"
+
+echo "== link-deps shares by link, never by copy =="
+# Copying instead of linking duplicates the whole of the primary checkout's
+# node_modules into the worktree and stops it tracking either tree, which
+# reads as a successful link and is not one.
+setup_repo
+mkdir -p libs/a node_modules/dep
+echo node_modules > .gitignore
+echo '{}' > libs/a/package.json; echo head > libs/a/index.js
+git add .gitignore libs; git commit -qm pkgs
+ln_s ../libs/a node_modules/a
+echo x > node_modules/dep/index.js
+BASE=$(git rev-parse HEAD)
+WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
+"$SCRIPT" link-deps "$WT" "$BASE" >/dev/null
+check "third-party entry is a symlink" "$([ -L "$WT/node_modules/dep" ] && echo yes || echo no)" "yes"
+check "workspace entry is a symlink"   "$([ -L "$WT/node_modules/a" ] && echo yes || echo no)" "yes"
+# Written after linking, so only a live link can reach it.
+echo late > "$R/node_modules/dep/late.js"
+check "third-party entry tracks the primary" "$(cat "$WT/node_modules/dep/late.js" 2>/dev/null)" "late"
+echo late > "$WT/libs/a/late.js"
+check "workspace entry tracks the worktree"  "$(cat "$WT/node_modules/a/late.js" 2>/dev/null)" "late"
 
 echo; echo "passed=$PASS failed=$FAIL"; [ "$FAIL" -eq 0 ]
