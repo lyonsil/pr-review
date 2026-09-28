@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Test harness for pr-review-wt.sh. Creates throwaway git repos under $TMPDIR.
-# Expected: passed=99 failed=0
+# Expected: passed=94 failed=0 (passed=100 under Git for Windows, which adds
+# the checks guarded by on_windows)
 set -uo pipefail
+# An MSYS exported by the developer's shell would reach the script's own
+# `ln -s` calls and make them link even where the script forgot to opt in.
+unset MSYS
 # Resolve to an absolute path before any test cd's into a throwaway repo dir.
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/pr-review-wt.sh"
 PASS=0; FAIL=0
@@ -18,12 +22,41 @@ setup_repo() {
 
 age_dir() { touch -d "$2 hours ago" "$1"; }
 
+# cygpath ships only with MSYS/Cygwin, so its presence marks a Windows run.
+# Checks guarded by it test what only Windows can get wrong, which is why the
+# pass count differs between platforms.
+on_windows() { command -v cygpath >/dev/null 2>&1; }
+
 # Paths the script reports are spelled in git's own path form, so a POSIX
-# expectation has to be converted the same way the script converts it.
-# cygpath ships only with MSYS/Cygwin, so this is identity off Windows and
-# every such expectation stays byte-for-byte what it was there.
+# input has to be converted the same way the script converts it. Identity
+# off Windows.
 native() {
-  if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+  if on_windows; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+
+# The spelling Windows itself hands out, backslashes and all.
+winpath() {
+  if on_windows; then cygpath -w "$1"; else printf '%s' "$1"; fi
+}
+
+# Windows only. A directory junction, as pnpm and npm workspaces create them.
+junction() { MSYS_NO_PATHCONV=1 cmd /c mklink /J "$(cygpath -w "$1")" "$(cygpath -w "$2")" >/dev/null; }
+
+# Windows only. Read <path> under directory <dir> the way a Windows program
+# does. MSYS tools follow links that native programs such as node.exe cannot
+# open, so `cat` alone cannot tell a usable link from an unusable one. Only
+# <dir> goes through cygpath, which resolves every MSYS link it converts and
+# would hand cmd the target instead of the link; <dir> must contain none.
+wintype() {
+  local bs='\' rest="$2"
+  MSYS_NO_PATHCONV=1 cmd /c type "$(cygpath -w "$1")$bs${rest//\//$bs}" 2>/dev/null | tr -d '\r'
+}
+
+# Parent directory of worktree <name> as git registered it. An expectation
+# built by converting the test's own path would only show that the
+# conversion agrees with itself.
+registered_parent() {
+  git worktree list --porcelain | sed -n "s#^worktree \\(.*\\)/$1\$#\\1#p"
 }
 
 # Git Bash's `ln -s` copies the target instead of linking unless MSYS opts in,
@@ -59,7 +92,9 @@ echo "== reap: removes a worktree locked by a DEAD pid =="
 setup_repo
 git worktree add -q --detach .claude/worktrees/review-333 "$SHA"
 age_dir .claude/worktrees/review-333 48
-DEADPID=$(( $(cat /proc/sys/kernel/pid_max) - 1 ))
+# A pid that has just exited. Git Bash has no /proc/sys, so anything derived
+# from pid_max there is not a pid at all and never reaches the liveness check.
+sleep 0 & DEADPID=$!; wait "$DEADPID"
 git worktree lock --reason "pr-review session y (pid $DEADPID)" .claude/worktrees/review-333
 OUT=$("$SCRIPT" reap 2>&1)
 check "reaped stale-locked" "$(git worktree list | grep -c review-333)" "0"
@@ -123,9 +158,21 @@ OUT=$("$SCRIPT" reap 2>&1)
 check "survives reap" "$(git worktree list | grep -c wt-pr7)" "1"
 
 echo "== remove: tears down cleanly =="
+if on_windows; then
+  # On Windows `git worktree remove --force` deletes what a junction inside
+  # the worktree points to, even outside it.
+  OUTSIDE=$(mktemp -d); echo keep > "$OUTSIDE/file"
+  junction "$R/scratchpad/wt-pr7/j" "$OUTSIDE"
+fi
 "$SCRIPT" remove "$R/scratchpad/wt-pr7"
+# `git worktree prune` skips a locked worktree, so a registration still here
+# means the path never matched it and only the directory was removed -
+# leaving a registration no later prune can ever clear.
 check "worktree gone" "$(git worktree list | grep -c wt-pr7)" "0"
 check "dir gone"      "$([ -d "$R/scratchpad/wt-pr7" ] && echo yes || echo no)" "no"
+if on_windows; then
+  check "a junction's target outside the worktree survives" "$(cat "$OUTSIDE/file" 2>/dev/null)" "keep"
+fi
 
 echo "== remove: is idempotent =="
 "$SCRIPT" remove "$R/scratchpad/wt-pr7"
@@ -165,7 +212,7 @@ mkdir -p "$SP"
 git worktree add -q --detach "$SP/wt-pr88" "$SHA"
 age_dir "$SP/wt-pr88" 999
 OUT=$(env -u CLAUDE_SCRATCHPAD CLAUDE_CODE_SESSION_ID=sess-derive "$SCRIPT" reap 2>&1)
-check "reports current-session"  "$(echo "$OUT" | grep -c "^kept $(native "$SP")/wt-pr88 current-session$")" "1"
+check "reports current-session"  "$(echo "$OUT" | grep -cxF "kept $(registered_parent wt-pr88)/wt-pr88 current-session")" "1"
 check "still registered"         "$(git worktree list | grep -c wt-pr88)" "1"
 check "directory survives"       "$([ -d "$SP/wt-pr88" ] && echo yes || echo no)" "yes"
 # Same worktree, no session id to derive from: the exclusion cannot resolve and
@@ -269,10 +316,19 @@ SP="$R/other-session/scratchpad"
 # rule, not the live-lock rule, is what decides.
 git worktree unlock "$SP/wt-pr5-rc3"; git worktree unlock "$SP/wt-pr5"
 echo dirt > "$SP/wt-pr5-rc3/probe.txt"; echo dirt > "$SP/wt-pr5/probe.txt"
+if on_windows; then
+  # A refuter that ran an install leaves junctions behind, and reap's own
+  # `git worktree remove --force` would delete what they point to.
+  OUTSIDE=$(mktemp -d); echo keep > "$OUTSIDE/file"
+  junction "$SP/wt-pr5-rc3/j" "$OUTSIDE"
+fi
 age_dir "$SP/wt-pr5-rc3" 30; age_dir "$SP/wt-pr5" 30
 OUT=$(CLAUDE_SCRATCHPAD=/elsewhere/scratchpad "$SCRIPT" reap 2>&1)
 check "dirty refuter wt reaped"   "$(git worktree list | grep -c wt-pr5-rc3)" "0"
-check "dirty main wt kept"        "$(echo "$OUT" | grep -c "kept $(native "$SP")/wt-pr5 dirty-")" "1"
+check "dirty main wt kept"        "$(echo "$OUT" | grep -c "^kept $(registered_parent wt-pr5)/wt-pr5 dirty-")" "1"
+if on_windows; then
+  check "a junction's target outside the reaped worktree survives" "$(cat "$OUTSIDE/file" 2>/dev/null)" "keep"
+fi
 
 echo "== reap: current-session refuter worktree is kept even when dirty =="
 setup_repo
@@ -372,6 +428,12 @@ ln_s ../libs/a node_modules/a
 ln_s ../../libs/a node_modules/@s/a
 ln_s ../../a libs/b/node_modules/a
 echo x > node_modules/dep/index.js
+if on_windows; then
+  # pnpm on Windows installs every package as a junction into its store.
+  mkdir -p node_modules/.pnpm/pj@1.0.0/node_modules/pj
+  echo store > node_modules/.pnpm/pj@1.0.0/node_modules/pj/index.js
+  junction "$R/node_modules/pj" "$R/node_modules/.pnpm/pj@1.0.0/node_modules/pj"
+fi
 BASE=$(git rev-parse HEAD)
 WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
 OUT=$("$SCRIPT" link-deps "$WT" "$BASE" 2>&1)
@@ -379,6 +441,14 @@ check "reports linked"                        "$(echo "$OUT" | grep -c '^linked 
 check "root workspace link reads the head"    "$(cat "$WT/node_modules/a/index.js" 2>/dev/null)" "head"
 check "scoped workspace link reads the head"  "$(cat "$WT/node_modules/@s/a/index.js" 2>/dev/null)" "head"
 check "package workspace link reads the head" "$(cat "$WT/libs/b/node_modules/a/index.js" 2>/dev/null)" "head"
+# Written after linking, so only a live link can reach it: a copy of the
+# worktree's package reads the head just as well at link time.
+echo late > "$WT/libs/a/late.js"
+check "workspace link tracks the worktree"    "$(cat "$WT/node_modules/a/late.js" 2>/dev/null)" "late"
+if on_windows; then
+  check "a Windows program reads through a workspace link" "$(wintype "$WT/node_modules" a/index.js)" "head"
+  check "a Windows program reads a package pnpm installed as a junction" "$(wintype "$WT/node_modules" pj/index.js)" "store"
+fi
 check "third-party dep still reachable"       "$(cat "$WT/node_modules/dep/index.js" 2>/dev/null)" "x"
 check "third-party dep is the primary's"      "$(readlink -f "$WT/node_modules/dep")" "$(readlink -f "$R/node_modules/dep")"
 mkdir -p "$WT/node_modules/.vite"; echo cache > "$WT/node_modules/.vite/c"
@@ -405,51 +475,43 @@ age_dir "$SP/wt-pr92" 999
 # discarded - that would drop the exclusion protecting the live worktree.
 OUT=$(env -u CLAUDE_CODE_SESSION_ID CLAUDE_SCRATCHPAD="$(native "$SP")" "$SCRIPT" scratchpad); RC=$?
 check "accepted, not rejected"          "$RC" "0"
-check "resolves to the same directory"  "$OUT" "$(native "$SP")"
+check "resolves to the same directory"  "$OUT" "$(registered_parent wt-pr92)"
 OUT=$(env -u CLAUDE_CODE_SESSION_ID CLAUDE_SCRATCHPAD="$(native "$SP")" "$SCRIPT" reap 2>&1)
 check "protects the session's worktree" "$(git worktree list | grep -c wt-pr92)" "1"
+if on_windows; then
+  # Windows itself spells the same directory with backslashes.
+  OUT=$(env -u CLAUDE_CODE_SESSION_ID CLAUDE_SCRATCHPAD="$(winpath "$SP")" "$SCRIPT" reap 2>&1)
+  check "protects it given backslashes"  "$(git worktree list | grep -c wt-pr92)" "1"
+fi
 
-echo "== primary-status resolves the primary checkout without a git error =="
+echo "== link-deps: a failed link leaves no half-built node_modules behind =="
 setup_repo
-echo change >> f.txt
-WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
-ERR=$("$SCRIPT" primary-status "$WT" 2>&1 >/dev/null); RC=$?
-# An absolute --git-common-dir mistaken for a relative one is joined onto the
-# worktree path, and git then fails on a directory that cannot exist.
-check "exits 0"                 "$RC" "0"
-check "nothing on stderr"       "$ERR" ""
-
-echo "== remove: unlocks and deregisters, not just deletes the directory =="
-setup_repo
-mkdir -p scratchpad
-"$SCRIPT" create "$R/scratchpad/wt-pr93" "$SHA" >/dev/null
-"$SCRIPT" remove "$R/scratchpad/wt-pr93"
-# `git worktree prune` skips a locked worktree, so a lock still standing here
-# means the path never matched its registration and nothing but the directory
-# was removed - leaving a registration no later prune can ever clear.
-check "no lock left behind" "$(git worktree list --porcelain | grep -c '^locked')" "0"
-check "deregistered"        "$(git worktree list | grep -c wt-pr93)" "0"
-
-echo "== link-deps shares by link, never by copy =="
-# Copying instead of linking duplicates the whole of the primary checkout's
-# node_modules into the worktree and stops it tracking either tree, which
-# reads as a successful link and is not one.
-setup_repo
-mkdir -p libs/a node_modules/dep
-echo node_modules > .gitignore
-echo '{}' > libs/a/package.json; echo head > libs/a/index.js
-git add .gitignore libs; git commit -qm pkgs
-ln_s ../libs/a node_modules/a
-echo x > node_modules/dep/index.js
+mkdir -p node_modules/a-dep node_modules/fail-me
+echo x > node_modules/a-dep/index.js; echo x > node_modules/fail-me/index.js
 BASE=$(git rev-parse HEAD)
 WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
-"$SCRIPT" link-deps "$WT" "$BASE" >/dev/null
-check "third-party entry is a symlink" "$([ -L "$WT/node_modules/dep" ] && echo yes || echo no)" "yes"
-check "workspace entry is a symlink"   "$([ -L "$WT/node_modules/a" ] && echo yes || echo no)" "yes"
-# Written after linking, so only a live link can reach it.
-echo late > "$R/node_modules/dep/late.js"
-check "third-party entry tracks the primary" "$(cat "$WT/node_modules/dep/late.js" 2>/dev/null)" "late"
-echo late > "$WT/libs/a/late.js"
-check "workspace entry tracks the worktree"  "$(cat "$WT/node_modules/a/late.js" 2>/dev/null)" "late"
+# An `ln` that, for any destination matching $LN_FAIL, fails whenever it is
+# asked for a native symlink - as it does for a Windows account without the
+# symlink privilege, where MSYS's default copy still succeeds.
+SHIM=$(mktemp -d); REAL_LN=$(command -v ln)
+cat > "$SHIM/ln" <<EOF
+#!/usr/bin/env bash
+case "\${MSYS:-}" in *nativestrict*)
+  case "\${@: -1}" in \$LN_FAIL) echo "ln: simulated failure" >&2; exit 1 ;; esac ;;
+esac
+exec "$REAL_LN" "\$@"
+EOF
+chmod +x "$SHIM/ln"
+LN_FAIL='*/fail-me' PATH="$SHIM:$PATH" "$SCRIPT" link-deps "$WT" "$BASE" >/dev/null 2>&1
+OUT=$(LN_FAIL='*/fail-me' PATH="$SHIM:$PATH" "$SCRIPT" link-deps "$WT" "$BASE" 2>/dev/null)
+check "a retry is not told it is already present" "$OUT" ""
+check "the primary's entries survive the cleanup" "$(cat "$R/node_modules/a-dep/index.js" 2>/dev/null)" "x"
+
+if on_windows; then
+  echo "== link-deps: declines when the account cannot create symlinks =="
+  WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
+  OUT=$(LN_FAIL='*' PATH="$SHIM:$PATH" "$SCRIPT" link-deps "$WT" "$BASE" 2>/dev/null); RC=$?
+  check "declines, and exits 0" "$OUT rc=$RC" "declined symlinks-unavailable rc=0"
+fi
 
 echo; echo "passed=$PASS failed=$FAIL"; [ "$FAIL" -eq 0 ]

@@ -9,13 +9,18 @@ MAX_AGE_HOURS="${REVIEW_WT_MAX_AGE_HOURS:-24}"
 # error/stranded-branch line always prints.
 VERBOSE="${REVIEW_WT_VERBOSE:-0}"
 
+# cygpath ships only with MSYS/Cygwin, so its presence is what marks this
+# script as running on Windows. Everything gated on it is a no-op on Linux
+# and macOS.
+on_windows() { command -v cygpath >/dev/null 2>&1; }
+
 # Paths reach this script in two spellings. bash computes POSIX form
 # (/tmp/..., /c/Users/...); git always reports its own native form, which on
 # Windows is C:/Users/.... Any comparison between the two must pass through
-# here first, or it silently never matches. cygpath ships only with
-# MSYS/Cygwin, so on Linux and macOS this returns its argument unchanged.
+# here first, or it silently never matches. Off Windows this returns its
+# argument unchanged.
 native_path() {
-  if command -v cygpath >/dev/null 2>&1; then
+  if on_windows; then
     cygpath -m "$1" 2>/dev/null || printf '%s' "$1"
   else
     printf '%s' "$1"
@@ -45,7 +50,7 @@ scratchpad_path() {
     # A drive-letter value has to become POSIX before the absolute-path check
     # below, which only recognizes a leading slash and would reject it.
     case "$sp" in
-      [A-Za-z]:[\\/]*) command -v cygpath >/dev/null 2>&1 && sp=$(cygpath -u "$sp") ;;
+      [A-Za-z]:[\\/]*) on_windows && sp=$(cygpath -u "$sp") ;;
     esac
   elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
     sp="/tmp/claude-$(id -u)/$(pwd -P | tr / -)/$CLAUDE_CODE_SESSION_ID/scratchpad"
@@ -84,6 +89,27 @@ age_hours() {
 # and must still fall through to the registration-only cleanup path below.
 dirty_count() {
   git -C "$1" status --porcelain 2>/dev/null | wc -l | tr -d ' '
+}
+
+# Unlink every symlink and junction inside worktree <wt>, following none of
+# them. Must run before any `git worktree remove --force`: on Windows that
+# recurses through a directory junction and deletes the contents of whatever
+# it points to, outside the worktree included, and package managers there
+# (pnpm, npm workspaces) install with junctions. MSYS reports a junction as a
+# symlink, so `find -type l` lists it without descending into it, and `rm`
+# unlinks it without following it. git follows no symlink off Windows, and no
+# native one on Windows, so a junction is the only hazard and this is
+# Windows-only.
+#
+# A no-op for anything but the root of a linked worktree, whose .git is a
+# file: this sweeps a whole tree, so an empty or mistaken argument must
+# never reach `find` as `/` or as the primary checkout.
+unlink_links_in_worktree() {
+  local wt="${1:-}"
+  on_windows || return 0
+  [ -n "$wt" ] && [ -f "$wt/.git" ] || return 0
+  find "${wt:?}/" -type l -exec rm -f -- {} + 2>/dev/null
+  return 0
 }
 
 # Resolve the primary checkout backing worktree <wt> - the directory holding
@@ -142,6 +168,7 @@ consider() {
   if [ "$a" -lt "$MAX_AGE_HOURS" ]; then echo "kept $wt age-${a}h"; return 0; fi
 
   [ -n "$locked" ] && git worktree unlock "$wt" >/dev/null 2>&1
+  unlink_links_in_worktree "$wt"
   if [ ! -d "$wt" ]; then
     # Directory already gone; this is registration cleanup only, not a
     # removal decision, so its outcome doesn't gate the message below.
@@ -217,6 +244,7 @@ cmd_remove() {
   if git worktree list --porcelain | grep -qxF "worktree $registered" \
   || { [ -n "$real" ] && git worktree list --porcelain | grep -qxF "worktree $real"; }; then
     git worktree unlock "$path" >/dev/null 2>&1
+    unlink_links_in_worktree "$path"
     git worktree remove --force "$path" >/dev/null 2>&1
   fi
   rm -rf "$path"
@@ -286,6 +314,13 @@ cmd_link_deps() {
     fi
   fi
 
+  # A Windows account without the symlink privilege (Developer Mode off, not
+  # elevated - the default) fails every link below. That is a property of the
+  # account rather than a fault, so it is a decline, not an error.
+  if on_windows && ! symlinks_available; then
+    echo "declined symlinks-unavailable"; return 0
+  fi
+
   # The physical path, since mirror_modules_entry compares it against `readlink -f` output.
   local main_real wt_real
   main_real=$(cd "$main_repo" && pwd -P) && wt_real=$(cd "$wt" && pwd -P) || {
@@ -314,6 +349,12 @@ cmd_link_deps() {
 # tool writes into node_modules (vite's `.vite`) would land in the primary.
 # A scope directory (`@scope/`) is mirrored the same way, one level down.
 # Reads `main_real`, `wt_real` and increments `relinked` from cmd_link_deps.
+#
+# On a failed link the directory this created is removed again: left
+# half-built, it reads to every later run as `declined already-present`.
+# `rm -rf` unlinks the links inside it without following them into the
+# primary checkout, and <dst> is known to be this call's own, since the
+# `mkdir` that made it would have failed on anything already there.
 mirror_modules_dir() {
   local src="$1" dst="$2" entry name
   mkdir "$dst" || return 1
@@ -321,11 +362,25 @@ mirror_modules_dir() {
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     name=${entry##*/}
     if [[ "$name" == @* ]] && [ -d "$entry" ] && [ ! -L "$entry" ]; then
-      mirror_modules_dir "$entry" "$dst/$name" || return 1
+      mirror_modules_dir "$entry" "$dst/$name"
     else
-      mirror_modules_entry "$entry" "$dst/$name" || return 1
-    fi
+      mirror_modules_entry "$entry" "$dst/$name"
+    fi || { rm -rf "${dst:?}"; return 1; }
   done
+}
+
+# Whether this account can create a native symlink. It opts in exactly as the
+# real links do, since default MSYS copies instead of failing and would always
+# pass. A probe that cannot even run answers yes, and leaves the real links
+# to report whatever is wrong.
+symlinks_available() {
+  local probe ok=0
+  probe=$(mktemp -d 2>/dev/null) && [ -n "$probe" ] && [ -d "$probe" ] || return 0
+  if mkdir "$probe/t" 2>/dev/null; then
+    MSYS=winsymlinks:nativestrict ln -s "$probe/t" "$probe/l" 2>/dev/null || ok=1
+  fi
+  rm -rf "${probe:?}"
+  return "$ok"
 }
 
 # Link one node_modules entry. An entry that resolves to a tracked path of the
@@ -356,6 +411,13 @@ mirror_modules_entry() {
         esac ;;
     esac
   fi
+  # On Windows the link names the directory <src> resolves to, not <src>
+  # itself: linking a junction - which is how pnpm installs every package
+  # there - yields a file-type symlink, which MSYS tools read through but
+  # node.exe cannot (stat fails with EPERM, so `require` does too). A junction
+  # is never used in its place, because `git worktree remove --force`
+  # deletes a junction's contents.
+  on_windows && [ -n "${target:-}" ] && src=$target
   MSYS=winsymlinks:nativestrict ln -s "$src" "$dst"
 }
 
