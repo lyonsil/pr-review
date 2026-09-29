@@ -34,7 +34,8 @@ native_path() {
 # scratchpad path is derivable:
 #   /tmp/claude-<uid>/<cwd with every / replaced by ->/<session id>/scratchpad
 # Returns 1 and prints nothing when neither is available, or when the value
-# resolves to anything other than an absolute path with at least one component.
+# resolves to anything other than an absolute path with at least one component
+# (on Windows, one below a drive root).
 # Callers must treat a failure as "unknown", never as a prefix: an empty string
 # would prefix-match every path (reap keeps everything) and would expand a
 # caller's "$SCRATCH/wt-prN" to "/wt-prN" (git worktree add at the filesystem
@@ -42,7 +43,7 @@ native_path() {
 #
 # pwd -P, not pwd: the derived path must key on the real directory, since a
 # symlinked cwd would derive a prefix that never matches the worktree's own
-# registered path. Same canonicalization cmd_remove does.
+# registered path. Same canonicalization registered_worktree does.
 scratchpad_path() {
   local sp
   if [ -n "${CLAUDE_SCRATCHPAD:-}" ]; then
@@ -59,6 +60,11 @@ scratchpad_path() {
   fi
   while [ "${sp%/}" != "$sp" ]; do sp="${sp%/}"; done
   case "$sp" in /?*) ;; *) return 1 ;; esac
+  # On Windows /c is the root of drive C:, rejected for the same reason as
+  # "/". Elsewhere it is an ordinary one-letter directory.
+  if on_windows; then
+    case "$sp" in /[A-Za-z]) return 1 ;; esac
+  fi
   # Emit the form git reports, since consider() prefix-matches this against
   # paths taken straight from `git worktree list`, and callers grep it against
   # that same output.
@@ -91,25 +97,88 @@ dirty_count() {
   git -C "$1" status --porcelain 2>/dev/null | wc -l | tr -d ' '
 }
 
+# Whether <path> is registered as a linked worktree of the current repo, under
+# either its given or its physical spelling: pwd -P, since a symlinked path
+# names the worktree but never string-matches its registration. Both are
+# compared in git's own spelling. The main worktree, always listed first, is
+# never a match.
+registered_worktree() {
+  local path="$1" given real
+  given=$(native_path "$path")
+  real=$(cd "$path" 2>/dev/null && pwd -P) && real=$(native_path "$real") || real=$given
+  git worktree list --porcelain | sed -n 's/^worktree //p' | sed 1d \
+    | grep -qxF -e "$given" -e "$real"
+}
+
+# Whether directory <path> is the root of a linked worktree: its .git is a
+# file naming an admin directory under some repo's .git/worktrees/ (a
+# submodule's names .git/modules/ instead), or the current repo has it
+# registered as one. Nothing else may reach remove_worktree's deletes, so a
+# mistaken argument can never be `/`, the primary checkout or a subdirectory.
+is_linked_worktree() {
+  local path="$1" gitdir
+  if [ -f "$path/.git" ]; then
+    gitdir=$(sed -n 's/^gitdir: //p' "$path/.git" 2>/dev/null)
+    case "$gitdir" in */worktrees/?*) return 0 ;; esac
+  fi
+  registered_worktree "$path"
+}
+
 # Unlink every symlink and junction inside worktree <wt>, following none of
-# them. Must run before any `git worktree remove --force`: on Windows that
-# recurses through a directory junction and deletes the contents of whatever
-# it points to, outside the worktree included, and package managers there
-# (pnpm, npm workspaces) install with junctions. MSYS reports a junction as a
-# symlink, so `find -type l` lists it without descending into it, and `rm`
-# unlinks it without following it. git follows no symlink off Windows, and no
-# native one on Windows, so a junction is the only hazard and this is
-# Windows-only.
+# them, and fail if any is still there afterwards. On Windows
+# `git worktree remove --force` recurses through a directory junction and
+# deletes the contents of whatever it points to, outside the worktree
+# included, and package managers there (pnpm, npm workspaces) install with
+# junctions. MSYS reports a junction as a symlink, so `find -type l` lists it
+# without descending into it, and `rm` unlinks it without following it. git
+# follows no symlink off Windows, and no native one on Windows, so a junction
+# is the only hazard and this is Windows-only.
 #
-# A no-op for anything but the root of a linked worktree, whose .git is a
-# file: this sweeps a whole tree, so an empty or mistaken argument must
-# never reach `find` as `/` or as the primary checkout.
+# Sweeps a whole tree, so only remove_worktree calls it, on a path
+# is_linked_worktree has accepted.
 unlink_links_in_worktree() {
-  local wt="${1:-}"
+  local wt="${1:?}"
   on_windows || return 0
-  [ -n "$wt" ] && [ -f "$wt/.git" ] || return 0
   find "${wt:?}/" -type l -exec rm -f -- {} + 2>/dev/null
-  return 0
+  [ -z "$(find "${wt:?}/" -type l -print -quit 2>/dev/null)" ]
+}
+
+# Put back the tracked files missing from worktree <wt>, which after a failed
+# removal are the tracked symlinks the sweep unlinked. Left missing, they
+# count as changes, and reap's dirty guard would keep the worktree for good.
+restore_missing_tracked() {
+  local wt="$1"
+  [ -n "$(git -C "$wt" ls-files --deleted 2>/dev/null)" ] || return 0
+  git -C "$wt" ls-files -z --deleted \
+    | git -C "$wt" checkout -q --pathspec-from-file=- --pathspec-file-nul 2>/dev/null
+}
+
+# Remove linked worktree <path>: its directory and its registration, unlocking
+# it first. Every removal of a worktree directory goes through here, so none
+# can skip the link sweep. `git worktree remove --force` deletes a dirty
+# worktree outright; a caller that must spare one checks before calling.
+#
+# With `fallback`, a failed `git worktree remove` is followed by `rm -rf`,
+# which unlinks the links inside without following them; without it the
+# worktree stays, whole again, for the caller to report.
+#
+# Returns 0 once it is removed, 1 if it could not be, 2 if a link survived
+# the sweep (nothing is removed, since removing would reach through it), 3 if
+# <path> is not a linked worktree (nothing is touched).
+remove_worktree() {
+  local path="${1:?}" fallback="${2:-}"
+  is_linked_worktree "$path" || return 3
+  unlink_links_in_worktree "$path" || return 2
+  git worktree unlock "$path" >/dev/null 2>&1
+  if git worktree remove --force "$path" >/dev/null 2>&1; then
+    [ -n "$fallback" ] || return 0
+  elif [ -z "$fallback" ]; then
+    if [ -d "$path" ] && on_windows; then restore_missing_tracked "$path"; fi
+    return 1
+  fi
+  # Also clears a symlink <path> named the worktree by, which git leaves.
+  rm -rf "${path:?}"
+  [ ! -e "$path" ] && [ ! -L "$path" ]
 }
 
 # Resolve the primary checkout backing worktree <wt> - the directory holding
@@ -131,15 +200,16 @@ primary_repo_of() {
   printf '%s\n' "$common/.."
 }
 
+# Decide the fate of one worktree from `git worktree list`. <sp> is this
+# session's scratchpad, or empty when it cannot be resolved.
 consider() {
-  local wt="$1" locked="$2" branch="$3"
+  local wt="$1" locked="$2" branch="$3" sp="$4"
   [ -n "$wt" ] || return 0
   if ! is_review_path "$wt"; then
     [ "$VERBOSE" = 0 ] || echo "kept $wt not-a-review-worktree"
     return 0
   fi
 
-  local sp; sp=$(scratchpad_path) || sp=""
   if [ -n "$sp" ]; then
     case "$wt" in "$sp"/*|"$sp") echo "kept $wt current-session"; return 0 ;; esac
   fi
@@ -167,29 +237,33 @@ consider() {
   local a; a=$(age_hours "$wt")
   if [ "$a" -lt "$MAX_AGE_HOURS" ]; then echo "kept $wt age-${a}h"; return 0; fi
 
-  [ -n "$locked" ] && git worktree unlock "$wt" >/dev/null 2>&1
-  unlink_links_in_worktree "$wt"
   if [ ! -d "$wt" ]; then
     # Directory already gone; this is registration cleanup only, not a
     # removal decision, so its outcome doesn't gate the message below.
+    [ -n "$locked" ] && git worktree unlock "$wt" >/dev/null 2>&1
     git worktree remove --force "$wt" >/dev/null 2>&1
     echo "pruned $wt registration-only"
-  elif git worktree remove --force "$wt" >/dev/null 2>&1; then
-    echo "reaped $wt"
   else
-    # A failed `git worktree remove --force` can still have torn down the
-    # admin registration and deleted file contents before failing only on
-    # the final rmdir (observed on git 2.52.0 under a permission-denied
-    # parent dir) - leaving an orphaned, deregistered, empty directory that
-    # no future `git worktree list` will surface. Distinguish that from a
-    # genuine no-op failure so the message never implies "nothing happened"
-    # when something did.
-    if [ -d "$wt" ] && ! git worktree list --porcelain | grep -qxF "worktree $wt"; then
-      echo "orphaned $wt manual-cleanup-needed"
-    else
-      echo "error $wt remove-failed"
-    fi
-    return 0
+    local rc=0
+    remove_worktree "$wt" || rc=$?
+    case "$rc" in
+      0) echo "reaped $wt" ;;
+      2) echo "error $wt links-remain"; return 0 ;;
+      *)
+        # A failed `git worktree remove --force` can still have torn down the
+        # admin registration and deleted file contents before failing only on
+        # the final rmdir (observed on git 2.52.0 under a permission-denied
+        # parent dir) - leaving an orphaned, deregistered, empty directory that
+        # no future `git worktree list` will surface. Distinguish that from a
+        # genuine no-op failure so the message never implies "nothing happened"
+        # when something did.
+        if [ -d "$wt" ] && ! git worktree list --porcelain | grep -qxF "worktree $wt"; then
+          echo "orphaned $wt manual-cleanup-needed"
+        else
+          echo "error $wt remove-failed"
+        fi
+        return 0 ;;
+    esac
   fi
   if [ -n "$branch" ]; then
     echo "stranded-branch ${branch#refs/heads/} $wt"
@@ -204,15 +278,18 @@ cmd_reap() {
     return 2
   fi
   [ "$#" -eq 0 ] || VERBOSE=1
+  # Resolved once: it depends only on the environment and the cwd, and on
+  # Windows each resolution costs a cygpath process.
+  local sp; sp=$(scratchpad_path) || sp=""
   local wt="" locked="" branch="" line
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      worktree\ *) consider "$wt" "$locked" "$branch"; wt="${line#worktree }"; locked=""; branch="" ;;
+      worktree\ *) consider "$wt" "$locked" "$branch" "$sp"; wt="${line#worktree }"; locked=""; branch="" ;;
       branch\ *)   branch="${line#branch }" ;;
       locked*)     locked="${line#locked}"; locked="${locked# }"; [ -n "$locked" ] || locked="(no reason)" ;;
     esac
   done < <(git worktree list --porcelain)
-  consider "$wt" "$locked" "$branch"
+  consider "$wt" "$locked" "$branch" "$sp"
   git worktree prune >/dev/null 2>&1
   return 0
 }
@@ -229,27 +306,37 @@ cmd_create() {
   # protects a live worktree is reap's scratchpad path exclusion (see
   # scratchpad_path/consider() above), plus the 24h age floor as a fallback.
   git worktree lock --reason "pr-review session ${CLAUDE_CODE_SESSION_ID:-local} (pid $PPID)" "$path"
-  (cd "$path" && pwd)
+  # In git's own spelling, the same one `scratchpad` prints, so the paths a
+  # caller builds from each agree and a native program can open either.
+  local abs; abs=$(cd "$path" && pwd) || return 1
+  printf '%s\n' "$(native_path "$abs")"
 }
 
+# Tear down worktree <path> unconditionally: unlike reap, no dirty guard.
+# A path that does not exist is not an error, so a teardown can run whether or
+# not the worktree was ever made; any registration it left is cleared.
+# Anything else that is not a linked worktree is refused with `error:`, so a
+# mistaken argument cannot delete the primary checkout or an unrelated tree.
 cmd_remove() {
-  local path="$1"
-  # pwd -P (not pwd): a symlinked path won't string-match the registered
-  # worktree's real path unless symlink components are resolved. Both
-  # candidates are converted to git's own path form, which is what the
-  # registration they are matched against is spelled in.
-  local registered real
-  registered=$(native_path "$path")
-  real=$(cd "$path" 2>/dev/null && pwd -P) && real=$(native_path "$real")
-  if git worktree list --porcelain | grep -qxF "worktree $registered" \
-  || { [ -n "$real" ] && git worktree list --porcelain | grep -qxF "worktree $real"; }; then
-    git worktree unlock "$path" >/dev/null 2>&1
-    unlink_links_in_worktree "$path"
-    git worktree remove --force "$path" >/dev/null 2>&1
+  local path="${1:-}"
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    if [ -n "$path" ] && registered_worktree "$path"; then
+      git worktree unlock "$path" >/dev/null 2>&1
+      git worktree remove --force "$path" >/dev/null 2>&1
+    fi
+    git worktree prune >/dev/null 2>&1
+    return 0
   fi
-  rm -rf "$path"
+  local rc=0
+  remove_worktree "$path" fallback || rc=$?
   git worktree prune >/dev/null 2>&1
-  return 0
+  case "$rc" in
+    0) return 0 ;;
+    2) echo "error $path links-remain" >&2 ;;
+    3) echo "error: not a linked worktree, so not removed: $path" >&2 ;;
+    *) echo "error: could not remove $path" >&2 ;;
+  esac
+  return 1
 }
 
 cmd_remove_refuters() {
@@ -260,7 +347,7 @@ cmd_remove_refuters() {
   local d
   for d in "$scratch"/wt-pr"$n"-r[ci][0-9]*; do
     [ -e "$d" ] || continue
-    cmd_remove "$d"; echo "removed $d"
+    cmd_remove "$d" && echo "removed $d"
   done
   git worktree prune >/dev/null 2>&1
   return 0
@@ -317,7 +404,7 @@ cmd_link_deps() {
   # A Windows account without the symlink privilege (Developer Mode off, not
   # elevated - the default) fails every link below. That is a property of the
   # account rather than a fault, so it is a decline, not an error.
-  if on_windows && ! symlinks_available; then
+  if on_windows && ! symlinks_available "$wt"; then
     echo "declined symlinks-unavailable"; return 0
   fi
 
@@ -330,13 +417,25 @@ cmd_link_deps() {
   mirror_modules_dir "$main_repo/node_modules" "$wt/node_modules" || {
     echo "error: could not link node_modules into $wt" >&2; return 1; }
 
-  local extra=0 pkg
+  # All or nothing: a package left without its node_modules fails with
+  # module-not-found, which reads as a fault in the change under review. What
+  # this run already linked goes too, since a root node_modules left behind
+  # would answer the next run `declined already-present`.
+  local extra=0 pkg made=("$wt/node_modules") failed=() d
   while IFS= read -r pkg; do
     pkg=$(dirname "$pkg"); [ "$pkg" = "." ] && continue
     if [ -d "$main_repo/$pkg/node_modules" ] && [ ! -e "$wt/$pkg/node_modules" ]; then
-      mirror_modules_dir "$main_repo/$pkg/node_modules" "$wt/$pkg/node_modules" && extra=$((extra+1))
+      if mirror_modules_dir "$main_repo/$pkg/node_modules" "$wt/$pkg/node_modules"; then
+        made+=("$wt/$pkg/node_modules"); extra=$((extra+1))
+      else
+        failed+=("$wt/$pkg/node_modules")
+      fi
     fi
   done < <(git -C "$wt" ls-files -- '*package.json')
+  if [ "${#failed[@]}" -gt 0 ]; then
+    for d in "${made[@]}"; do rm -rf "${d:?}"; done
+    echo "error: could not link node_modules into ${failed[*]}" >&2; return 1
+  fi
   echo "linked $wt/node_modules (+$extra package node_modules, $relinked workspace links into the worktree)"
 }
 
@@ -354,7 +453,8 @@ cmd_link_deps() {
 # half-built, it reads to every later run as `declined already-present`.
 # `rm -rf` unlinks the links inside it without following them into the
 # primary checkout, and <dst> is known to be this call's own, since the
-# `mkdir` that made it would have failed on anything already there.
+# `mkdir` that made it would have failed on anything already there. The same
+# holds for cmd_link_deps removing what earlier calls made.
 mirror_modules_dir() {
   local src="$1" dst="$2" entry name
   mkdir "$dst" || return 1
@@ -369,18 +469,32 @@ mirror_modules_dir() {
   done
 }
 
-# Whether this account can create a native symlink. It opts in exactly as the
-# real links do, since default MSYS copies instead of failing and would always
-# pass. A probe that cannot even run answers yes, and leaves the real links
-# to report whatever is wrong.
+# `ln -s`, making a native symlink or failing. Git Bash (MSYS2) and Cygwin
+# each copy the target or make an emulated link that Windows programs cannot
+# follow unless opted in, and each reads only its own variable. nativestrict
+# fails loudly rather than falling back. Scoped to the one call, never
+# exported; both variables are meaningless elsewhere.
+native_ln_s() {
+  MSYS=winsymlinks:nativestrict CYGWIN=winsymlinks:nativestrict ln -s "$@"
+}
+
+# Whether this account can create a native symlink beside worktree <wt>. The
+# probe sits on the worktree's own volume, since a FAT or exFAT drive or a
+# network share can refuse links that the system temp directory allows; it
+# falls back to the temp directory when the worktree's parent is not
+# writable. It links exactly as the real links do, since the default copy
+# instead of a link would always pass. A probe that cannot even run answers
+# yes, and leaves the real links to report whatever is wrong.
 symlinks_available() {
-  local probe ok=0
-  probe=$(mktemp -d 2>/dev/null) && [ -n "$probe" ] && [ -d "$probe" ] || return 0
+  local wt="$1" probe rc=0
+  probe=$(mktemp -d "$(dirname "$wt")/.symlink-probe.XXXXXX" 2>/dev/null) \
+    || probe=$(mktemp -d 2>/dev/null) || return 0
+  [ -n "$probe" ] && [ -d "$probe" ] || return 0
   if mkdir "$probe/t" 2>/dev/null; then
-    MSYS=winsymlinks:nativestrict ln -s "$probe/t" "$probe/l" 2>/dev/null || ok=1
+    native_ln_s "$probe/t" "$probe/l" 2>/dev/null || rc=1
   fi
   rm -rf "${probe:?}"
-  return "$ok"
+  return "$rc"
 }
 
 # Link one node_modules entry. An entry that resolves to a tracked path of the
@@ -389,11 +503,9 @@ symlinks_available() {
 # head still has it. Everything else - installed third-party packages, `.bin`,
 # the `.pnpm` store - is shared with the primary checkout as before.
 #
-# Every link here must be a real symlink. Git Bash's `ln -s` copies the target
-# instead unless MSYS opts in, which would duplicate the whole of the primary
-# checkout's node_modules into the worktree and sever the sharing this exists
-# for; nativestrict also fails loudly rather than falling back to that copy.
-# The variable is meaningless off MSYS.
+# Every link here must be a real symlink, made by native_ln_s. A copy would
+# duplicate the whole of the primary checkout's node_modules into the
+# worktree and sever the sharing this exists for.
 mirror_modules_entry() {
   local src="$1" dst="$2" target rel
   if [ -L "$src" ]; then
@@ -405,7 +517,7 @@ mirror_modules_entry() {
           */node_modules/*) ;;
           *)
             if [ -e "$wt_real/$rel" ]; then
-              MSYS=winsymlinks:nativestrict ln -s "$wt_real/$rel" "$dst" || return 1
+              native_ln_s "$wt_real/$rel" "$dst" || return 1
               relinked=$((relinked+1)); return 0
             fi ;;
         esac ;;
@@ -418,7 +530,7 @@ mirror_modules_entry() {
   # is never used in its place, because `git worktree remove --force`
   # deletes a junction's contents.
   on_windows && [ -n "${target:-}" ] && src=$target
-  MSYS=winsymlinks:nativestrict ln -s "$src" "$dst"
+  native_ln_s "$src" "$dst"
 }
 
 cmd_scratchpad() {

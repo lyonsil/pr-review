@@ -43,7 +43,10 @@ text, copied verbatim where it says so.
    by default (there is one per worktree the reaper is not responsible for, the repo's own main
    worktree included, and in a real repo they bury the lines that matter); pass `reap -v` if you
    need to see them; `reap` rejects any other argument with a usage line and a non-zero exit, so a
-   mistyped flag fails rather than silently running non-verbose.
+   mistyped flag fails rather than silently running non-verbose. Report any `error ...` line:
+   `error <wt> remove-failed` means git could not remove that worktree, and on Windows
+   `error <wt> links-remain` means a link inside it could not be unlinked, so it was left in place
+   rather than deleted through the link. Both leave the worktree for the user to inspect.
 3. Resolve the target from the arguments:
    - A PR URL or bare number: run
      `gh pr view <n> --json number,headRefOid,state,title,url,baseRefName`.

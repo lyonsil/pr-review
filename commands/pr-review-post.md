@@ -378,6 +378,8 @@ usually means the head moved.
 
 `remove` deletes the worktree unconditionally - unlike `reap`, it does **not** check for
 uncommitted or untracked changes first. If there is working-tree state in `$WT` worth keeping,
-save it before calling `remove`.
+save it before calling `remove`. It refuses, with an `error` line on stderr and a non-zero exit,
+a path that is not a linked worktree, and on Windows a worktree holding a link it could not
+unlink (`error <path> links-remain`); report either and leave the directory alone.
 
 Report the posted review URL and confirm the worktree is gone.

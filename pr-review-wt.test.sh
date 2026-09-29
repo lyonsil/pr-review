@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Test harness for pr-review-wt.sh. Creates throwaway git repos under $TMPDIR.
-# Expected: passed=94 failed=0 (passed=100 under Git for Windows, which adds
-# the checks guarded by on_windows)
+# Expected: passed=143 failed=0 (passed=148 under Git for Windows, which runs
+# the checks guarded by on_windows in place of the one guarded by its negation)
 set -uo pipefail
-# An MSYS exported by the developer's shell would reach the script's own
-# `ln -s` calls and make them link even where the script forgot to opt in.
-unset MSYS
+# An MSYS or CYGWIN exported by the developer's shell would reach the
+# script's own `ln -s` calls and make them link even where the script forgot
+# to opt in.
+unset MSYS CYGWIN
 # Resolve to an absolute path before any test cd's into a throwaway repo dir.
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/pr-review-wt.sh"
 PASS=0; FAIL=0
@@ -64,6 +65,29 @@ registered_parent() {
 # and make the test vacuous. Scoped to each call, never exported: the script
 # under test has to opt in for itself or its own bare `ln -s` goes undetected.
 ln_s() { MSYS=winsymlinks:nativestrict ln -s "$@"; }
+
+# A PATH under which the script takes its Windows code paths. On Windows that
+# is the PATH as it is; elsewhere a stand-in cygpath goes first, converting
+# drive letters the way the real one does and leaving other paths alone, so
+# checks of Windows-only logic run on every platform.
+WINSIM=$PATH
+if ! on_windows; then
+  CYGSTUB=$(mktemp -d)
+  cat > "$CYGSTUB/cygpath" <<'EOF'
+#!/usr/bin/env bash
+mode=$1 p=$2
+case "$mode" in
+  -u) p=${p//\\//}
+      case "$p" in [A-Za-z]:*) d=${p%%:*}; p="/${d,,}${p:2}" ;; esac ;;
+  -m) case "$p" in
+        /[A-Za-z]|/[A-Za-z]/*) d=${p:1:1}; p="${d^^}:${p:2}"; [ "${#p}" -gt 2 ] || p="$p/" ;;
+      esac ;;
+esac
+printf '%s\n' "$p"
+EOF
+  chmod +x "$CYGSTUB/cygpath"
+  WINSIM="$CYGSTUB:$PATH"
+fi
 
 echo "== reap: removes an old, unlocked review worktree =="
 setup_repo
@@ -147,6 +171,9 @@ setup_repo
 mkdir -p scratchpad
 P=$("$SCRIPT" create "$R/scratchpad/wt-pr7" "$SHA")
 check "path echoed"    "$(basename "$P")" "wt-pr7"
+# In the spelling git registers it under, which is also the one `scratchpad`
+# prints, so paths a caller builds from the two agree.
+check "path echoed is the registered one" "$(git worktree list --porcelain | grep -cxF "worktree $P")" "1"
 check "exists"         "$([ -d "$R/scratchpad/wt-pr7" ] && echo yes || echo no)" "yes"
 check "is detached"    "$(git -C "$R/scratchpad/wt-pr7" symbolic-ref -q HEAD >/dev/null && echo branch || echo detached)" "detached"
 check "is locked"      "$(git worktree list --porcelain | grep -c '^locked')" "1"
@@ -164,7 +191,7 @@ if on_windows; then
   OUTSIDE=$(mktemp -d); echo keep > "$OUTSIDE/file"
   junction "$R/scratchpad/wt-pr7/j" "$OUTSIDE"
 fi
-"$SCRIPT" remove "$R/scratchpad/wt-pr7"
+"$SCRIPT" remove "$P"
 # `git worktree prune` skips a locked worktree, so a registration still here
 # means the path never matched it and only the directory was removed -
 # leaving a registration no later prune can ever clear.
@@ -177,6 +204,38 @@ fi
 echo "== remove: is idempotent =="
 "$SCRIPT" remove "$R/scratchpad/wt-pr7"
 check "second remove exits 0" "$?" "0"
+
+echo "== remove: refuses anything that is not a linked worktree =="
+setup_repo
+mkdir -p scratchpad
+"$SCRIPT" create "$R/scratchpad/wt-pr8" "$SHA" >/dev/null
+mkdir "$R/scratchpad/wt-pr8/sub"; echo keep > "$R/scratchpad/wt-pr8/sub/file"
+PLAIN=$(mktemp -d); echo keep > "$PLAIN/file"
+# A submodule's .git is a file too, but names .git/modules/, not .git/worktrees/.
+SUBMOD=$(mktemp -d); echo keep > "$SUBMOD/file"
+printf 'gitdir: %s\n' "$R/.git/modules/sub" > "$SUBMOD/.git"
+for T in "$R" "$PLAIN" "$SUBMOD" "$R/scratchpad/wt-pr8/sub"; do
+  case "$T" in
+    "$R")      NAME="the primary checkout";       KEEP="$R/f.txt";      WANT=hi ;;
+    "$PLAIN")  NAME="a plain directory";          KEEP="$PLAIN/file";   WANT=keep ;;
+    "$SUBMOD") NAME="a submodule-style checkout"; KEEP="$SUBMOD/file";  WANT=keep ;;
+    *)         NAME="a worktree's subdirectory";  KEEP="$T/file";       WANT=keep ;;
+  esac
+  ERR=$("$SCRIPT" remove "$T" 2>&1 >/dev/null); RC=$?
+  check "$NAME: exits nonzero" "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
+  check "$NAME: curated error" "$(printf '%s' "$ERR" | grep -c '^error: ')" "1"
+  check "$NAME: survives"      "$(cat "$KEEP" 2>/dev/null)" "$WANT"
+done
+check "the primary checkout keeps its .git" "$([ -d "$R/.git" ] && echo yes || echo no)" "yes"
+
+echo "== remove: a missing path is not an error, and clears its registration =="
+OUT=$("$SCRIPT" remove "$R/scratchpad/wt-never" 2>&1); RC=$?
+check "never-created path: silent, exits 0" "$OUT rc=$RC" " rc=0"
+rm -rf "${R:?}/scratchpad/wt-pr8"
+OUT=$("$SCRIPT" remove "$R/scratchpad/wt-pr8" 2>&1); RC=$?
+check "deleted worktree: silent, exits 0" "$OUT rc=$RC" " rc=0"
+# The registration is locked, so no prune would ever clear it.
+check "its locked registration is gone" "$(git worktree list | grep -c wt-pr8)" "0"
 
 echo "== remove: resolves a symlinked path to the registered worktree =="
 setup_repo
@@ -350,6 +409,66 @@ check "ri2 gone"   "$([ -d "$SP/wt-pr5-ri2" ] && echo yes || echo no)" "no"
 check "main kept"  "$([ -d "$SP/wt-pr5" ] && echo yes || echo no)" "yes"
 check "other PR kept" "$([ -d "$SP/wt-pr6-rc1" ] && echo yes || echo no)" "yes"
 
+echo "== remove-refuters: reports only what it removed =="
+setup_repo
+SP=$(mktemp -d)/scratchpad; mkdir -p "$SP"
+"$SCRIPT" create "$SP/wt-pr5-rc1" HEAD >/dev/null
+mkdir "$SP/wt-pr5-rc2"; echo keep > "$SP/wt-pr5-rc2/file"
+OUT=$("$SCRIPT" remove-refuters "$SP" 5 2>/dev/null)
+check "reports the worktree it removed" "$(echo "$OUT" | grep -cxF "removed $SP/wt-pr5-rc1")" "1"
+check "does not report what it refused" "$(echo "$OUT" | grep -c 'wt-pr5-rc2')" "0"
+check "the refused directory survives"  "$(cat "$SP/wt-pr5-rc2/file" 2>/dev/null)" "keep"
+
+echo "== remove and reap: a link the sweep cannot unlink stops the removal =="
+setup_repo
+SP=$(mktemp -d)/scratchpad; mkdir -p "$SP"
+# A refuter's worktree, whose dirt reap disregards, so only the link decides.
+"$SCRIPT" create "$SP/wt-pr9-rc1" HEAD >/dev/null
+OUTSIDE=$(mktemp -d); echo keep > "$OUTSIDE/file"
+if on_windows; then junction "$SP/wt-pr9-rc1/j" "$OUTSIDE"; else ln_s "$OUTSIDE" "$SP/wt-pr9-rc1/j"; fi
+# An `rm` that refuses any path matching $RM_FAIL, as a locked reparse point
+# or an antivirus handle can.
+RMSHIM=$(mktemp -d); REAL_RM=$(command -v rm)
+cat > "$RMSHIM/rm" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in \$RM_FAIL) echo "rm: simulated failure" >&2; exit 1 ;; esac
+done
+exec "$REAL_RM" "\$@"
+EOF
+chmod +x "$RMSHIM/rm"
+ERR=$(RM_FAIL='*/wt-pr9-rc1/j' PATH="$RMSHIM:$WINSIM" "$SCRIPT" remove "$SP/wt-pr9-rc1" 2>&1 >/dev/null); RC=$?
+check "remove exits nonzero"            "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
+check "remove reports links-remain"     "$(printf '%s\n' "$ERR" | grep -c '^error .*wt-pr9-rc1 links-remain$')" "1"
+check "remove keeps the worktree"       "$(git worktree list | grep -c wt-pr9-rc1)" "1"
+check "remove leaves the link's target" "$(cat "$OUTSIDE/file" 2>/dev/null)" "keep"
+git worktree unlock "$SP/wt-pr9-rc1" 2>/dev/null; age_dir "$SP/wt-pr9-rc1" 48
+OUT=$(RM_FAIL='*/wt-pr9-rc1/j' PATH="$RMSHIM:$WINSIM" CLAUDE_SCRATCHPAD=/elsewhere/scratchpad "$SCRIPT" reap 2>&1)
+check "reap reports links-remain"       "$(echo "$OUT" | grep -c '^error .*wt-pr9-rc1 links-remain$')" "1"
+check "reap keeps the worktree"         "$(git worktree list | grep -c wt-pr9-rc1)" "1"
+check "reap leaves the link's target"   "$(cat "$OUTSIDE/file" 2>/dev/null)" "keep"
+
+echo "== reap: a failed removal puts back the tracked links the sweep unlinked =="
+setup_repo
+git config core.symlinks true
+ln_s f.txt tracked-link; git add tracked-link; git commit -qm link
+SP=$(mktemp -d)/scratchpad; mkdir -p "$SP"
+"$SCRIPT" create "$SP/wt-pr10" HEAD >/dev/null
+git worktree unlock "$SP/wt-pr10"; age_dir "$SP/wt-pr10" 48
+# A `git` whose `worktree remove` fails, as it does on a file another process
+# holds open.
+GITSHIM=$(mktemp -d); REAL_GIT=$(command -v git)
+cat > "$GITSHIM/git" <<EOF
+#!/usr/bin/env bash
+[ "\${1:-} \${2:-}" = "worktree remove" ] && exit 1
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$GITSHIM/git"
+OUT=$(PATH="$GITSHIM:$WINSIM" CLAUDE_SCRATCHPAD=/elsewhere/scratchpad "$SCRIPT" reap 2>&1)
+check "reports remove-failed"       "$(echo "$OUT" | grep -c '^error .*wt-pr10 remove-failed$')" "1"
+check "the tracked link is back"    "$([ -L "$SP/wt-pr10/tracked-link" ] && echo yes || echo no)" "yes"
+check "the worktree is clean again" "$(git -C "$SP/wt-pr10" status --porcelain | wc -l | tr -d ' ')" "0"
+
 echo "== remove-refuters: refuses without both arguments =="
 setup_repo
 ERR=$("$SCRIPT" remove-refuters 2>&1 >/dev/null); RC=$?
@@ -454,6 +573,34 @@ check "third-party dep is the primary's"      "$(readlink -f "$WT/node_modules/d
 mkdir -p "$WT/node_modules/.vite"; echo cache > "$WT/node_modules/.vite/c"
 check "a cache written in the worktree stays out of the primary" "$([ -e "$R/node_modules/.vite/c" ] && echo leaked || echo kept)" "kept"
 
+echo "== scratchpad: rejects a bare drive on Windows only =="
+setup_repo
+for BAD in 'C:\' 'C:/' '/c'; do
+  OUT=$(PATH="$WINSIM" env -u CLAUDE_CODE_SESSION_ID CLAUDE_SCRATCHPAD="$BAD" "$SCRIPT" scratchpad 2>/dev/null); RC=$?
+  check "rejects drive root '$BAD'" "$OUT rc=$([ "$RC" -ne 0 ] && echo nonzero || echo 0)" " rc=nonzero"
+done
+OUT=$(PATH="$WINSIM" env -u CLAUDE_CODE_SESSION_ID CLAUDE_SCRATCHPAD='C:\x' "$SCRIPT" scratchpad 2>/dev/null)
+check "accepts a directory below it" "$OUT" "C:/x"
+if ! on_windows; then
+  OUT=$(env -u CLAUDE_CODE_SESSION_ID CLAUDE_SCRATCHPAD=/c "$SCRIPT" scratchpad 2>/dev/null)
+  check "off Windows /c is an ordinary directory" "$OUT" "/c"
+fi
+
+echo "== reap: resolves the scratchpad once per run =="
+setup_repo
+for n in 1 2 3; do git worktree add -q --detach ".claude/worktrees/review-90$n" "$SHA"; done
+# A cygpath that logs each call, in front of whichever one WINSIM supplies.
+CYGREC=$(mktemp -d); CYGLOG="$CYGREC/calls"; REAL_CYGPATH=$(PATH="$WINSIM" command -v cygpath)
+cat > "$CYGREC/cygpath" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$CYGLOG"
+exec "$REAL_CYGPATH" "\$@"
+EOF
+chmod +x "$CYGREC/cygpath"
+OUT=$(PATH="$CYGREC:$WINSIM" CLAUDE_SCRATCHPAD="$R/scratchpad" "$SCRIPT" reap 2>&1)
+check "three review worktrees considered" "$(echo "$OUT" | grep -c '^kept .*review-90[123] ')" "3"
+check "one cygpath call for all of them"  "$(wc -l < "$CYGLOG" | tr -d ' ')" "1"
+
 echo "== scratchpad: prints the same spelling git registers a worktree under =="
 setup_repo
 SP="$R/scratchpad"; mkdir -p "$SP"
@@ -506,6 +653,48 @@ LN_FAIL='*/fail-me' PATH="$SHIM:$PATH" "$SCRIPT" link-deps "$WT" "$BASE" >/dev/n
 OUT=$(LN_FAIL='*/fail-me' PATH="$SHIM:$PATH" "$SCRIPT" link-deps "$WT" "$BASE" 2>/dev/null)
 check "a retry is not told it is already present" "$OUT" ""
 check "the primary's entries survive the cleanup" "$(cat "$R/node_modules/a-dep/index.js" 2>/dev/null)" "x"
+
+echo "== link-deps: a failed package-level link fails the whole run =="
+setup_repo
+mkdir -p node_modules/a-dep libs/b/node_modules/ok libs/b/node_modules/fail-me
+echo x > node_modules/a-dep/index.js; echo x > libs/b/node_modules/ok/index.js
+echo node_modules > .gitignore
+echo '{}' > libs/b/package.json; git add .gitignore libs/b/package.json; git commit -qm pkg
+BASE=$(git rev-parse HEAD)
+WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
+ERRF=$(mktemp -d)/err
+OUT=$(LN_FAIL='*/libs/b/node_modules/fail-me' PATH="$SHIM:$PATH" "$SCRIPT" link-deps "$WT" "$BASE" 2>"$ERRF"); RC=$?
+check "exits nonzero"                 "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
+check "prints no linked line"         "$(echo "$OUT" | grep -c '^linked ')" "0"
+check "names the package in an error" "$(grep -c '^error: could not link node_modules into .*libs/b/node_modules$' "$ERRF")" "1"
+check "leaves the package no half-built node_modules" "$([ -e "$WT/libs/b/node_modules" ] && echo yes || echo no)" "no"
+check "leaves no root node_modules to read as already present" "$([ -e "$WT/node_modules" ] && echo yes || echo no)" "no"
+check "the primary's entries survive" "$(cat "$R/node_modules/a-dep/index.js" "$R/libs/b/node_modules/ok/index.js" 2>/dev/null | tr -d '\n')" "xx"
+
+echo "== link-deps: every link opts in to native symlinks under MSYS and Cygwin alike =="
+setup_repo
+mkdir -p node_modules/dep; echo x > node_modules/dep/index.js
+BASE=$(git rev-parse HEAD)
+WT=$(mktemp -d)/wt; "$SCRIPT" create "$WT" HEAD >/dev/null
+# An `ln` that logs each call's two opt-in variables and its destination.
+LNREC=$(mktemp -d); LNLOG="$LNREC/calls"
+cat > "$LNREC/ln" <<EOF
+#!/usr/bin/env bash
+echo "MSYS=\${MSYS-unset} CYGWIN=\${CYGWIN-unset} \${@: -1}" >> "$LNLOG"
+exec "$REAL_LN" "\$@"
+EOF
+chmod +x "$LNREC/ln"
+OUT=$(PATH="$LNREC:$WINSIM" "$SCRIPT" link-deps "$WT" "$BASE" 2>&1)
+check "reports linked"                  "$(echo "$OUT" | grep -c '^linked ')" "1"
+check "the probe and the link both ran" "$(wc -l < "$LNLOG" | tr -d ' ')" "2"
+check "every ln sets MSYS"              "$(grep -vc '^MSYS=winsymlinks:nativestrict ' "$LNLOG")" "0"
+check "every ln sets CYGWIN"            "$(grep -vc ' CYGWIN=winsymlinks:nativestrict ' "$LNLOG")" "0"
+# A worktree on a volume without symlink support must decline, which only a
+# probe on that same volume can tell.
+PROBE_DST=$(head -1 "$LNLOG"); PROBE_DST=${PROBE_DST##* }
+check "the probe runs beside the worktree" \
+  "$(case "$PROBE_DST" in "$(dirname "$WT")"/.symlink-probe.*/l) echo yes ;; *) echo "no: $PROBE_DST" ;; esac)" "yes"
+check "the probe leaves nothing behind" "$(ls -A "$(dirname "$WT")")" "wt"
 
 if on_windows; then
   echo "== link-deps: declines when the account cannot create symlinks =="
