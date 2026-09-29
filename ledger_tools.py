@@ -53,16 +53,18 @@ def demotion_reason(it):
     inline.
 
     Verdict and the REFUTED exclusion are the caller's job, not this
-    function's - `build_payload` checks REFUTED before ever reaching this,
+    function's - `plan_review` checks REFUTED before ever reaching this,
     and `render_report`'s inline/body count is scoped to non-REFUTED items
     by its caller. A missing/null `on_changed_line` is NOT a demotion, only
     an explicit `False` is: a ledger that has never been through S5 or
     reanchor has neither field set, and must stay postable rather than
     silently demoting every item.
 
-    This is the one routing rule `build_payload`'s inline/demoted split and
+    This is the one routing rule `plan_review`'s inline/demoted split and
     `render_report`'s inline/body count both have to agree on, so it lives
-    here once instead of twice."""
+    here once instead of twice. It is GitHub's split: a backend that accepts
+    comments off the diff posts "not on a changed line" findings inline
+    instead (see `plan_review`'s `off_diff_inline`)."""
     if it.get("anchor_status") == "dead":
         return "dead anchor"
     if it.get("anchor_status") == "off-diff" or it.get("on_changed_line") is False:
@@ -71,7 +73,11 @@ def demotion_reason(it):
 
 
 def parse_changed_lines(diff_text):
-    """Map file path -> set of new-side line numbers added or modified."""
+    """Map file path -> set of new-side line numbers added or modified.
+
+    Every file with a new-side `+++` header is a key, even one whose hunks
+    add no line: the keys are the files the diff touches, which is what
+    `file_in_diff` records."""
     changed, path, newline = {}, None, None
     for line in diff_text.splitlines():
         if line.startswith("+++ "):
@@ -252,14 +258,18 @@ def mark_changed_lines(ledger, worktree, changed):
 
     Same rule reanchor applies: a finding is on the diff when its anchor line
     is a `+` line; a range whose first line is unchanged moves onto the first
-    changed line inside [line, line_end]. Returns the notes to print - one per
-    move and one per on_changed_line flip. An item missing `file` or `line`,
+    changed line inside [line, line_end]. `file_in_diff` records whether the
+    item's file is in the diff at all, since a backend that posts off-diff
+    findings inline still has nowhere to put one in a file the pull request
+    does not touch. Returns the notes to print - one per move and one per
+    on_changed_line flip. An item missing `file` or `line`,
     or whose recut excerpt cannot be read, is named in a `LedgerError` instead
     of raising a bare `KeyError`/`TypeError` past this function."""
     notes, errors = [], []
     for it in ledger.get("items", []):
         try:
             lines = changed.get(it["file"], set())
+            it["file_in_diff"] = it["file"] in changed
             start, end = it["line"], it.get("line_end") or it["line"]
             was = it.get("on_changed_line")
             hit = first_changed_line(lines, start, end)
@@ -294,7 +304,7 @@ def render_tokens(text):
     `#n` references for publishing, and report every id referenced.
 
     Unlike `renumber`'s `sub`, this never checks the referenced ids against a
-    ledger - the caller (`build_payload`) is the one that knows which ids are
+    ledger - the caller (`plan_review`) is the one that knows which ids are
     actually posted, and warns about any that are not."""
     refs = {int(m) for m in TOKEN.findall(text or "")}
     return TOKEN.sub(lambda m: "#" + m.group(1), text or ""), refs

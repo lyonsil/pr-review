@@ -355,3 +355,153 @@ four times more common than the one three things looked for.
   let the generator drop the slot on every nit, and a finding with no stated consequence reads as
   one not worth raising - including ones that were (a frozen-update throw, a stray saved space).
   Enforced in both `validate` and `validate --draft`. *If wrong:* one helper and two call sites.
+
+## A second backend: Reviewable
+
+Measured against paranext-core PRs #2734, #2827 and #2431 through the Reviewable MCP server. The two
+backends differ in ways that read as cosmetic and are not, so everything here was tested rather
+than reasoned about.
+
+- **One plan, told a capability rather than a provider.** `plan_review` decides placement, renders
+  every published word and prints the accounting; `build_payload` and `render_reviewable` only
+  restate it in their API's fields. The single fact it needs about the backend is whether it
+  accepts a comment on a line outside the diff (`off_diff_inline`). GitHub's output is byte-identical
+  to the single-function `build_payload` it replaced: a differential oracle over 25,000 randomized
+  ledgers (payload JSON, stderr, raised errors, full and paged preview) and 1,000 CLI runs under two
+  console encodings (exit code, stdout, stderr, `preview.txt`) found zero differences, and twelve
+  seeded mutants - each a working module - were all caught. *If wrong:* the GitHub renderer is ten
+  lines over the plan.
+- **Off-diff findings post inline on Reviewable.** GitHub rejects the whole review over one
+  off-diff comment, which is the only reason those findings are demoted into the body. Reviewable
+  has no such rule: a comment on line 2 of a file whose only hunk is at line 269 was accepted,
+  auto-expanded the collapsed region, and appeared in the file view, the Discussions tab and the
+  reply count - while published resolved, by an identity aliased to the reader. A dead anchor, or a
+  finding with no file or line, still goes in the body on both, since no backend can place it.
+  *If wrong:* build the Reviewable plan with `off_diff_inline=False`.
+- **A finding in a file the pull request does not touch goes in the framing comment on Reviewable,
+  decided when the payload is built.** Reviewable keys a discussion to one of the PR's own file
+  entries, so such a finding has nothing to attach to, and the posting step's path lookup would
+  stop on it every time - re-anchoring cannot change a file's absence from the diff. `changed-lines`
+  and `reanchor` record `file_in_diff` from the diff's `+++` headers, which name every file the
+  diff touches, including one with no added line; `plan_review` reads it. Deciding it there rather
+  than at the posting step keeps the preview true: moving a finding into the framing comment after
+  approval would publish a body nobody approved. A missing field counts as in the diff, so an
+  older ledger plans as before and the posting step still stops on it. GitHub reads nothing of
+  this: those findings are off-diff there and go in the body exactly as before.
+  *If wrong:* such a finding publishes resolved and asks the author for nothing - the silent
+  downgrade the entry below warns of, limited to code the PR never touched; to post it inline
+  instead, the posting step would need a file-level key Reviewable does not list.
+- **An off-diff discussion says so in its first line:** `_This comment is about the code on this
+  line, which this pull request does not change._` Without it the reader's two readings - the
+  reviewer misread the diff, or the comment landed on the wrong line - both end with the finding
+  ignored. It states the situation and nothing about how the review reached it, once per site
+  rather than per finding, and it is rendered by the plan (which owns every published word), which
+  is also what keeps it off GitHub: the GitHub plan has no off-diff sites. An off-diff finding never
+  merges into an on-diff site on the same line, or the note would mislabel the on-diff one.
+  *If wrong:* one constant.
+- **Cross-references count what posts inline on the backend in use.** On Reviewable an off-diff
+  site is a comment the reader can find, so the cluster and same-file lines name it; on GitHub they
+  do not, as before. Neither backend names a body-bound finding from an inline comment - the
+  cluster sibling most likely to be missed - because widening that changes GitHub's published text.
+  `{{#n}}` tokens already resolve against everything that publishes, body included, on both.
+- **Disposition follows what the RAISER asks for; a responder can meet a request but not create
+  one.** Four observations, and only this model fits all of them: `blocking` stayed unresolved when
+  the human marked themselves `satisfied` and cleared only once the raiser stood down too;
+  `discussing` resolved on the human's `satisfied` while the raiser still held `discussing`;
+  `informing` stayed resolved when a third participant published `discussing` on it; and a thread
+  went unresolved the moment the raiser replied with `discussing`. So `blocker` -> `blocking`;
+  `high`/`medium`/`low` -> `discussing`; `INCONCLUSIVE` -> `discussing` at any severity, since it
+  asks for a judgement the reader can settle; a REFUTED finding re-admitted by `--include-refuted`
+  -> `informing`, since its own header says it is probably not real; a merged site takes its
+  strongest; the framing comment is `informing`. A human reviewer's `blocking` behaves the same, so
+  this asks nothing of the pipeline a colleague's blocker would not. *If wrong:* blockers accumulate
+  unresolved on PRs nobody revisits; demote `blocker` to `discussing`.
+- **`informing` is right for framing and wrong for a finding.** Anything carried in the body on
+  Reviewable - a dead anchor, a `--body-only-verdicts` section - publishes already resolved and asks
+  the author for nothing. That is why Reviewable's accounting line says so, and why routing
+  off-diff findings there would have been a silent downgrade rather than a placement choice.
+- **Reviewable gets its own accounting lines; GitHub's is untouched.** GitHub's one warning says
+  off-diff and dead findings were moved into the body, which is false on Reviewable. The Reviewable
+  plan prints a warning naming the findings with no location in this pull request - a dead anchor,
+  no file or line, or a file the pull request does not touch - and a `notice:` naming the off-diff
+  ids that post inline.
+- **The artifact carries path and line, never a file key or revision.** Both are opaque ids only a
+  live call returns, and this module makes no network calls so that a payload can be built and
+  approved offline. The posting step resolves them after approval and checks them - the matched
+  file entry must carry back exactly the path searched for, and the newest revision's
+  `headCommitSha` must equal `anchored_sha`, alongside GitHub's own head - because a wrong key posts
+  to the wrong file and a stale revision attaches to superseded code, and neither fails loudly. A
+  path with no entry is fatal. *If wrong:* nothing silent - the posting step stops.
+- **A line Reviewable cannot take is refused when the payload is built.** Discussions are created
+  one call at a time, so a create rejected halfway leaves a partial review in drafts; a
+  non-positive or non-integer line is refused before approval instead. The plan built with
+  `off_diff_inline` checks it before sorting its sites, which cannot order a string line against an
+  integer one, so the refusal is an `error:` line and never a traceback. GitHub's plan does not
+  make this check (see Known gaps).
+- **Drafts are identity-scoped in both directions, so the terminal preview stays the approval
+  gate.** The agent publishes as a distinct Reviewable identity; its drafts are invisible to the
+  human in the file view and the Discussions tab, and the human's return nothing to the agent. The
+  preview is the only surface both can read, which is why it shows each discussion's disposition -
+  the part of the commitment the text does not carry.
+- **Publishing is all-or-nothing per identity, and identities are not sessions.** There is no
+  publish-one call, and concurrent sessions share one identity, so a pending draft may be an
+  abandoned run's or a live session's - nothing in a draft says which. Pre-existing drafts are
+  reported and deleted only on the operator's word, never swept. Reconciling before publishing is
+  two checks, not one: `+draft` names comment drafts by key, while `review_state.drafts` also counts
+  acknowledgements, dismissals, disposition changes and file marks, all of which publish and none of
+  which this review created. After an R5 stop, this run's recorded drafts are reported and left in
+  place until the operator chooses; only recorded keys are ever deleted.
+- **Any draft still listed after the operator answers is a hard stop before anything is created.**
+  A kept comment draft always trips the reconciliation, but only after the run has created its
+  whole review as drafts; a kept `-top` is worse, since `-top` is the identity's single top-level
+  draft (the delete tool's own description), the framing comment needs it, and the reconciliation
+  cannot tell two `-top` drafts apart by key. So R3 lists again after the answer and creates nothing
+  until the listing is empty; R5 stays, for drafts that appear after R3.
+  *If wrong:* an operator who deliberately staged a draft must clear or publish it before every
+  posting run.
+- **A failed create is checked, not assumed.** An error Reviewable returned means the draft does
+  not exist, but a timeout or a lost response may be a draft whose key never came back, and the
+  create call is not idempotent. So after any failed create the run lists `+draft` and adopts an
+  unrecorded draft whose path, line and body match the failed call exactly, rather than retrying
+  it. Since R3 leaves the listing empty, every unrecorded key is either that or someone else's.
+  Publishing after a partial failure would still send half a review as the whole one, so it never
+  publishes then. *If wrong:* a duplicate the listing missed is caught as an extra by R5 and
+  reported as this run's likely duplicate; nothing publishes until the operator settles it.
+- **A lagging Reviewable is reported, not polled.** R1 re-lists the revisions once, straight away,
+  and then stops if the newest still is not the anchored head - "One watchdog, no other waiting"
+  applies here too. *If wrong:* the operator re-runs the post step by hand after a short delay.
+- **Links come from the server, one read settling all of them.** The discussion list returns a key
+  and a `reviewable://` URI but no browser address. Every discussion URL observed is
+  `<review url>#<key>`, so one resource read whose `url` ends in `#` plus exactly the key asked for
+  yields the review URL for the rest; any mismatch falls back to one read per key for the whole
+  run, since a wrong link shape would mis-link every finding at once. A hostname is never
+  constructed: Reviewable runs on enterprise installs, and a fabricated link fails in a browser
+  rather than here. `review_publish` returns the review state, so the confirmation reads it there.
+- **Provider selection is a ladder with an explicit unreachable state, kept per repo.** Arguments,
+  then this conversation's earlier choice for the same repo, then `providers.json` keyed by
+  `owner/repo`, then the server's own `choose-review-provider` resource. Every rung is per repo,
+  the conversation's included: Reviewable can cover one repo and not the next (its free tier
+  covers public repos only), and a choice carried across repos would send a private repo's review
+  to a backend that cannot see it, where the failure reads as an unreachable server rather than
+  the wrong backend. A connection failure is not a detection result:
+  configured-but-unreachable stops and asks, only an absent configuration selects GitHub, and when
+  the two cannot be told apart it counts as unreachable - stopping costs a delay, guessing costs a
+  review published in the wrong place. A differing saved default is never overwritten unasked.
+- **A provider named in the arguments is a one-off until confirmed.** With no saved default, a
+  detected provider is recorded silently, but one named for a single run is recorded only if the
+  operator says yes when asked. Every write merges into the file and sets only this repo's key. A
+  file that is not a JSON object of `github`/`reviewable` values stops the run rather than falling
+  through to detection, which would choose a backend while the recorded choice is unreadable.
+  *If wrong:* one extra question on a repo's first explicit run, against a silent default that
+  would send later reviews to the wrong place.
+- **Reviewable discussions are GitHub review comments** (keyed `gh-<comment id>`), and an agent's
+  comment mirrors to GitHub authored by the human with a note naming the agent, so attribution and
+  the S2 read of prior feedback are unchanged. GitHub does not carry Reviewable's resolution state;
+  a re-review that wants to skip settled points must read it from Reviewable.
+- **Known gaps.** `report`'s "N inline + M in the body" line counts GitHub's placement, since the
+  backend is chosen later, in `/pr-review-post`; on Reviewable, off-diff findings in files the diff
+  touches move from the second number to the first. The key `review_discussions_create` returns cannot be confirmed by a
+  read-only call, so the prompt stops rather than guesses if a create response names none. GitHub's
+  plan still sorts its sites without checking their lines, so two findings in one file whose lines
+  are a string and an integer end in a traceback there - on `master` too. No pipeline step writes a
+  string line.

@@ -13,6 +13,10 @@ deterministic scripts they call.
 `~/.claude/commands/pr-review*.md` are symlinks into `commands/` here - edit these files, not the
 links.
 
+`/pr-review-post` publishes through GitHub's review API or through Reviewable's MCP server
+(`payload --provider github|reviewable`). The per-repo choice is remembered in `providers.json`
+here, which is local state and not tracked.
+
 Spec and plan: paranext-core `docs/superpowers/specs|plans/2026-08-28-pr-review-pipeline*.md`
 
 ## Install
@@ -29,6 +33,7 @@ live at exactly `~/.claude/pr-review/` - not a repo-relative path.
    ln -s ~/.claude/pr-review/commands/pr-review-post.md ~/.claude/commands/pr-review-post.md
    ```
 4. Requires: `bash`, `python3` (standard library only, no pip installs), `git`, and an
-   authenticated `gh` CLI (`gh auth status`).
+   authenticated `gh` CLI (`gh auth status`). Posting through Reviewable also needs its MCP server
+   connected; GitHub-only use does not.
 5. Sanity check: `~/.claude/pr-review/pr-review-wt.sh reap` should print reaper output with no
    errors, and `python3 ~/.claude/pr-review/pr-review-anchor.py --help` should print usage.

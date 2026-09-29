@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+
+# Local operator state: this machine's per-repo review backend defaults.
+providers.json
