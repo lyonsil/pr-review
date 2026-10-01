@@ -121,7 +121,7 @@ class TestVerdictSemantics(unittest.TestCase):
                                                   claim_original="older"))), [])
 
     def test_rewritten_fix_must_record_a_different_original(self):
-        it = item(1, fix_verdict="REWRITTEN", detail="**Fix:** new")
+        it = item(1, fix_verdict="REWRITTEN", detail="**Why it matters:** y\n\n**Fix:** new")
         self.assertTrue(any("fix_original" in e for e in anchor.validate(led(it))))
         it["fix_original"] = "old"
         self.assertEqual(anchor.validate(led(it)), [])
@@ -142,7 +142,7 @@ class TestNewHedges(unittest.TestCase):
 
     def test_type_level_prose_is_not_a_hedge(self):
         for fix in ("Make `id` optional in `Props`.", "Mark `x` as not required in the schema."):
-            self.assertEqual(anchor.validate(led(item(1, detail="**Fix:** " + fix))), [], fix)
+            self.assertEqual(anchor.validate(led(item(1, detail="**Why it matters:** y\n\n**Fix:** " + fix))), [], fix)
 
 
 class TestPrimitives(unittest.TestCase):
@@ -832,13 +832,13 @@ class TestExcerptAndChangedLinesCli(unittest.TestCase):
 
 class TestRenumber(unittest.TestCase):
     def test_sorts_maps_tokens_clusters_and_keeps_old_id(self):
-        l = led(item(1, sev="low", f="b.ts", detail="see {{#2}}"),
+        l = led(item(1, sev="low", f="b.ts", detail="**Why it matters:** see {{#2}}"),
                 item(2, sev="high", f="a.ts", cluster="C1"),
                 clusters=[{"id": "C1", "title": "t", "shared_fix": "s", "item_ids": [2]}])
         mapping = lt.renumber(l)
         self.assertEqual(mapping, {2: 1, 1: 2})
         by_new = {it["id"]: it for it in l["items"]}
-        self.assertEqual(by_new[2]["detail"], "see {{#1}}")
+        self.assertEqual(by_new[2]["detail"], "**Why it matters:** see {{#1}}")
         self.assertEqual(by_new[2]["old_id"], 1)
         self.assertEqual(l["clusters"][0]["item_ids"], [1])
         self.assertEqual(anchor.validate(l), [])

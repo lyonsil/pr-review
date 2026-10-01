@@ -30,6 +30,21 @@ def fix_slot(detail):
     return detail[marker.end():].strip()
 
 
+def why_it_matters_errors(detail):
+    """Read-only. Every finding that can reach an author carries a non-empty
+    `**Why it matters:**` slot. Unlike the Fix lint this enforces presence:
+    a finding with no stated consequence reads as one too minor to raise, so
+    a minor one says what it costs instead ("test-only, no behavior effect").
+    """
+    m = re.search(r"\*\*Why it matters:\*\*(.*?)(?=\*\*Fix:\*\*|\Z)", detail or "", re.DOTALL)
+    if not m:
+        return ["detail has no **Why it matters:** slot - state the consequence, however "
+                "small; a missing slot reads as a finding not worth raising"]
+    if not m.group(1).strip():
+        return ["detail's **Why it matters:** slot is empty"]
+    return []
+
+
 def demotion_reason(it):
     """Read-only. Why `it` cannot be posted as an inline comment, judged
     purely by anchoring: "dead anchor" when `anchor_status` is "dead", "not

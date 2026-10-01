@@ -7,7 +7,8 @@ anchor = importlib.util.module_from_spec(spec); spec.loader.exec_module(anchor)
 
 def item(i, sev="high", f="a.ts", line=10, cluster=None, **kw):
     d = {"id": i, "severity": sev, "severity_in": sev, "file": f, "line": line,
-         "line_end": line, "anchor_excerpt": "x", "claim": "c", "detail": "d",
+         "line_end": line, "anchor_excerpt": "x", "claim": "c",
+         "detail": "**What happens:** w\n\n**Why it matters:** y\n\n**Fix:** Do z.",
          "cluster": cluster, "verdict": "CONFIRMED", "verdict_reason": "r",
          "claim_verdict": "SOUND", "claim_reason": "matched at a.ts:10",
          "fix_verdict": "SOUND", "fix_reason": "checked at a.ts:10"}
@@ -1577,9 +1578,10 @@ class TestFixSlotHedges(unittest.TestCase):
         self.assertEqual(anchor.validate(led), [])
 
     def test_detail_without_a_fix_slot_is_not_linted(self):
-        """This is a lint over the fix text, not an enforcement of the slot's
-        presence - a ledger predating the slots still validates."""
-        led = {"schema": 2, "items": [item(1, detail="consider whether to do something")],
+        """The hedge check is a lint over the fix text, not an enforcement of
+        the Fix slot's presence."""
+        led = {"schema": 2, "items": [item(1, detail="**Why it matters:** y\n\n"
+                                                     "consider whether to do something")],
                "clusters": []}
         self.assertEqual(anchor.validate(led), [])
 
@@ -1968,3 +1970,28 @@ class TestValidateDraft(unittest.TestCase):
         os.remove(path)
         self.assertEqual(code, 1)
         self.assertTrue(err.getvalue().startswith("error: item 2 has cluster"), err.getvalue())
+
+
+class TestWhyItMattersSlot(unittest.TestCase):
+    """A finding with no stated consequence reads as one too minor to raise, so
+    every publishable finding carries the slot, minor ones included."""
+
+    def test_missing_slot_is_rejected(self):
+        led = {"schema": 2, "items": [item(1, detail="**What happens:** w\n\n**Fix:** Do z.")],
+               "clusters": []}
+        self.assertTrue(any("Why it matters" in e for e in anchor.validate(led)))
+
+    def test_empty_slot_is_rejected(self):
+        led = {"schema": 2, "items": [item(1, detail=(
+            "**What happens:** w\n\n**Why it matters:**  \n\n**Fix:** Do z."))], "clusters": []}
+        self.assertTrue(any("slot is empty" in e for e in anchor.validate(led)))
+
+    def test_refuted_item_is_exempt(self):
+        led = {"schema": 2, "items": [item(1, verdict="REFUTED", detail="**Fix:** Do z.")],
+               "clusters": []}
+        self.assertEqual(anchor.validate(led), [])
+
+    def test_draft_requires_the_slot_too(self):
+        d = draft(); d["items"][0]["detail"] = "**What happens:** w\n\n**Fix:** Do z."
+        self.assertTrue(any("item 1 detail has no **Why it matters:**" in e
+                            for e in anchor.draft_errors(d)))

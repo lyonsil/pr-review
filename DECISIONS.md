@@ -351,3 +351,7 @@ four times more common than the one three things looked for.
 - **`edit` may set `verdict_reason`, `fix_reason`, and `fix_verdict` - the last only to
   `UNVERIFIABLE`.** `/pr-review-post`'s re-verification step needs these three without a hand edit
   of the ledger. *If wrong:* three more editable fields.
+- **`Why it matters:` is always required.** The old "unless the severity is self-evident" escape
+  let the generator drop the slot on every nit, and a finding with no stated consequence reads as
+  one not worth raising - including ones that were (a frozen-update throw, a stray saved space).
+  Enforced in both `validate` and `validate --draft`. *If wrong:* one helper and two call sites.

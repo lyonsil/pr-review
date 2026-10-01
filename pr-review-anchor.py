@@ -213,6 +213,8 @@ def validate(ledger, worktree=None):
                             "(what the claim was matched against, with file:line evidence)")
             for msg in lt.claim_shape_errors(it.get("claim")):
                 errs.append(f"item {iid!r} {msg}")
+            for msg in lt.why_it_matters_errors(it.get("detail")):
+                errs.append(f"item {iid!r} {msg}")
             if it.get("claim_verdict") == "REWRITTEN" and (
                     not it.get("claim_original") or it.get("claim_original") == it.get("claim")):
                 errs.append(f"item {iid!r} claim_verdict is REWRITTEN but claim_original is "
@@ -300,6 +302,10 @@ def draft_errors(ledger):
         ids.add(iid)
         if it.get("severity_in") not in SEVERITIES:
             errs.append(f"item {iid!r} severity_in {it.get('severity_in')!r} not one of {SEVERITIES}")
+        # Checked at draft time too, so the slot is written with the finding,
+        # not patched in after the refuters have read it.
+        for msg in lt.why_it_matters_errors(it.get("detail")):
+            errs.append(f"item {iid!r} {msg}")
     by_id = {it.get("id"): it for it in items}
     listed = {}
     for c in ledger.get("clusters", []):

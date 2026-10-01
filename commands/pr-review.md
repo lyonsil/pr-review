@@ -275,8 +275,10 @@ This sentence leads every inline comment and fills the triage table, so it has t
 
 - `**What happens:**` (required) - the causal chain one step at a time, each step carrying the
   `file:line` where it happens, naming the real symbols. The mechanism goes here.
-- `**Why it matters:**` (required unless the severity is self-evident from the claim) - the
-  consequence, how often it is hit, and who hits it. A pressure-test's gating reason belongs here
+- `**Why it matters:**` (always required, minor findings included) - the
+  consequence, how often it is hit, and who hits it. A finding without this slot reads as one too
+  minor to raise, so a minor finding says what it costs instead: "test-only, with no behavior
+  effect", "maintenance only". `validate` (draft and full) rejects a missing or empty slot. A pressure-test's gating reason belongs here
   too: "only reachable when `enableX` is set, which the shipped config does not do" is exactly what
   makes a low severity read as sensible rather than arbitrary.
 - `**Fix:**` (always required, always last) - the concrete change at this site, imperative,
