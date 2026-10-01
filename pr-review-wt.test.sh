@@ -28,6 +28,11 @@ age_dir() { touch -d "$2 hours ago" "$1"; }
 # pass count differs between platforms.
 on_windows() { command -v cygpath >/dev/null 2>&1; }
 
+# The directory name Claude Code derives from a cwd: every character outside
+# [A-Za-z0-9] becomes '-'. The literal-name checks under "scratchpad:" pin this
+# independently, so a regression here cannot hide behind a matching helper.
+harness_name() { printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9' '-'; }
+
 # Paths the script reports are spelled in git's own path form, so a POSIX
 # input has to be converted the same way the script converts it. Identity
 # off Windows.
@@ -256,7 +261,7 @@ check "strips a trailing slash" "$OUT" "$(native /some/where/scratchpad)"
 echo "== scratchpad: derives the path from \$CLAUDE_CODE_SESSION_ID =="
 setup_repo
 CWD=$(pwd -P)
-WANT=$(native "/tmp/claude-$(id -u)/$(printf '%s' "$CWD" | tr / -)/sess-abc/scratchpad")
+WANT=$(native "/tmp/claude-$(id -u)/$(harness_name "$CWD")/sess-abc/scratchpad")
 OUT=$(env -u CLAUDE_SCRATCHPAD CLAUDE_CODE_SESSION_ID=sess-abc "$SCRIPT" scratchpad)
 check "derived path"    "$OUT" "$WANT"
 OUT=$(env -u CLAUDE_SCRATCHPAD -u CLAUDE_CODE_SESSION_ID "$SCRIPT" scratchpad 2>/dev/null)
@@ -264,9 +269,35 @@ check "unresolvable prints nothing" "$OUT" ""
 env -u CLAUDE_SCRATCHPAD -u CLAUDE_CODE_SESSION_ID "$SCRIPT" scratchpad >/dev/null 2>&1
 check "unresolvable exits nonzero"  "$([ $? -ne 0 ] && echo yes || echo no)" "yes"
 
+echo "== scratchpad: replaces every non-alphanumeric, not only slashes =="
+setup_repo
+mkdir -p "$R/my.repo_x y"
+OUT=$(cd "$R/my.repo_x y" && env -u CLAUDE_SCRATCHPAD CLAUDE_CODE_SESSION_ID=sess-lit "$SCRIPT" scratchpad)
+check "dot, underscore and space become '-'" \
+  "$(case "$OUT" in *-my-repo-x-y/sess-lit/scratchpad) echo yes ;; *) echo no ;; esac)" "yes"
+check "no dot survives in the cwd component" \
+  "$(printf '%s' "${OUT%/sess-lit/scratchpad}" | sed 's#^.*/##' | grep -c '[.]')" "0"
+
+echo "== scratchpad: a cwd it cannot name exactly is unresolvable, not guessed =="
+setup_repo
+mkdir -p "$R/caf$(printf '\303\251')"
+OUT=$(cd "$R/caf$(printf '\303\251')" && env -u CLAUDE_SCRATCHPAD CLAUDE_CODE_SESSION_ID=sess-u "$SCRIPT" scratchpad 2>/dev/null)
+RC=$?
+check "non-ASCII cwd prints nothing" "$OUT" ""
+check "non-ASCII cwd exits nonzero"  "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
+LONG="$R/$(printf 'a%.0s' $(seq 1 210))"
+mkdir -p "$LONG"
+OUT=$(cd "$LONG" && env -u CLAUDE_SCRATCHPAD CLAUDE_CODE_SESSION_ID=sess-l "$SCRIPT" scratchpad 2>/dev/null)
+RC=$?
+check "over-long cwd prints nothing" "$OUT" ""
+check "over-long cwd exits nonzero"  "$([ "$RC" -ne 0 ] && echo yes || echo no)" "yes"
+# An explicit value still wins where derivation cannot.
+OUT=$(cd "$LONG" && CLAUDE_SCRATCHPAD=/some/where/scratchpad CLAUDE_CODE_SESSION_ID=sess-l "$SCRIPT" scratchpad)
+check "explicit value still honoured there" "$OUT" "$(native /some/where/scratchpad)"
+
 echo "== reap: keeps an aged worktree inside the DERIVED scratchpad =="
 setup_repo
-SP="/tmp/claude-$(id -u)/$(pwd -P | tr / -)/sess-derive/scratchpad"
+SP="/tmp/claude-$(id -u)/$(harness_name "$(pwd -P)")/sess-derive/scratchpad"
 mkdir -p "$SP"
 git worktree add -q --detach "$SP/wt-pr88" "$SHA"
 age_dir "$SP/wt-pr88" 999
@@ -278,7 +309,7 @@ check "directory survives"       "$([ -d "$SP/wt-pr88" ] && echo yes || echo no)
 # must NOT degrade into "keep everything" - the age floor takes over and reaps.
 OUT=$(env -u CLAUDE_SCRATCHPAD -u CLAUDE_CODE_SESSION_ID "$SCRIPT" reap 2>&1)
 check "unresolvable does not keep" "$(git worktree list | grep -c wt-pr88)" "0"
-rm -rf "/tmp/claude-$(id -u)/$(pwd -P | tr / -)"
+rm -rf "/tmp/claude-$(id -u)/$(harness_name "$(pwd -P)")"
 
 echo "== reap: suppresses not-a-review-worktree noise unless -v =="
 setup_repo
@@ -311,7 +342,7 @@ echo "== scratchpad: derives from the REAL cwd through a symlink =="
 setup_repo
 mkdir -p "$R/real"; ln_s "$R/real" "$R/link"
 OUT=$(cd "$R/link" && env -u CLAUDE_SCRATCHPAD CLAUDE_CODE_SESSION_ID=sess-sym "$SCRIPT" scratchpad)
-WANT=$(native "/tmp/claude-$(id -u)/$(cd "$R/real" && pwd -P | tr / -)/sess-sym/scratchpad")
+WANT=$(native "/tmp/claude-$(id -u)/$(harness_name "$(cd "$R/real" && pwd -P)")/sess-sym/scratchpad")
 check "uses pwd -P not pwd" "$OUT" "$WANT"
 
 echo "== reap: rejects an unrecognized argument =="

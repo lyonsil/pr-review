@@ -32,7 +32,14 @@ native_path() {
 # $CLAUDE_SCRATCHPAD wins if the harness ever sets it, but today it does not
 # exist; what exists is $CLAUDE_CODE_SESSION_ID, from which Claude Code's
 # scratchpad path is derivable:
-#   /tmp/claude-<uid>/<cwd with every / replaced by ->/<session id>/scratchpad
+#   /tmp/claude-<uid>/<cwd with every character outside [A-Za-z0-9] replaced
+#   by ->/<session id>/scratchpad
+# That is the same name Claude Code gives the cwd under ~/.claude/projects, so
+# ~/.claude/pr-review becomes -home-<user>--claude-pr-review: the dot is
+# replaced too, not only the slashes. A cwd holding a non-ASCII character, or
+# one whose name would run past 200 characters, is named by rules this script
+# cannot reproduce exactly (per-UTF-16-unit replacement, a truncating hash),
+# so it is treated as unresolvable rather than guessed.
 # Returns 1 and prints nothing when neither is available, or when the value
 # resolves to anything other than an absolute path with at least one component
 # (on Windows, one below a drive root).
@@ -54,7 +61,12 @@ scratchpad_path() {
       [A-Za-z]:[\\/]*) on_windows && sp=$(cygpath -u "$sp") ;;
     esac
   elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
-    sp="/tmp/claude-$(id -u)/$(pwd -P | tr / -)/$CLAUDE_CODE_SESSION_ID/scratchpad"
+    local cwd name
+    cwd=$(pwd -P)
+    if printf '%s' "$cwd" | LC_ALL=C grep -q '[^ -~]'; then return 1; fi
+    name=$(printf '%s' "$cwd" | LC_ALL=C tr -c 'A-Za-z0-9' '-')
+    [ "${#name}" -le 200 ] || return 1
+    sp="/tmp/claude-$(id -u)/$name/$CLAUDE_CODE_SESSION_ID/scratchpad"
   else
     return 1
   fi
@@ -536,7 +548,7 @@ mirror_modules_entry() {
 cmd_scratchpad() {
   local sp
   if sp=$(scratchpad_path); then printf '%s\n' "$sp"; return 0; fi
-  echo "error: cannot resolve the scratchpad directory - \$CLAUDE_SCRATCHPAD is unset or not an absolute path, and \$CLAUDE_CODE_SESSION_ID is unset" >&2
+  echo "error: cannot resolve the scratchpad directory - \$CLAUDE_SCRATCHPAD is unset or not an absolute path, and \$CLAUDE_CODE_SESSION_ID is unset or the current directory's path (non-ASCII, or too long) cannot be mapped to the harness's directory name; set \$CLAUDE_SCRATCHPAD to the scratchpad path explicitly" >&2
   return 1
 }
 

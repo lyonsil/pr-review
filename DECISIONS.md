@@ -31,6 +31,17 @@ is still being iterated on and the reasoning is not recoverable from the diffs.
   the prompt would create split resolution - `create` pinned, a later `reap` derived, two different
   prefixes, exclusion silently misses the live worktree. *If wrong:* a harness path change degrades
   protection to the 24h age floor, which is the documented fallback, not unprotected deletion.
+- **The derived name replaces every character outside `[A-Za-z0-9]`, not only `/`.** It
+  mirrors the harness's own naming (the same name `~/.claude/projects/` uses), so
+  `~/.claude/pr-review` is `-home-<user>--claude-pr-review`. Replacing only `/` produced
+  `-home-<user>-.claude-pr-review`, a directory the harness never uses: worktrees and ledgers
+  landed outside the real scratchpad, protected only because `reap` derived the same wrong path.
+  A non-ASCII or over-200-character cwd is refused rather than guessed, since the harness names
+  those by rules not reproduced here. *If wrong:* such a cwd needs `$CLAUDE_SCRATCHPAD` set by
+  hand; the subcommand says so instead of returning a path that misses.
+- **Prompt blocks chain with `&&`, never `set -e`.** The harness runs each Bash command where
+  `set -e` is ignored (`set -e; false; echo x` prints `x`); a review's S6 block ran `reanchor`
+  after `validate` had failed. *If wrong:* nothing - `&&` stops in every shell.
 - **Reaping is name-based.** A native `EnterWorktree` tree named `review-*` is in scope; while in
   use it is protected by a live Claude pid, and once abandoned collecting it is desirable.
 

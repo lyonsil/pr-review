@@ -523,10 +523,14 @@ this one could not have said.
 Run, in order, stopping on any `error:`:
 
 ```bash
-set -e; A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
-python3 $A excerpt $L --worktree "$WT"
+A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
+python3 $A excerpt $L --worktree "$WT" &&
 python3 $A changed-lines $L --diff "$SCRATCH/pr-review/pr<n>/head.diff" --worktree "$WT"
 ```
+
+Chain the steps with `&&`, never `set -e`: this harness runs each command where `set -e` has no
+effect (`set -e; false; echo x` prints `x`), so a failing step would not stop the block and the
+next one would run on its output.
 
 `excerpt` copies each anchor verbatim from `$WT`, so an excerpt is never retyped; `changed-lines`
 overwrites the refuters' `on_changed_line` from the posting diff, since a wrong `true` fails the
@@ -568,10 +572,10 @@ tool, never under `/tmp`:
 Then:
 
 ```bash
-set -e; A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
-python3 $A renumber $L
-python3 $A validate $L --worktree "$WT"
-python3 $A reanchor $L --worktree "$WT" --diff "$SCRATCH/pr-review/pr<n>/head.diff" --dry-run
+A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
+python3 $A renumber $L &&
+python3 $A validate $L --worktree "$WT" &&
+python3 $A reanchor $L --worktree "$WT" --diff "$SCRATCH/pr-review/pr<n>/head.diff" --dry-run &&
 ~/.claude/pr-review/pr-review-wt.sh primary-status "$WT" | diff "$SCRATCH/primary.before" -
 ```
 
