@@ -405,7 +405,7 @@ error.
       "refuter_note": "...",                     // draft, optional; your guidance to this item's refuter - deleted by ingest, never posted
       "anchor_excerpt": "...",                   // excerpt: lines line..line_end read verbatim from $WT
       "on_changed_line": true,                   // ingest records the refuter's answer; changed-lines overwrites it from the diff
-      "file_in_diff": true,                      // changed-lines, and reanchor in /pr-review-post: the diff touches `file` at all; missing counts as true
+      "file_in_diff": true,                      // changed-lines, and reanchor in /pr-review-post: the diff names `file` at all, even with no hunk; missing counts as true
       "verdict": "CONFIRMED|DOWNGRADED|REFUTED|INCONCLUSIVE",  // ingest
       "verdict_reason": "...",                   // ingest
       "claim_verdict": "SOUND|REWRITTEN",        // ingest; absent on REFUTED

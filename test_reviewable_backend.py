@@ -177,6 +177,32 @@ class TestDispositions(unittest.TestCase):
         art, _ = reviewable(ledger(item(1, sev="blocker")))
         self.assertEqual(art["framing"]["disposition"], "informing")
 
+    def test_a_dead_anchor_blocker_makes_the_framing_comment_blocking(self):
+        art, _ = reviewable(ledger(item(1), item(2, sev="blocker", line=5, anchor_status="dead"),
+                                   item(3, sev="low", line=7, anchor_status="dead")))
+        self.assertIn("**#2**", art["framing"]["markdownBody"])
+        self.assertEqual(art["framing"]["disposition"], "blocking")
+
+    def test_the_framing_comment_takes_the_strongest_finding_it_carries(self):
+        cases = [
+            # A body-only verdict is carried there too.
+            (ledger(item(1), item(2, verdict="INCONCLUSIVE")),
+             {"body_only_verdicts": ["INCONCLUSIVE"]}, "discussing"),
+            (ledger(item(1), item(2, sev="blocker", verdict="DOWNGRADED"),
+                    item(3, line=7, anchor_status="dead")),
+             {"body_only_verdicts": ["DOWNGRADED"]}, "blocking"),
+            # A finding in a file the pull request does not change.
+            (ledger(item(1), off(2, f="b.ts", line=5, file_in_diff=False)), {}, "discussing"),
+            # A re-admitted REFUTED finding asks nothing, even a blocker.
+            (ledger(item(1), item(2, sev="blocker", verdict="REFUTED", anchor_status="dead")),
+             {"include_refuted": ["2"]}, "informing"),
+        ]
+        for led, kw, want in cases:
+            with self.subTest(kw=kw, want=want):
+                art, _ = reviewable(led, **kw)
+                self.assertIn("**#2**", art["framing"]["markdownBody"])
+                self.assertEqual(art["framing"]["disposition"], want)
+
     def test_the_artifact_carries_them_end_to_end(self):
         led = ledger(item(1, sev="blocker"), item(2, sev="blocker", f="b.ts",
                                                   verdict="INCONCLUSIVE"),
@@ -230,6 +256,15 @@ class TestArtifactShape(unittest.TestCase):
         with self.assertRaises(anchor.PayloadError):
             reviewable(ledger(item(1, verdict="REFUTED")))
 
+    def test_github_refuses_a_line_that_is_not_a_positive_integer(self):
+        for led in (ledger(item(1, line=0)), ledger(item(1, line=True)),
+                    ledger(item(1, line=10), item(2, line="3"))):
+            with self.subTest(lines=[it["line"] for it in led["items"]]):
+                with self.assertRaises(anchor.PayloadError) as ctx:
+                    github(led)
+                self.assertIn(f"#{led['items'][-1]['id']}", str(ctx.exception))
+                self.assertIn("not a positive integer", str(ctx.exception))
+
 
 class TestStderr(unittest.TestCase):
     LED = staticmethod(lambda: ledger(item(1), off(2, line=5), item(3, line=7, anchor_status="dead")))
@@ -238,15 +273,27 @@ class TestStderr(unittest.TestCase):
         _, err = reviewable(self.LED())
         self.assertEqual(err.splitlines(), [
             "warning: 1 selected item(s) moved into the review-level comment, which publishes "
-            "resolved (no location in this pull request to attach a comment to) - #3 (dead anchor)",
+            "resolved only when nothing in it asks for a reply (no location in this pull request "
+            "to attach a comment to) - #3 (dead anchor)",
             "notice: 1 selected item(s) are not on a line this PR changes and post inline, each "
             "site opening with a note saying so - #2"])
+        _, err = reviewable(ledger(item(1), item(2, verdict="INCONCLUSIVE")),
+                            body_only_verdicts=["INCONCLUSIVE"])
+        self.assertEqual(err.splitlines(), [
+            "notice: 1 selected item(s) carried in the review-level comment rather than posted "
+            "inline, which publishes resolved only when nothing in it asks for a reply - "
+            "#2 (INCONCLUSIVE)"])
 
     def test_github_wording_is_unchanged(self):
         _, err = github(self.LED())
         self.assertEqual(err.splitlines(), [
             "warning: 2 selected item(s) moved into the review body (cannot be anchored to a "
             "changed line) - #2 (not on a changed line), #3 (dead anchor)"])
+        _, err = github(ledger(item(1), item(2, verdict="INCONCLUSIVE")),
+                        body_only_verdicts=["INCONCLUSIVE"])
+        self.assertEqual(err.splitlines(), [
+            "notice: 1 selected item(s) carried in the review body rather than posted inline - "
+            "#2 (INCONCLUSIVE)"])
 
 
 class TestFileInDiff(unittest.TestCase):
@@ -271,22 +318,116 @@ class TestFileInDiff(unittest.TestCase):
     def recorded(self, led):
         return {it["id"]: it["file_in_diff"] for it in led["items"]}
 
-    def test_changed_lines_records_it(self):
-        led = ledger(*self.items)
-        anchor.lt.mark_changed_lines(led, self.wt, anchor.parse_changed_lines(self.DIFF))
-        self.assertEqual(self.recorded(led), {1: True, 2: False, 3: True})
-
-    def test_reanchor_records_it(self):
+    def write(self, items, diff):
         lp, dp = os.path.join(self.wt, "ledger.json"), os.path.join(self.wt, "head.diff")
         with open(lp, "w", encoding="utf-8") as fh:
-            json.dump(ledger(*self.items), fh)
+            json.dump(ledger(*items), fh)
         with open(dp, "w", encoding="utf-8", newline="") as fh:
-            fh.write(self.DIFF)
+            fh.write(diff)
+        return lp, dp
+
+    def changed_lines(self, items, diff):
+        lp, dp = self.write(items, diff)
+        args = SimpleNamespace(ledger=lp, diff=dp, worktree=self.wt)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(anchor.cmd_changed_lines(args), 0)
+        with open(lp, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def reanchor(self, items, diff):
+        lp, dp = self.write(items, diff)
         args = SimpleNamespace(ledger=lp, diff=dp, worktree=self.wt, head=None, dry_run=False)
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(anchor.cmd_reanchor(args), 0)
         with open(lp, encoding="utf-8") as fh:
-            self.assertEqual(self.recorded(json.load(fh)), {1: True, 2: False, 3: True})
+            return json.load(fh)
+
+    def test_changed_lines_records_it(self):
+        led = self.changed_lines(self.items, self.DIFF)
+        self.assertEqual(self.recorded(led), {1: True, 2: False, 3: True})
+
+    def test_reanchor_records_it(self):
+        led = self.reanchor(self.items, self.DIFF)
+        self.assertEqual(self.recorded(led), {1: True, 2: False, 3: True})
+
+    # Each prints no `+++` line: git's own output for b.ts, from `git diff -M`.
+    NO_HUNK = {
+        "rename only": ("diff --git a/old.ts b/b.ts\nsimilarity index 100%\n"
+                        "rename from old.ts\nrename to b.ts\n"),
+        "mode only": "diff --git a/b.ts b/b.ts\nold mode 100644\nnew mode 100755\n",
+        "binary": ("diff --git a/b.ts b/b.ts\nindex 1111111..2222222 100644\n"
+                   "Binary files a/b.ts and b/b.ts differ\n"),
+    }
+
+    def test_a_file_with_no_hunk_is_in_the_diff(self):
+        for name, part in self.NO_HUNK.items():
+            for step in (self.changed_lines, self.reanchor):
+                with self.subTest(diff=name, step=step.__name__):
+                    led = step(self.items, self.DIFF + part)
+                    self.assertEqual(self.recorded(led), {1: True, 2: True, 3: True})
+                    self.assertFalse(next(it for it in led["items"]
+                                          if it["id"] == 2)["on_changed_line"])
+
+    def test_a_file_with_no_hunk_posts_as_a_discussion_on_reviewable(self):
+        led = self.reanchor(self.items, self.DIFF + self.NO_HUNK["rename only"])
+        art, _ = reviewable(led)
+        d = by_ids(art)[(2,)]
+        self.assertEqual((d["path"], d["line"]), ("b.ts", 1))
+        self.assertTrue(d["markdownBody"].startswith(NOTE))
+
+    def test_a_deleted_file_is_not_in_the_diff(self):
+        gone = ("diff --git a/b.ts b/b.ts\ndeleted file mode 100644\nindex 1111111..0000000\n"
+                "--- a/b.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-one\n")
+        self.assertNotIn("b.ts", anchor.lt.diff_files(self.DIFF + gone))
+
+    def test_the_line_map_keeps_only_files_with_hunks(self):
+        diff = self.DIFF + "".join(self.NO_HUNK.values())
+        self.assertEqual(anchor.parse_changed_lines(diff), {"a.ts": {1}, "c.ts": set()})
+        self.assertEqual(anchor.lt.diff_files(diff), {"a.ts", "b.ts", "c.ts"})
+
+
+class TestQuotedPaths(unittest.TestCase):
+    """Git C-quotes a path with a non-ASCII byte, a control character, a quote
+    or a backslash. Every reader of the diff decodes it to the plain path a
+    ledger records. On GitHub this is a deliberate change: such a finding used
+    to be judged off the diff and moved into the review body."""
+    CAFE = "caf\u00e9.ts"
+    DIFF = ('diff --git "a/caf\\303\\251.ts" "b/caf\\303\\251.ts"\n'
+            'index 1111111..2222222 100644\n'
+            '--- "a/caf\\303\\251.ts"\n'
+            '+++ "b/caf\\303\\251.ts"\n'
+            "@@ -1,1 +1,2 @@\n+new\n one\n")
+
+    def test_the_key_is_the_plain_path(self):
+        self.assertIn('+++ "b/caf\\303\\251.ts"', self.DIFF)
+        self.assertEqual(anchor.parse_changed_lines(self.DIFF), {self.CAFE: {1}})
+        self.assertEqual(anchor.lt.diff_files(self.DIFF), {self.CAFE})
+
+    def test_every_escape_git_writes_is_decoded(self):
+        cases = {'"b/caf\\303\\251.ts"': "b/" + self.CAFE,
+                 '"a\\tb\\nc\\"d\\\\e.ts"': 'a\tb\nc"d\\e.ts',
+                 "b/plain name.ts": "b/plain name.ts", "/dev/null": "/dev/null"}
+        for raw, want in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(anchor.lt.git_path(raw), want)
+
+    def test_a_quoted_rename_target_is_in_the_diff(self):
+        diff = ('diff --git a/old.ts "b/caf\\303\\251.ts"\nsimilarity index 100%\n'
+                'rename from old.ts\nrename to "caf\\303\\251.ts"\n')
+        self.assertEqual(anchor.lt.diff_files(diff), {self.CAFE})
+
+    def test_changed_lines_puts_the_finding_on_its_line_on_github(self):
+        led = ledger(item(1, f=self.CAFE, line=1, anchor_excerpt="new"))
+        with tempfile.TemporaryDirectory() as wt:
+            with open(os.path.join(wt, self.CAFE), "w", encoding="utf-8") as fh:
+                fh.write("new\none\n")
+            anchor.lt.mark_changed_lines(led, wt, anchor.parse_changed_lines(self.DIFF),
+                                         anchor.lt.diff_files(self.DIFF))
+        self.assertEqual((led["items"][0]["on_changed_line"], led["items"][0]["file_in_diff"]),
+                         (True, True))
+        payload, err = github(led)
+        self.assertEqual([(c["path"], c["line"]) for c in payload["comments"]], [(self.CAFE, 1)])
+        self.assertEqual(err, "")
 
 
 class TestCli(unittest.TestCase):
@@ -350,6 +491,19 @@ class TestCli(unittest.TestCase):
         self.assertIn("#2", last)
         self.assertNotIn("Traceback", proc.stderr)
 
+    def test_a_malformed_line_is_an_error_line_on_github_not_a_traceback(self):
+        for items in ([item(1, line=10), item(2, line="3")], [item(1, line=10), item(2, line=0)]):
+            with self.subTest(line=items[1]["line"]):
+                with open(self.ledger, "w", encoding="utf-8") as fh:
+                    json.dump(ledger(*items), fh)
+                proc = subprocess.run([sys.executable, "-B", SCRIPT, "payload", self.ledger,
+                                       "--body-file", self.body],
+                                      capture_output=True, text=True)
+                self.assertEqual((proc.returncode, proc.stdout), (1, ""))
+                self.assertEqual(proc.stderr.splitlines(), [
+                    "error: item id(s) have a line that is not a positive integer, cannot be "
+                    "attached to a comment: #2"])
+
     def test_an_unknown_provider_is_refused(self):
         proc = subprocess.run([sys.executable, "-B", SCRIPT, "payload", self.ledger,
                                "--body-file", self.body, "--provider", "gitlab"],
@@ -388,6 +542,30 @@ class TestCli(unittest.TestCase):
         self.assertEqual((code, out), (1, ""))
         self.assertIn("missing required field 'discussions'", err)
 
+    def test_preview_refuses_an_artifact_without_a_framing_comment(self):
+        good = {"markdownBody": "f", "disposition": "informing"}
+        for framing in (None, "f", {}, dict(good, markdownBody=""), dict(good, disposition=""),
+                        {"markdownBody": "f"}, dict(good, disposition=["informing"])):
+            with self.subTest(framing=framing):
+                art = {"provider": "reviewable", "discussions": []}
+                if framing is not None:
+                    art["framing"] = framing
+                code, out, err = self.preview(self.write(art))
+                self.assertEqual((code, out), (1, ""))
+                self.assertEqual(err.splitlines(), [
+                    f"error: payload file {self.dir}{os.sep}payload.json is missing required "
+                    "field 'framing' (an object with non-empty markdownBody and disposition)"])
+        code, _, _ = self.preview(self.write({"provider": "reviewable", "discussions": [],
+                                              "framing": good}))
+        self.assertEqual(code, 0)
+
+    def test_preview_shows_the_framing_disposition_it_will_post(self):
+        with open(self.ledger, "w", encoding="utf-8") as fh:
+            json.dump(ledger(item(1), item(2, sev="blocker", line=5, anchor_status="dead")), fh)
+        _, out = self.payload(provider="reviewable")
+        _, text, _ = self.preview(self.write(json.loads(out)))
+        self.assertIn("framing disposition: blocking", text)
+
     def test_preview_pages_reassemble_for_reviewable(self):
         art = {"provider": "reviewable", "framing": {"markdownBody": "f", "disposition": "informing"},
                "discussions": [{"path": "a.ts", "line": n + 1, "markdownBody": "x" * 6000,
@@ -400,6 +578,42 @@ class TestCli(unittest.TestCase):
         code, text, _ = self.preview(self.write(art), page=2)
         self.assertEqual(code, 0)
         self.assertTrue(text.startswith(f"page 2/{len(pages)}"))
+
+
+class TestProviderLookup(unittest.TestCase):
+    """The step 1.5 lookup in commands/pr-review-post.md, run as written
+    against a providers.json in a throwaway home directory."""
+
+    def setUp(self):
+        with open(os.path.join(HERE, "commands", "pr-review-post.md"), encoding="utf-8") as fh:
+            md = fh.read()
+        blocks = [seg.split('\n" "$REPO"')[0] for seg in md.split('python3 -c "\n')[1:]]
+        self.lookup = next(b for b in blocks if "keyed by owner/repo" in b)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, ".claude", "pr-review", "providers.json")
+        os.makedirs(os.path.dirname(self.path))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_lookup(self, data, repo="o/r"):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        env = dict(os.environ, HOME=self.tmp.name, USERPROFILE=self.tmp.name)
+        proc = subprocess.run([sys.executable, "-B", "-c", self.lookup, repo],
+                              capture_output=True, text=True, env=env)
+        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+    def test_this_repos_entry_is_read(self):
+        self.assertEqual(self.run_lookup({"o/r": "reviewable", "x/y": "github"}),
+                         (0, "reviewable", ""))
+        self.assertEqual(self.run_lookup({"x/y": "github"}), (0, "", ""))
+
+    def test_another_repos_bad_entry_stops_the_run_and_is_named(self):
+        code, out, err = self.run_lookup({"o/r": "github", "x/y": "gitlab"})
+        self.assertEqual((code, out), (1, ""))
+        self.assertTrue(err.startswith("error: "), err)
+        self.assertIn("the entry for x/y is 'gitlab', not github or reviewable", err)
 
 
 if __name__ == "__main__":

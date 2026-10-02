@@ -149,20 +149,21 @@ except (OSError, ValueError) as e:
     sys.exit('error: %s is not readable JSON: %s' % (path, e))
 if not isinstance(data, dict):
     sys.exit('error: %s must be a JSON object keyed by owner/repo' % path)
-v = data.get(sys.argv[1])
-if v is not None and v not in ('github', 'reviewable'):
-    sys.exit('error: %s: %r is not github or reviewable' % (sys.argv[1], v))
-print(v or '')
+for repo, v in sorted(data.items()):
+    if v not in ('github', 'reviewable'):
+        sys.exit('error: %s: the entry for %s is %r, not github or reviewable' % (path, repo, v))
+print(data.get(sys.argv[1], ''))
 " "$REPO"
    ```
 
    A missing file or an empty line means no default is recorded - fall through to detection.
    Neither is an error. An `error:` line means the file is damaged: **stop**, show the line to the
-   user and ask them to fix or delete the file. Do not fall through to detection, which would
-   choose a backend while the user's recorded choice is unreadable, and do not rewrite the file
-   unasked. The key is per repo because the answer is per repo: a team on Reviewable
-   for one repo reviews another on GitHub, and one global default would carry the wrong answer
-   across silently.
+   user and ask them to fix or delete the file. The line names the entry at fault, which may be
+   another repo's: every entry is checked, because every write carries the others forward
+   unchanged. Do not fall through to detection, which would choose a backend while the user's
+   recorded choice is unreadable, and do not rewrite the file unasked. The key is per repo because
+   the answer is per repo: a team on Reviewable for one repo reviews another on GitHub, and one
+   global default would carry the wrong answer across silently.
 4. **Detection.** Read the Reviewable MCP server's own `reviewable://skills/choose-review-provider`
    resource and follow it. Read it - do not reconstruct it from memory, and do not infer the answer
    from whether some tool call happens to work. It is the server's statement about its own
@@ -266,7 +267,8 @@ file the PR does not touch goes into the review body; any other off-diff finding
 its own discussion, opening with a line telling the reader the PR does not change that code.
 Reviewable keys a discussion to one of the PR's own files, so a file outside the diff has nothing to
 key it to. `reanchor` records which case each finding is as `file_in_diff`, true when the diff
-touches the finding's file at all. Report which ids were demoted or posted off the diff and why,
+names the finding's file at all - a rename, a mode change or a binary change included, though
+none of those prints a `+++` line. Report which ids were demoted or posted off the diff and why,
 then carry on. Refuted items are the opposite
 case and are never demoted: they were judged not real, so they appear nowhere unless re-admitted
 per-id with `--include-refuted`. `DOWNGRADED` and `INCONCLUSIVE` items are NOT routed by verdict -
@@ -381,10 +383,13 @@ review does not fail - it silently builds the GitHub artifact, with every off-di
 body. Both backends run the same selection, exclusions and warnings; they differ in where an
 off-diff finding lands and in the shape of the file.
 
-On Reviewable the review body becomes the review-level comment, which is raised as `informing` -
-it publishes already resolved and asks the author for nothing. That is right for framing and wrong
-for a finding, so anything carried in the body there (a dead anchor, or a verdict routed by
-`--body-only-verdicts`) reaches the author without asking for a reply. Say so when it applies.
+On Reviewable the review body becomes the review-level comment, and it carries every finding that
+has nowhere else to go: a dead anchor, a finding with no file or line, a finding in a file the pull
+request does not change, and a verdict routed by `--body-only-verdicts`. The comment is raised at
+the strongest disposition among those findings, as a merged discussion is, and at `informing` when
+it carries none. So it publishes resolved only when nothing in it asks for a reply, and a blocker
+in it makes the whole comment `blocking`, holding the merge for everything it carries. Say which
+applies when the body carries findings.
 
 Omit `--include-refuted` entirely when nothing is being overruled. Always read
 `payload.stderr` next - both the fatal-error path and the warning path write there, never to
@@ -409,9 +414,11 @@ the label `dead anchor` or `not on a changed line` (GitHub rejects the whole rev
 off-diff anchor), ids named by `--include-refuted` that were **not** in `--select` and so
 re-admitted nothing, ids re-admitted **because** of `--include-refuted`, and `{{#id}}`
 cross-references to a finding that is not in this review. With `--provider reviewable` the
-body-bound line reads `moved into the review-level comment, which publishes resolved` and names only
-findings with no line (`dead anchor`, `no file or line`), and a `notice:` line names the off-diff
-ids that post inline instead. **Relay every line to the user, as message
+body-bound line reads `moved into the review-level comment, which publishes resolved only when
+nothing in it asks for a reply` and names only findings with nowhere in the pull request to attach
+a comment (`dead anchor`, `no file or line`, `file not in the pull request`); the
+`--body-only-verdicts` notice says the same of the review-level comment; and a `notice:` line names
+the off-diff ids that post inline instead. **Relay every line to the user, as message
 text, before presenting the plan.** They must see exactly what was dropped, moved or overridden, or they will
 believe they posted findings that never made it into the payload, or that a refuted finding they
 never asked to override went out anyway.
@@ -438,8 +445,9 @@ page M. Only after the last page, ask for approval once. Also give the path of `
 `preview` always writes the whole preview to `$SCRATCH/pr-review/pr$NUMBER/preview.txt`, beside
 `payload.json`, and prints no line saying so.
 
-`preview` renders whichever artifact the file holds. A Reviewable one shows the framing comment and
-then each discussion as `DISCUSSION n/N - <path>:<line> [<disposition>] - #<ids>`. The disposition
+`preview` renders whichever artifact the file holds. A Reviewable one shows the framing comment,
+under a `framing disposition:` line, and then each discussion as
+`DISCUSSION n/N - <path>:<line> [<disposition>] - #<ids>`. The disposition
 is part of what is being approved: `blocking` (raised only for a `blocker`) holds the merge until the
 raiser stands down, `discussing` clears when the author responds, and `informing` asks nothing. On
 Reviewable the preview is also the only place the user can read the review before it publishes:

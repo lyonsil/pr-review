@@ -369,8 +369,13 @@ than reasoned about.
   to the single-function `build_payload` it replaced: a differential oracle over 25,000 randomized
   ledgers (payload JSON, stderr, raised errors, full and paged preview) and 1,000 CLI runs under two
   console encodings (exit code, stdout, stderr, `preview.txt`) found zero differences, and twelve
-  seeded mutants - each a working module - were all caught. *If wrong:* the GitHub renderer is ten
-  lines over the plan.
+  seeded mutants - each a working module - were all caught. Two later changes alter GitHub's output
+  on purpose, each recorded below: a git-quoted path is decoded, and a malformed line is refused.
+  Re-run against `master` with every difference required to be one of those two, 75,000 ledgers and
+  2,028 CLI runs differed only by the line refusal, and 5,000 random diffs through `changed-lines`
+  and `reanchor` differed only for quoted paths; 28 seeded mutants were caught, and the one that
+  restores `master`'s handling of a `true` line is caught by the unit tests instead.
+  *If wrong:* the GitHub renderer is ten lines over the plan.
 - **Off-diff findings post inline on Reviewable.** GitHub rejects the whole review over one
   off-diff comment, which is the only reason those findings are demoted into the body. Reviewable
   has no such rule: a comment on line 2 of a file whose only hunk is at line 269 was accepted,
@@ -382,15 +387,20 @@ than reasoned about.
   decided when the payload is built.** Reviewable keys a discussion to one of the PR's own file
   entries, so such a finding has nothing to attach to, and the posting step's path lookup would
   stop on it every time - re-anchoring cannot change a file's absence from the diff. `changed-lines`
-  and `reanchor` record `file_in_diff` from the diff's `+++` headers, which name every file the
-  diff touches, including one with no added line; `plan_review` reads it. Deciding it there rather
+  and `reanchor` record `file_in_diff` from every file the diff gives a new side, including one
+  with no added line; `plan_review` reads it. The `+++` headers alone do not name them all: a
+  rename with no content change, a mode-only change and a binary change print no `+++` line, so
+  each file's `diff --git` header counts too, or its `rename to` line for a path that moved, whose
+  two halves cannot be split reliably when a path holds a space. The line map keeps only files
+  with a `+++` header, since the others have no line to anchor to. A deleted file has no new side
+  and is not in the diff. Deciding it there rather
   than at the posting step keeps the preview true: moving a finding into the framing comment after
   approval would publish a body nobody approved. A missing field counts as in the diff, so an
   older ledger plans as before and the posting step still stops on it. GitHub reads nothing of
   this: those findings are off-diff there and go in the body exactly as before.
-  *If wrong:* such a finding publishes resolved and asks the author for nothing - the silent
-  downgrade the entry below warns of, limited to code the PR never touched; to post it inline
-  instead, the posting step would need a file-level key Reviewable does not list.
+  *If wrong:* such a finding is read in the framing comment, away from the code it is about,
+  though still raised at its own disposition (see below); to post it inline instead, the posting
+  step would need a file-level key Reviewable does not list.
 - **An off-diff discussion says so in its first line:** `_This comment is about the code on this
   line, which this pull request does not change._` Without it the reader's two readings - the
   reviewer misread the diff, or the comment landed on the wrong line - both end with the finding
@@ -413,17 +423,28 @@ than reasoned about.
   `high`/`medium`/`low` -> `discussing`; `INCONCLUSIVE` -> `discussing` at any severity, since it
   asks for a judgement the reader can settle; a REFUTED finding re-admitted by `--include-refuted`
   -> `informing`, since its own header says it is probably not real; a merged site takes its
-  strongest; the framing comment is `informing`. A human reviewer's `blocking` behaves the same, so
+  strongest; the framing comment takes the strongest among the findings it carries, and is
+  `informing` when it carries none. A human reviewer's `blocking` behaves the same, so
   this asks nothing of the pipeline a colleague's blocker would not. *If wrong:* blockers accumulate
   unresolved on PRs nobody revisits; demote `blocker` to `discussing`.
-- **`informing` is right for framing and wrong for a finding.** Anything carried in the body on
-  Reviewable - a dead anchor, a `--body-only-verdicts` section - publishes already resolved and asks
-  the author for nothing. That is why Reviewable's accounting line says so, and why routing
-  off-diff findings there would have been a silent downgrade rather than a placement choice.
+- **`informing` is right for framing and wrong for a finding, so the framing comment is raised as
+  the findings it carries.** On Reviewable the body carries a dead anchor, a finding with no file or
+  line, one in a file the pull request does not change, and any `--body-only-verdicts` section.
+  Raised `informing`, as it once was, the comment published resolved whatever it held, so a blocker
+  whose code moved before posting stopped holding the merge and asked the author for nothing -
+  exactly the softening `site_disposition` exists to prevent. So the comment takes the strongest
+  disposition among those findings, as a merged site does, and stays `informing` when it carries
+  none. The plan records which findings the body carries (`body_findings`) for this, and the
+  accounting lines say the comment publishes resolved only when nothing in it asks for a reply.
+  GitHub has no disposition and is unaffected. *If wrong:* a framing comment holding a blocker holds
+  the merge for everything in it, its context and every lesser finding beside the blocker, until
+  the raiser stands down; if that proves too blunt, raise only blockers there and leave the rest
+  `informing`.
 - **Reviewable gets its own accounting lines; GitHub's is untouched.** GitHub's one warning says
   off-diff and dead findings were moved into the body, which is false on Reviewable. The Reviewable
   plan prints a warning naming the findings with no location in this pull request - a dead anchor,
-  no file or line, or a file the pull request does not touch - and a `notice:` naming the off-diff
+  no file or line, or a file the pull request does not touch - a `--body-only-verdicts` notice that
+  names the review-level comment rather than the review body, and a `notice:` naming the off-diff
   ids that post inline.
 - **The artifact carries path and line, never a file key or revision.** Both are opaque ids only a
   live call returns, and this module makes no network calls so that a payload can be built and
@@ -432,12 +453,13 @@ than reasoned about.
   `headCommitSha` must equal `anchored_sha`, alongside GitHub's own head - because a wrong key posts
   to the wrong file and a stale revision attaches to superseded code, and neither fails loudly. A
   path with no entry is fatal. *If wrong:* nothing silent - the posting step stops.
-- **A line Reviewable cannot take is refused when the payload is built.** Discussions are created
-  one call at a time, so a create rejected halfway leaves a partial review in drafts; a
-  non-positive or non-integer line is refused before approval instead. The plan built with
-  `off_diff_inline` checks it before sorting its sites, which cannot order a string line against an
-  integer one, so the refusal is an `error:` line and never a traceback. GitHub's plan does not
-  make this check (see Known gaps).
+- **A line that is not a positive integer is refused when the payload is built, on both
+  backends.** On Reviewable, discussions are created one call at a time, so a create rejected
+  halfway leaves a partial review in drafts; on GitHub such a line was sent as it was, or two lines
+  of different types in one file ended `payload` in a traceback - on `master` too. The plan checks
+  every site's line before sorting its sites, which cannot order a string line against an integer
+  one, so the refusal is an `error:` line and never a traceback. This deliberately changes GitHub's
+  output for a malformed ledger, and only for one: no pipeline step writes such a line.
 - **Drafts are identity-scoped in both directions, so the terminal preview stays the approval
   gate.** The agent publishes as a distinct Reviewable identity; its drafts are invisible to the
   human in the file view and the Discussions tab, and the human's return nothing to the agent. The
@@ -492,8 +514,20 @@ than reasoned about.
   operator says yes when asked. Every write merges into the file and sets only this repo's key. A
   file that is not a JSON object of `github`/`reviewable` values stops the run rather than falling
   through to detection, which would choose a backend while the recorded choice is unreadable.
+  Every entry is checked, not only this repo's, and the `error:` line names the entry at fault:
+  each write carries the other entries forward unchanged, so a bad one left alone would surface
+  later, on a run for the repo it belongs to. The cost is that one repo's run stops on another
+  repo's bad entry until someone fixes or deletes it.
   *If wrong:* one extra question on a repo's first explicit run, against a silent default that
   would send later reviews to the wrong place.
+- **Paths git quotes are decoded wherever the diff is read.** Git writes a path with a non-ASCII
+  byte (under the default `core.quotePath`), a control character, a quote or a backslash as a
+  C-quoted string - `+++ "b/caf\303\251.ts"` - in its `+++`, `diff --git` and `rename to` lines.
+  Read verbatim, that never matched the plain path a ledger records, so such a finding was judged
+  off the diff: moved into GitHub's review body as not on a changed line, or on Reviewable into the
+  framing comment as in a file the pull request does not change. Decoding it, with the standard
+  library, deliberately changes GitHub's output for those files and no others: their findings now
+  post inline. *If wrong:* the decode is one function, `git_path`.
 - **Reviewable discussions are GitHub review comments** (keyed `gh-<comment id>`), and an agent's
   comment mirrors to GitHub authored by the human with a note naming the agent, so attribution and
   the S2 read of prior feedback are unchanged. GitHub does not carry Reviewable's resolution state;
@@ -501,7 +535,4 @@ than reasoned about.
 - **Known gaps.** `report`'s "N inline + M in the body" line counts GitHub's placement, since the
   backend is chosen later, in `/pr-review-post`; on Reviewable, off-diff findings in files the diff
   touches move from the second number to the first. The key `review_discussions_create` returns cannot be confirmed by a
-  read-only call, so the prompt stops rather than guesses if a create response names none. GitHub's
-  plan still sorts its sites without checking their lines, so two findings in one file whose lines
-  are a string and an integer end in a traceback there - on `master` too. No pipeline step writes a
-  string line.
+  read-only call, so the prompt stops rather than guesses if a create response names none.

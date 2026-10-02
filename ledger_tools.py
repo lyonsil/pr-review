@@ -72,21 +72,92 @@ def demotion_reason(it):
     return None
 
 
-def parse_changed_lines(diff_text):
-    """Map file path -> set of new-side line numbers added or modified.
+# Git C-quotes a path holding a byte it will not print raw - any non-ASCII
+# byte under the default core.quotePath, a control character, a quote or a
+# backslash - as "..." with octal escapes for the raw bytes and C escapes for
+# the rest. The escapes are always ASCII, so the decode runs on bytes and only
+# the result is read as UTF-8.
+_GIT_QUOTED = r'"(?:[^"\\]|\\.)*"'
+_C_ESCAPE = re.compile(rb'\\([0-3][0-7]{2}|[abtnvfr"\\])')
+_C_CHARS = {b"a": b"\a", b"b": b"\b", b"t": b"\t", b"n": b"\n", b"v": b"\v", b"f": b"\f",
+            b"r": b"\r", b'"': b'"', b"\\": b"\\"}
 
-    Every file with a new-side `+++` header is a key, even one whose hunks
-    add no line: the keys are the files the diff touches, which is what
-    `file_in_diff` records."""
-    changed, path, newline = {}, None, None
+
+def git_path(raw):
+    """A path as a git diff header prints it, unquoted: `"b/caf\\303\\251.ts"`
+    reads as `b/café.ts`. Anything not wrapped in quotes is returned as is -
+    git quotes every path that starts with a quote, so an unquoted one is
+    already literal."""
+    if len(raw) < 2 or raw[0] != '"' or raw[-1] != '"':
+        return raw
+    def unescape(m):
+        esc = m.group(1)
+        return bytes([int(esc, 8)]) if len(esc) == 3 else _C_CHARS[esc]
+    return _C_ESCAPE.sub(unescape, raw[1:-1].encode("utf-8")).decode("utf-8", errors="replace")
+
+
+def _strip_b(path):
+    return path[2:] if path.startswith("b/") else path
+
+
+def _diff_git_new_path(rest):
+    """The new-side path named by a `diff --git <old> <new>` header, given the
+    text after `diff --git `, or None when it cannot be read unambiguously.
+
+    A quoted half is delimited by its quotes. Two unquoted halves are split
+    only where they name the same path, which is every header but a rename's
+    or a copy's - and those carry a `rename to`/`copy to` line, which wins."""
+    m = re.fullmatch(rf"(?:{_GIT_QUOTED}|\S.*?) ({_GIT_QUOTED})", rest)
+    if m:
+        return _strip_b(git_path(m.group(1)))
+    m = re.fullmatch(rf"{_GIT_QUOTED} (.+)", rest)
+    if m:
+        return _strip_b(m.group(1))
+    half = (len(rest) - 5) // 2
+    if half > 0 and rest == f"a/{rest[2:2 + half]} b/{rest[2:2 + half]}":
+        return rest[2:2 + half]
+    return None
+
+
+def _parse_diff(diff_text):
+    """(changed, files): `changed` maps each file with a new-side `+++`
+    header to the new-side line numbers its hunks add, and `files` is every
+    file the diff gives a new side.
+
+    The two differ because a rename with no content change, a mode-only change
+    and a binary change print no `+++` line at all: such a file is in the pull
+    request but has no hunk to anchor to, so it is in `files` and not in
+    `changed`. Each file's `diff --git` header names it - or its
+    `rename to`/`copy to` line, for a path that moved. A deleted file has no
+    new side and is in neither. Paths git quotes are decoded, so both match
+    the plain path a ledger records."""
+    changed, files, path, newline = {}, set(), None, None
+    # Between a `diff --git` line and its first hunk: the file that header
+    # names, recorded when the header ends.
+    in_header, header = False, None
+
+    def flush():
+        if in_header and header:
+            files.add(header)
+
     for line in diff_text.splitlines():
-        if line.startswith("+++ "):
-            raw = line[4:].strip()
-            path = None if raw == "/dev/null" else (raw[2:] if raw.startswith("b/") else raw)
+        if line.startswith("diff --git "):
+            flush()
+            in_header, header = True, _diff_git_new_path(line[len("diff --git "):])
+        elif in_header and line.startswith(("rename to ", "copy to ")):
+            header = git_path(line.split(" ", 2)[2])
+        elif in_header and line.startswith("deleted file mode"):
+            header = None
+        elif line.startswith("+++ "):
+            raw = git_path(line[4:].strip())
+            path = None if raw == "/dev/null" else _strip_b(raw)
             if path:
                 changed.setdefault(path, set())
+                files.add(path)
             newline = None
         elif line.startswith("@@"):
+            flush()
+            in_header = False
             m = re.search(r"\+(\d+)", line)
             newline = int(m.group(1)) if m else None
         elif path and newline is not None:
@@ -94,7 +165,25 @@ def parse_changed_lines(diff_text):
                 changed[path].add(newline); newline += 1
             elif line.startswith(" "):
                 newline += 1
-    return changed
+    flush()
+    return changed, files
+
+
+def parse_changed_lines(diff_text):
+    """Map file path -> set of new-side line numbers added or modified.
+
+    Every file with a new-side `+++` header is a key, even one whose hunks
+    add no line. A file the diff names without one - a pure rename, a mode
+    change, a binary change - is not, since it has no hunk to anchor to;
+    `diff_files` includes those."""
+    return _parse_diff(diff_text)[0]
+
+
+def diff_files(diff_text):
+    """Every file the diff gives a new side, including one with no `+++`
+    header (see `_parse_diff`): the files the pull request touches, which is
+    what `file_in_diff` records."""
+    return _parse_diff(diff_text)[1]
 
 
 def load_json(path, what="ledger"):
@@ -252,16 +341,17 @@ def first_changed_line(changed, start, end):
     return min((n for n in changed if start <= n <= end), default=None)
 
 
-def mark_changed_lines(ledger, worktree, changed):
+def mark_changed_lines(ledger, worktree, changed, files=None):
     """Mutating: call inside the `changed-lines` subcommand, before
     `write_ledger`.
 
     Same rule reanchor applies: a finding is on the diff when its anchor line
     is a `+` line; a range whose first line is unchanged moves onto the first
     changed line inside [line, line_end]. `file_in_diff` records whether the
-    item's file is in the diff at all, since a backend that posts off-diff
-    findings inline still has nowhere to put one in a file the pull request
-    does not touch. Returns the notes to print - one per move and one per
+    item's file is in the diff at all - in `files` (see `diff_files`), or a key
+    of `changed` when no `files` is given - since a backend that posts
+    off-diff findings inline still has nowhere to put one in a file the pull
+    request does not touch. Returns the notes to print - one per move and one per
     on_changed_line flip. An item missing `file` or `line`,
     or whose recut excerpt cannot be read, is named in a `LedgerError` instead
     of raising a bare `KeyError`/`TypeError` past this function."""
@@ -269,7 +359,7 @@ def mark_changed_lines(ledger, worktree, changed):
     for it in ledger.get("items", []):
         try:
             lines = changed.get(it["file"], set())
-            it["file_in_diff"] = it["file"] in changed
+            it["file_in_diff"] = it["file"] in (changed if files is None else files)
             start, end = it["line"], it.get("line_end") or it["line"]
             was = it.get("on_changed_line")
             hit = first_changed_line(lines, start, end)

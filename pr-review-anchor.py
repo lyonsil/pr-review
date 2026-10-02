@@ -455,7 +455,8 @@ def cmd_reanchor(args):
 
     try:
         with open(args.diff, encoding="utf-8", errors="replace") as fh:
-            changed = parse_changed_lines(fh.read())
+            diff_text = fh.read()
+        changed, files = parse_changed_lines(diff_text), lt.diff_files(diff_text)
     except FileNotFoundError:
         print(f"error: diff file not found: {args.diff}", file=sys.stderr)
         return 1
@@ -483,8 +484,8 @@ def cmd_reanchor(args):
             it["line"], it["line_end"] = new_line, new_end
         it["anchor_status"], it["anchor_note"] = status, why
         # Whether the file is in the diff at all, whatever became of the
-        # anchor: the diff's keys include a file whose hunks add no line.
-        it["file_in_diff"] = it["file"] in changed
+        # anchor: a file with no added line, or with no hunk at all, counts.
+        it["file_in_diff"] = it["file"] in files
         # on_changed_line is a property of the diff. A dead excerpt tells us
         # nothing about the diff, so it leaves the recorded value alone.
         if status != "dead":
@@ -659,9 +660,15 @@ class ReviewPlan:
     `sites` is ordered by (file, line) so the same ledger and selection give
     the same output in the same order every run: the approval gate is a read
     of the rendered text, and a shuffled order makes every re-run look like a
-    changed review."""
+    changed review.
+
+    `body_findings` records the findings `body` carries - those that could
+    not be attached to a line and those a body-only verdict routed there - as
+    SiteFinding entries, so a backend that raises the body as a comment of its
+    own can weigh it as it weighs a site."""
     body: str
     sites: tuple
+    body_findings: tuple = ()
 
 
 # The opening line of a comment that lands on a line the PR does not touch.
@@ -759,10 +766,10 @@ def plan_review(ledger, tokens, body_intro, include_refuted=None,
     count it like any other site, because on that backend it is one - unless
     `file_in_diff` is False, since a file the pull request does not touch
     has no entry on that backend to attach it to, so it goes in the body.
-    That plan also refuses any site line that is not a positive integer,
-    before approval rather than halfway through posting. Placement
-    is a property of the backend, never of the provider's name, so this takes
-    the capability and not the provider.
+    Placement is a property of the backend, never of the provider's name, so
+    this takes the capability and not the provider. On either backend a site
+    line that is not a positive integer is refused, before approval rather
+    than in the request.
 
     A selected item is never dropped for anchoring reasons - it was still
     verified and selected. A dead anchor goes in the body on every backend:
@@ -832,17 +839,17 @@ def plan_review(ledger, tokens, body_intro, include_refuted=None,
         # postable: the field was never filled in (a ledger that has not
         # been through S5 or reanchor), which must stay postable rather than
         # silently demoting every item.
-        elif reason == "not on a changed line" and not off_diff_inline:
-            demoted.append((it, reason, it.get("anchor_note")
-                             or "this finding is not on a line the PR changed, so GitHub "
-                                "cannot attach a comment to it"))
-        # A backend that accepts off-diff comments still needs somewhere to
-        # put one. With no file or no line there is no location on any
-        # backend, so the finding goes in the body - and says so in those
-        # terms, since "not on a changed line" would be the wrong reason on a
-        # backend where being off the diff is no obstacle.
         elif reason == "not on a changed line":
-            if not it.get("file") or it.get("line") is None:
+            if not off_diff_inline:
+                demoted.append((it, reason, it.get("anchor_note")
+                                 or "this finding is not on a line the PR changed, so GitHub "
+                                    "cannot attach a comment to it"))
+            # A backend that accepts off-diff comments still needs somewhere
+            # to put one. With no file or no line there is no location on any
+            # backend, so the finding goes in the body - and says so in those
+            # terms, since "not on a changed line" would be the wrong reason
+            # on a backend where being off the diff is no obstacle.
+            elif not it.get("file") or it.get("line") is None:
                 demoted.append((it, "no file or line", it.get("anchor_note")
                                  or "this finding has no file and line to attach a comment to"))
             # Such a backend keys a comment to one of the pull request's own
@@ -860,26 +867,27 @@ def plan_review(ledger, tokens, body_intro, include_refuted=None,
         else:
             items.append(it)
 
-    if demoted and not off_diff_inline:
-        # Distinct from the exclusion warning below: these items WERE kept -
-        # just moved out of comments[] into the review body, because GitHub
-        # rejects the entire review over one off-diff comment.
+    if demoted:
         detail = ", ".join(f"#{it['id']} ({reason})"
                             for it, reason, _ in sorted(demoted, key=lambda d: d[0]["id"]))
-        print(f"warning: {len(demoted)} selected item(s) moved into the review body "
-              f"(cannot be anchored to a changed line) - {detail}", file=sys.stderr)
-    elif demoted:
-        # The same accounting in terms true of a backend that posts off-diff
-        # findings inline: only findings with nowhere in the pull request to
-        # go land here - a dead anchor, no file or line, or a file the pull
-        # request does not touch - and the review-level comment carrying them
-        # publishes resolved, so the operator learns before the preview that
-        # these ask the author for nothing.
-        detail = ", ".join(f"#{it['id']} ({reason})"
-                            for it, reason, _ in sorted(demoted, key=lambda d: d[0]["id"]))
-        print(f"warning: {len(demoted)} selected item(s) moved into the review-level comment, "
-              f"which publishes resolved (no location in this pull request to attach a comment "
-              f"to) - {detail}", file=sys.stderr)
+        if not off_diff_inline:
+            # Distinct from the exclusion warning below: these items WERE kept -
+            # just moved out of comments[] into the review body, because GitHub
+            # rejects the entire review over one off-diff comment.
+            print(f"warning: {len(demoted)} selected item(s) moved into the review body "
+                  f"(cannot be anchored to a changed line) - {detail}", file=sys.stderr)
+        else:
+            # The same accounting in terms true of a backend that posts off-diff
+            # findings inline: only findings with nowhere in the pull request to
+            # go land here - a dead anchor, no file or line, or a file the pull
+            # request does not touch. The review-level comment carrying them is
+            # raised as its most demanding finding (see render_reviewable), so
+            # the operator learns before the preview that it publishes resolved
+            # only when none of them asks for a reply.
+            print(f"warning: {len(demoted)} selected item(s) moved into the review-level comment, "
+                  f"which publishes resolved only when nothing in it asks for a reply (no "
+                  f"location in this pull request to attach a comment to) - {detail}",
+                  file=sys.stderr)
     if off_diff:
         # Kept inline, but on code the PR does not change - the operator should
         # know which comments will open with OFF_DIFF_NOTE before reading them.
@@ -891,10 +899,17 @@ def plan_review(ledger, tokens, body_intro, include_refuted=None,
         # Kept, like demoted items - but for a verdict reason, not an anchoring
         # one. Say so separately so the operator can tell "the refuter judged
         # this smaller than claimed" from "GitHub would reject this anchor".
+        # On a backend with a review-level comment that is where they go,
+        # raised under the same rule as the demoted findings beside them.
         detail = ", ".join(f"#{it['id']} ({verdict})"
                             for it, verdict in sorted(secondary, key=lambda d: d[0]["id"]))
-        print(f"notice: {len(secondary)} selected item(s) carried in the review body rather "
-              f"than posted inline - {detail}", file=sys.stderr)
+        if not off_diff_inline:
+            print(f"notice: {len(secondary)} selected item(s) carried in the review body rather "
+                  f"than posted inline - {detail}", file=sys.stderr)
+        else:
+            print(f"notice: {len(secondary)} selected item(s) carried in the review-level comment "
+                  f"rather than posted inline, which publishes resolved only when nothing in it "
+                  f"asks for a reply - {detail}", file=sys.stderr)
     if dropped:
         # Selected-but-excluded items are dropped from the payload on purpose
         # (a refuted finding must never be posted by default), but the
@@ -950,20 +965,18 @@ def plan_review(ledger, tokens, body_intro, include_refuted=None,
         raise PayloadError("item id(s) missing file/line, cannot be anchored to a comment: "
                             + ", ".join(f"#{i}" for i in unanchored))
 
-    # A backend that posts off-diff findings inline creates each discussion
-    # in its own call, so a line it cannot take - anything but a positive
-    # integer - is refused here, before approval, rather than halfway through
-    # posting. It is checked before the sites are sorted, which cannot order
-    # a string line against an integer one. GitHub's plan does not make this
-    # check (see Known gaps in DECISIONS.md).
-    if off_diff_inline:
-        bad = sorted(it.get("id") for it in items + off_diff
-                     if not isinstance(it["line"], int) or isinstance(it["line"], bool)
-                     or it["line"] < 1)
-        if bad:
-            raise PayloadError("item id(s) have a line that is not a positive integer, cannot "
-                               "be attached to a Reviewable discussion: "
-                               + ", ".join(f"#{i}" for i in bad))
+    # A line that is not a positive integer names no line of any file, so it
+    # is refused here, before approval, on every backend rather than sent -
+    # Reviewable, which creates each discussion in its own call, would reject
+    # it halfway through posting. It is checked before the sites are sorted,
+    # which cannot order a string line against an integer one, so the refusal
+    # is an `error:` line and never a traceback.
+    bad = sorted(it.get("id") for it in items + off_diff
+                 if not isinstance(it["line"], int) or isinstance(it["line"], bool)
+                 or it["line"] < 1)
+    if bad:
+        raise PayloadError("item id(s) have a line that is not a positive integer, cannot be "
+                           "attached to a comment: " + ", ".join(f"#{i}" for i in bad))
 
     # Every id that actually publishes somewhere - inline, demoted, or in a
     # body-only-verdicts section - fills {count} and is what a {{#n}} token is
@@ -1059,7 +1072,10 @@ def plan_review(ledger, tokens, body_intro, include_refuted=None,
     for a, b in sorted(set(outside)):
         print(f"warning: #{a} references #{b}, which is not in this review", file=sys.stderr)
 
-    return ReviewPlan(body=body, sites=tuple(anchored))
+    carried = [it for it, _, _ in demoted] + [it for it, _ in secondary]
+    return ReviewPlan(body=body, sites=tuple(anchored), body_findings=tuple(
+        SiteFinding(item_id=it["id"], severity=severity_text(it), verdict=it.get("verdict"))
+        for it in carried))
 
 
 def build_payload(ledger, tokens, body_intro, include_refuted=None,
@@ -1115,15 +1131,21 @@ def finding_disposition(severity, verdict):
     return "blocking" if severity == "blocker" else "discussing"
 
 
-def site_disposition(site):
-    """The disposition a whole site is raised at: the STRONGEST any of its
-    findings carries. A merged site is one discussion with one disposition,
-    and taking the strongest is the only rule that cannot silently soften a
-    blocker merged with lesser findings on the same line. A site with no
-    findings takes the weakest rather than inventing urgency for text nobody
-    classified."""
-    return max((finding_disposition(f.severity, f.verdict) for f in site.findings),
+def strongest_disposition(findings):
+    """The STRONGEST disposition any of `findings` (SiteFinding entries)
+    carries, or the weakest when there are none. One comment has one
+    disposition, and taking the strongest is the only rule that cannot
+    silently soften a blocker carried with lesser findings."""
+    return max((finding_disposition(f.severity, f.verdict) for f in findings),
                key=DISPOSITION_ORDER.index, default=DISPOSITION_ORDER[0])
+
+
+def site_disposition(site):
+    """The disposition a whole site is raised at: the strongest any of its
+    findings carries, so a blocker merged with lesser findings on the same
+    line still holds the merge. The weakest-when-empty default is defensive:
+    `plan_review` builds every site from at least one finding."""
+    return strongest_disposition(site.findings)
 
 
 def render_reviewable(plan):
@@ -1133,9 +1155,12 @@ def render_reviewable(plan):
     disposition is the one thing it adds, because that is Reviewable
     vocabulary derived from the plan's neutral facts.
 
-    The framing comment is `informing`: it carries the review's context, not a
-    finding, and `informing` publishes resolved, so it never waits in anyone's
-    queue for an answer to a paragraph that asked nothing.
+    The framing comment is raised like a site holding the findings the body
+    carries: their strongest disposition, so a blocker whose anchor died still
+    holds the merge rather than publishing resolved. With none it is
+    `informing` - it carries the review's context, and `informing` publishes
+    resolved, so it never waits in anyone's queue for an answer to a
+    paragraph that asked nothing.
 
     A discussion names its `path` and `line` and nothing else about where it
     goes. Reviewable locates a comment by an opaque file key and a revision,
@@ -1146,10 +1171,11 @@ def render_reviewable(plan):
     noticed.
 
     A line Reviewable cannot take - anything but a positive integer - never
-    reaches here: the plan built with `off_diff_inline` refuses it, before the
-    sites are sorted and before approval."""
+    reaches here: the plan refuses it, before the sites are sorted and before
+    approval."""
     return {"provider": "reviewable",
-            "framing": {"markdownBody": plan.body, "disposition": "informing"},
+            "framing": {"markdownBody": plan.body,
+                        "disposition": strongest_disposition(plan.body_findings)},
             "discussions": [{"path": site.path, "line": site.line,
                              "markdownBody": site.body,
                              "disposition": site_disposition(site),
@@ -1162,8 +1188,8 @@ def build_reviewable(ledger, tokens, body_intro, include_refuted=None,
     WITH off-diff sites: Reviewable accepts a comment on a line outside the
     diff, surfaces it in the file view and the Discussions tab, and
     auto-expands the collapsed region to show it, so those findings post
-    inline rather than being buried in the framing comment - where they would
-    also publish already resolved and ask the author for nothing."""
+    inline rather than being buried in the framing comment, where a reader
+    meets them away from the code they are about."""
     return render_reviewable(plan_review(
         ledger, tokens, body_intro, include_refuted=include_refuted,
         body_only_verdicts=body_only_verdicts, off_diff_inline=True))
@@ -1366,7 +1392,8 @@ def cmd_changed_lines(args):
         raise lt.LedgerError(f"diff file not found: {args.diff}")
     except OSError as exc:
         raise lt.LedgerError(f"could not read diff file {args.diff}: {exc}")
-    notes = lt.mark_changed_lines(led, args.worktree, parse_changed_lines(diff_text))
+    notes = lt.mark_changed_lines(led, args.worktree, parse_changed_lines(diff_text),
+                                  lt.diff_files(diff_text))
     lt.write_ledger(args.ledger, led, "changed-lines")
     print("\n".join(notes))
     return 0
@@ -1442,6 +1469,15 @@ def cmd_preview(args):
         if "discussions" not in payload:
             print(f"error: payload file {args.payload} is missing required field 'discussions'",
                   file=sys.stderr)
+            return 1
+        # The framing comment is part of what is approved: its text and the
+        # disposition it is raised at, which can hold the merge.
+        framing = payload.get("framing")
+        if not (isinstance(framing, dict)
+                and all(isinstance(framing.get(k), str) and framing[k]
+                        for k in ("markdownBody", "disposition"))):
+            print(f"error: payload file {args.payload} is missing required field 'framing' "
+                  f"(an object with non-empty markdownBody and disposition)", file=sys.stderr)
             return 1
     elif "comments" not in payload:
         print(f"error: payload file {args.payload} is missing required field 'comments'",
