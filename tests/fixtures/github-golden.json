@@ -1,0 +1,209 @@
+{
+  "ledger": {
+    "schema": 2,
+    "items": [
+      {
+        "id": 1,
+        "severity": "high",
+        "severity_in": "high",
+        "file": "a.ts",
+        "line": 10,
+        "line_end": 10,
+        "anchor_excerpt": "x",
+        "claim": "Claim 1 in observable terms.",
+        "detail": "**What happens:** see {{#3}}.\n\n**Why it matters:** x.\n\n**Fix:** y.",
+        "cluster": "C1",
+        "verdict": "CONFIRMED",
+        "verdict_reason": "Reason 1.",
+        "anchor_status": "ok",
+        "on_changed_line": true
+      },
+      {
+        "id": 2,
+        "severity": "medium",
+        "severity_in": "medium",
+        "file": "a.ts",
+        "line": 10,
+        "line_end": 10,
+        "anchor_excerpt": "x",
+        "claim": "Claim 2 in observable terms.",
+        "detail": "**What happens:** 2 happens.\n\n**Why it matters:** it does.\n\n**Fix:** change 2.",
+        "cluster": "C1",
+        "verdict": "DOWNGRADED",
+        "verdict_reason": "Reason 2.",
+        "anchor_status": "ok",
+        "on_changed_line": true
+      },
+      {
+        "id": 3,
+        "severity": "low",
+        "severity_in": "low",
+        "file": "b.ts",
+        "line": 5,
+        "line_end": 5,
+        "anchor_excerpt": "x",
+        "claim": "Claim 3 in observable terms.",
+        "detail": "**What happens:** 3 happens.\n\n**Why it matters:** it does.\n\n**Fix:** change 3.",
+        "cluster": "C1",
+        "verdict": "INCONCLUSIVE",
+        "verdict_reason": "Reason 3.",
+        "anchor_status": "ok",
+        "on_changed_line": true
+      },
+      {
+        "id": 4,
+        "severity": "blocker",
+        "severity_in": "blocker",
+        "file": "a.ts",
+        "line": 20,
+        "line_end": 20,
+        "anchor_excerpt": "x",
+        "claim": "Claim 4 in observable terms.",
+        "detail": "**What happens:** 4 happens.\n\n**Why it matters:** it does.\n\n**Fix:** change 4.",
+        "cluster": null,
+        "verdict": "CONFIRMED",
+        "verdict_reason": "Reason 4.",
+        "anchor_status": "off-diff",
+        "on_changed_line": false,
+        "anchor_note": "not on a changed line; cannot be posted inline",
+        "file_in_diff": true
+      },
+      {
+        "id": 5,
+        "severity": "medium",
+        "severity_in": "medium",
+        "file": "c.ts",
+        "line": 7,
+        "line_end": 7,
+        "anchor_excerpt": "x",
+        "claim": "Claim 5 in observable terms.",
+        "detail": "**What happens:** 5 happens.\n\n**Why it matters:** it does.\n\n**Fix:** change 5.",
+        "cluster": null,
+        "verdict": "CONFIRMED",
+        "verdict_reason": "Reason 5.",
+        "anchor_status": "dead",
+        "on_changed_line": true,
+        "anchor_note": "anchor excerpt no longer present"
+      },
+      {
+        "id": 6,
+        "severity": "low",
+        "severity_in": "low",
+        "file": "d.ts",
+        "line": 3,
+        "line_end": 3,
+        "anchor_excerpt": "x",
+        "claim": "Claim 6 in observable terms.",
+        "detail": "**What happens:** 6 happens.\n\n**Why it matters:** it does.\n\n**Fix:** change 6.",
+        "cluster": null,
+        "verdict": "CONFIRMED",
+        "verdict_reason": "Reason 6.",
+        "anchor_status": "off-diff",
+        "on_changed_line": false,
+        "file_in_diff": false
+      },
+      {
+        "id": 7,
+        "severity": "high",
+        "severity_in": "high",
+        "file": "a.ts",
+        "line": 30,
+        "line_end": 30,
+        "anchor_excerpt": "x",
+        "claim": "Claim 7 in observable terms.",
+        "detail": "**What happens:** 7 happens.\n\n**Why it matters:** it does.\n\n**Fix:** change 7.",
+        "cluster": null,
+        "verdict": "REFUTED",
+        "verdict_reason": "Reason 7.",
+        "anchor_status": "ok",
+        "on_changed_line": true
+      },
+      {
+        "id": 8,
+        "severity": "low",
+        "severity_in": "low",
+        "file": "a.ts",
+        "line": 40,
+        "line_end": 40,
+        "anchor_excerpt": "x",
+        "claim": "Claim 8 in observable terms.",
+        "detail": "**What happens:** like {{#99}}.\n\n**Fix:** z.",
+        "cluster": null,
+        "verdict": "CONFIRMED",
+        "verdict_reason": "Reason 8.",
+        "anchor_status": "ok",
+        "on_changed_line": true
+      },
+      {
+        "id": 9,
+        "severity": "medium",
+        "severity_in": "medium",
+        "file": "e.ts",
+        "line": null,
+        "line_end": null,
+        "anchor_excerpt": "x",
+        "claim": "Claim 9 in observable terms.",
+        "detail": "**What happens:** 9 happens.\n\n**Why it matters:** it does.\n\n**Fix:** change 9.",
+        "cluster": null,
+        "verdict": "CONFIRMED",
+        "verdict_reason": "Reason 9.",
+        "anchor_status": "off-diff",
+        "on_changed_line": false
+      }
+    ],
+    "clusters": [
+      {
+        "id": "C1",
+        "title": "t",
+        "shared_fix": "s",
+        "item_ids": [
+          1,
+          2,
+          3
+        ]
+      }
+    ]
+  },
+  "body": "Reviewed {count} findings.\n\n_(AI-assisted, with my guidance)_\n",
+  "runs": [
+    {
+      "args": [],
+      "code": 0,
+      "stdout": "{\n  \"body\": \"Reviewed 8 findings.\\n\\n## Findings that could not be attached to a line in this diff\\n\\n**#4** (blocker \\u00b7 checked and confirmed) a.ts:20 - Claim 4 in observable terms.\\n\\n**What happens:** 4 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 4.\\n\\n_How this was checked: Reason 4._\\n\\n_Not attached to a line: not on a changed line; cannot be posted inline_\\n\\n**#5** (medium \\u00b7 checked and confirmed) c.ts:7 - Claim 5 in observable terms.\\n\\n**What happens:** 5 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 5.\\n\\n_How this was checked: Reason 5._\\n\\n_Not attached to a line: anchor excerpt no longer present_\\n\\n**#6** (low \\u00b7 checked and confirmed) d.ts:3 - Claim 6 in observable terms.\\n\\n**What happens:** 6 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 6.\\n\\n_How this was checked: Reason 6._\\n\\n_Not attached to a line: this finding is not on a line the PR changed, so GitHub cannot attach a comment to it_\\n\\n**#9** (medium \\u00b7 checked and confirmed) e.ts - Claim 9 in observable terms.\\n\\n**What happens:** 9 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 9.\\n\\n_How this was checked: Reason 9._\\n\\n_Not attached to a line: this finding is not on a line the PR changed, so GitHub cannot attach a comment to it_\\n\\n_(AI-assisted, with my guidance)_\",\n  \"event\": \"COMMENT\",\n  \"comments\": [\n    {\n      \"path\": \"a.ts\",\n      \"line\": 10,\n      \"side\": \"RIGHT\",\n      \"body\": \"**#1** - high \\u00b7 checked and confirmed\\n\\nClaim 1 in observable terms.\\n\\n**What happens:** see #3.\\n\\n**Why it matters:** x.\\n\\n**Fix:** y.\\n\\n_How this was checked: Reason 1._\\n\\nSimilar fix as #3.\\n\\n_Other findings in this file: #2, #8_\\n\\n---\\n\\n**#2** - medium \\u00b7 checked and confirmed\\n\\nClaim 2 in observable terms.\\n\\n**What happens:** 2 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 2.\\n\\nSimilar fix as #3.\\n\\n_Other findings in this file: #1, #8_\"\n    },\n    {\n      \"path\": \"a.ts\",\n      \"line\": 40,\n      \"side\": \"RIGHT\",\n      \"body\": \"**#8** - low \\u00b7 checked and confirmed\\n\\nClaim 8 in observable terms.\\n\\n**What happens:** like #99.\\n\\n**Fix:** z.\\n\\n_How this was checked: Reason 8._\\n\\n_Other findings in this file: #1, #2_\"\n    },\n    {\n      \"path\": \"b.ts\",\n      \"line\": 5,\n      \"side\": \"RIGHT\",\n      \"body\": \"**#3** - low \\u00b7 needs a human call\\n\\nClaim 3 in observable terms.\\n\\n**What happens:** 3 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 3.\\n\\n_What could not be checked: Reason 3._\\n\\nSimilar fix as #1, #2.\"\n    }\n  ]\n}",
+      "stderr": "warning: 4 selected item(s) moved into the review body (cannot be anchored to a changed line) - #4 (not on a changed line), #5 (dead anchor), #6 (not on a changed line), #9 (not on a changed line)\nwarning: 1 selected item(s) not posted - #7 (excluded, REFUTED)\nwarning: #8 references #99, which is not in this review\n"
+    },
+    {
+      "args": [
+        "--include-refuted",
+        "7",
+        "--body-only-verdicts",
+        "DOWNGRADED"
+      ],
+      "code": 0,
+      "stdout": "{\n  \"body\": \"Reviewed 9 findings.\\n\\n## Findings that could not be attached to a line in this diff\\n\\n**#4** (blocker \\u00b7 checked and confirmed) a.ts:20 - Claim 4 in observable terms.\\n\\n**What happens:** 4 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 4.\\n\\n_How this was checked: Reason 4._\\n\\n_Not attached to a line: not on a changed line; cannot be posted inline_\\n\\n**#5** (medium \\u00b7 checked and confirmed) c.ts:7 - Claim 5 in observable terms.\\n\\n**What happens:** 5 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 5.\\n\\n_How this was checked: Reason 5._\\n\\n_Not attached to a line: anchor excerpt no longer present_\\n\\n**#6** (low \\u00b7 checked and confirmed) d.ts:3 - Claim 6 in observable terms.\\n\\n**What happens:** 6 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 6.\\n\\n_How this was checked: Reason 6._\\n\\n_Not attached to a line: this finding is not on a line the PR changed, so GitHub cannot attach a comment to it_\\n\\n**#9** (medium \\u00b7 checked and confirmed) e.ts - Claim 9 in observable terms.\\n\\n**What happens:** 9 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 9.\\n\\n_How this was checked: Reason 9._\\n\\n_Not attached to a line: this finding is not on a line the PR changed, so GitHub cannot attach a comment to it_\\n\\n## Secondary findings (real, at the severity shown)\\n\\n**#2** (medium) a.ts:10 - Claim 2 in observable terms.\\n\\n**What happens:** 2 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 2.\\n\\n_(AI-assisted, with my guidance)_\",\n  \"event\": \"COMMENT\",\n  \"comments\": [\n    {\n      \"path\": \"a.ts\",\n      \"line\": 10,\n      \"side\": \"RIGHT\",\n      \"body\": \"**#1** - high \\u00b7 checked and confirmed\\n\\nClaim 1 in observable terms.\\n\\n**What happens:** see #3.\\n\\n**Why it matters:** x.\\n\\n**Fix:** y.\\n\\n_How this was checked: Reason 1._\\n\\nSimilar fix as #3.\\n\\n_Other findings in this file: #7, #8_\"\n    },\n    {\n      \"path\": \"a.ts\",\n      \"line\": 30,\n      \"side\": \"RIGHT\",\n      \"body\": \"**#7** - high \\u00b7 probably not a real problem - posted at the reviewer's request\\n\\nClaim 7 in observable terms.\\n\\n**What happens:** 7 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 7.\\n\\n_Why this may not hold: Reason 7._\\n\\n_Other findings in this file: #1, #8_\"\n    },\n    {\n      \"path\": \"a.ts\",\n      \"line\": 40,\n      \"side\": \"RIGHT\",\n      \"body\": \"**#8** - low \\u00b7 checked and confirmed\\n\\nClaim 8 in observable terms.\\n\\n**What happens:** like #99.\\n\\n**Fix:** z.\\n\\n_How this was checked: Reason 8._\\n\\n_Other findings in this file: #1, #7_\"\n    },\n    {\n      \"path\": \"b.ts\",\n      \"line\": 5,\n      \"side\": \"RIGHT\",\n      \"body\": \"**#3** - low \\u00b7 needs a human call\\n\\nClaim 3 in observable terms.\\n\\n**What happens:** 3 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 3.\\n\\n_What could not be checked: Reason 3._\\n\\nSimilar fix as #1.\"\n    }\n  ]\n}",
+      "stderr": "warning: 4 selected item(s) moved into the review body (cannot be anchored to a changed line) - #4 (not on a changed line), #5 (dead anchor), #6 (not on a changed line), #9 (not on a changed line)\nnotice: 1 selected item(s) carried in the review body rather than posted inline - #2 (DOWNGRADED)\nwarning: 1 item(s) re-admitted by --include-refuted despite being REFUTED - #7\nwarning: #8 references #99, which is not in this review\n"
+    },
+    {
+      "args": [
+        "--select",
+        "1",
+        "3",
+        "4",
+        "--include-refuted",
+        "7"
+      ],
+      "code": 0,
+      "stdout": "{\n  \"body\": \"Reviewed 3 findings.\\n\\n## Findings that could not be attached to a line in this diff\\n\\n**#4** (blocker \\u00b7 checked and confirmed) a.ts:20 - Claim 4 in observable terms.\\n\\n**What happens:** 4 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 4.\\n\\n_How this was checked: Reason 4._\\n\\n_Not attached to a line: not on a changed line; cannot be posted inline_\\n\\n_(AI-assisted, with my guidance)_\",\n  \"event\": \"COMMENT\",\n  \"comments\": [\n    {\n      \"path\": \"a.ts\",\n      \"line\": 10,\n      \"side\": \"RIGHT\",\n      \"body\": \"**#1** - high \\u00b7 checked and confirmed\\n\\nClaim 1 in observable terms.\\n\\n**What happens:** see #3.\\n\\n**Why it matters:** x.\\n\\n**Fix:** y.\\n\\n_How this was checked: Reason 1._\\n\\nSimilar fix as #3.\"\n    },\n    {\n      \"path\": \"b.ts\",\n      \"line\": 5,\n      \"side\": \"RIGHT\",\n      \"body\": \"**#3** - low \\u00b7 needs a human call\\n\\nClaim 3 in observable terms.\\n\\n**What happens:** 3 happens.\\n\\n**Why it matters:** it does.\\n\\n**Fix:** change 3.\\n\\n_What could not be checked: Reason 3._\\n\\nSimilar fix as #1.\"\n    }\n  ]\n}",
+      "stderr": "warning: 1 selected item(s) moved into the review body (cannot be anchored to a changed line) - #4 (not on a changed line)\nwarning: 1 item(s) named by --include-refuted are not in --select, so nothing was re-admitted for them - #7\n"
+    },
+    {
+      "args": [
+        "--select",
+        "7"
+      ],
+      "code": 1,
+      "stdout": "",
+      "stderr": "warning: 1 selected item(s) not posted - #7 (excluded, REFUTED)\nerror: selection produced no comments to post - every selected item was excluded - #7 (REFUTED)\n"
+    }
+  ]
+}

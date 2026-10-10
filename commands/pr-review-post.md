@@ -1,6 +1,6 @@
 ---
 description: Post selected PR review findings as inline comments, after re-anchoring against the current head
-argument-hint: <ids | clusters | all> [constraints]
+argument-hint: <ids | clusters | all> [github|reviewable] [constraints]
 ---
 
 Post the selected findings: $ARGUMENTS
@@ -87,6 +87,8 @@ print(r)
    matching the target repo - prefix each with `GH_REPO="$REPO"` so `gh`'s own `{owner}/{repo}`
    placeholder resolves correctly regardless of where the command happens to run.
 7. Resolve the selection. `--select` takes ids, ranges (`3-7`), cluster ids, commas and `all`.
+   A `github` or `reviewable` word in $ARGUMENTS is the provider, which step 1.5 consumes: never
+   pass it to `--select`, which rejects it as an unrecognized selection token.
    **Refuse any REFUTED id** unless the user explicitly overrides it. To post an overruled item,
    use `payload`'s `--include-refuted <ids>` (see step 3) - a per-id, not blanket, override: the
    id must ALSO be in `--select`, and `--include-refuted` errors (exit 1) on an id that's unknown
@@ -120,6 +122,141 @@ print(r)
    constraint, or is dropped from the selection. List them by id with the refuter's `fix_reason`,
    and do not fold the question into the step 3 approval, where it reads as one line in a long
    preview.
+
+## 1.5 Choose the backend
+
+Two backends can carry this review: GitHub's own review API, and Reviewable through its MCP server.
+The choice decides the artifact `payload` builds in step 3 and the whole of step 4, so settle it
+here, before anything is built. Take the first of these that answers:
+
+1. **A provider named in $ARGUMENTS** (`github` or `reviewable`). An explicit instruction wins
+   over everything below it. The word belongs to this step, not to the selection: step 7 never
+   passes it to `--select`.
+2. **A provider already chosen earlier in this conversation for this same `$REPO`.** Re-deriving
+   it mid-session is how a second posting run lands somewhere the first did not. A choice made for
+   another repo does not carry over: whether Reviewable covers a repo is decided per repo (its free
+   tier, for one, covers only public ones), so a later repo in the same conversation goes on down
+   this list.
+3. **The repo-scoped default in `~/.claude/pr-review/providers.json`** - a flat JSON object keyed by
+   `owner/repo`, the same string step 1 read into `$REPO`:
+
+   ```bash
+   python3 -c "
+import json, os, sys
+path = os.path.expanduser('~/.claude/pr-review/providers.json')
+if not os.path.exists(path):
+    sys.exit(0)
+try:
+    data = json.load(open(path, encoding='utf-8'))
+except (OSError, ValueError) as e:
+    sys.exit('error: %s is not readable JSON: %s' % (path, e))
+if not isinstance(data, dict):
+    sys.exit('error: %s must be a JSON object keyed by owner/repo' % path)
+for repo, v in sorted(data.items()):
+    if v not in ('github', 'reviewable'):
+        sys.exit('error: %s: the entry for %s is %r, not github or reviewable' % (path, repo, v))
+print(data.get(sys.argv[1], ''))
+" "$REPO"
+   ```
+
+   A missing file or an empty line means no default is recorded - go on to rule 4. Neither is an
+   error. An `error:` line means the file is damaged: **stop**, show the line to the user and ask
+   them to fix or delete the file. The line names the entry at fault, which may be another repo's:
+   every entry is checked, because every write carries the others forward unchanged. Do not go on
+   down this list, which would choose a backend while the user's recorded choice is unreadable,
+   and do not rewrite the file unasked. The key is per repo because the answer is per repo: a team
+   on Reviewable for one repo reviews another on GitHub, and one global default would carry the
+   wrong answer across silently.
+4. **A private repo uses GitHub.** Read the repo's visibility:
+
+   ```bash
+   GH_REPO="$REPO" gh repo view "$REPO" --json visibility --jq .visibility
+   ```
+
+   Anything other than `PUBLIC` counts as private and selects GitHub. The team reviews its private
+   repos on GitHub whatever Reviewable plan covers them - Reviewable's free tier covers only public
+   repos, and the team works with private repos through GitHub anyway - so this rung is a policy,
+   not a reading of the server: it applies whether or not the Reviewable server is connected, and
+   it is not a fallback from a failed connection. If the command fails or prints nothing, the
+   visibility is unknown: do not assume private, and go on to rule 5 as for a public repo.
+5. **Detection, for a public repo.** Read the Reviewable MCP server's own
+   `reviewable://skills/choose-review-provider` resource and follow it. Read it - do not
+   reconstruct it from memory, and do not infer the answer from whether some tool call happens to
+   work. It is the server's statement about its own configuration, and this command does not
+   restate its rules so that they stay in one place.
+
+**A connection failure is not a detection result.** When rule 5 is reached, or a rule chose
+`reviewable`, and the Reviewable tools are unavailable, decide which of two situations this is
+before going any further. The test is the Claude Code MCP configuration, not whether a call works:
+
+- **Configured but unreachable** - a `reviewable` MCP server is in the Claude Code configuration,
+  but its tools are unavailable or it failed to connect (for example a `CONNECT_TIMEOUT` reported
+  at session start, a failed handshake, an auth error). **Stop.** Say the server is unreachable,
+  ask the user to reconnect it, and wait. Do NOT fall back to GitHub: this server fails at session
+  start often enough that a silent fallback would be the routine outcome, and its symptom is a
+  review published in the wrong place under the user's own account, found by the PR author. A
+  saved `reviewable` default with the server unreachable stops the same way.
+- **Not configured at all** - no `reviewable` MCP server is in the configuration. That, and only
+  that, selects GitHub, and **for this run only**: nothing was detected, so nothing is recorded.
+
+When you cannot tell which of the two it is, treat it as unreachable and ask: stopping costs a
+delay, guessing costs a published review.
+
+Then record and say so:
+
+- If rule 5's resource was read and returned the provider, and `providers.json` records nothing
+  for this repo, write it so the next run does not re-derive it. Only a provider the resource
+  actually returned is recorded without asking.
+- If rule 4 chose GitHub for a private repo and `providers.json` records nothing for it, use
+  GitHub for this run and **ask once whether to record `github` as this repo's default**; write
+  only on a yes.
+- If $ARGUMENTS produced the provider and `providers.json` records nothing for this repo, use it
+  for this run and **ask once whether to record it as this repo's default**; write only on a yes.
+  A provider named for one run is a decision about one review until the user says otherwise, and
+  a default recorded from it would send every later plain run there without a word.
+- If GitHub was chosen because Reviewable is not configured at all, write nothing. The repo goes
+  down this list again on its next run, so a Reviewable server connected later is detected
+  without anyone editing `providers.json`.
+- If `providers.json` records a different provider for this repo, use the chosen one for this run
+  and **ask before rewriting the file. Never change a saved default silently.** A one-off
+  `/pr-review-post all reviewable` against a GitHub repo is a decision about one review, not about
+  every review after it, and the user has no other way to notice the default moved.
+- State the chosen provider, which rule above chose it, and - when you wrote anything - the
+  absolute path you wrote to. When nothing was written, name no path.
+
+Every write goes through this, which keeps every other repo's entry, sets only `$REPO`'s, and
+creates the file and its directory if needed. It writes a temporary file beside `providers.json`
+and renames it over the original, so an interrupted write leaves the previous file whole, never a
+truncated one that would stop every repo's run. Pass `github` or `reviewable` as the second
+argument; it prints the path it wrote:
+
+```bash
+python3 -c "
+import json, os, sys, tempfile
+path = os.path.expanduser('~/.claude/pr-review/providers.json')
+data = {}
+if os.path.exists(path):
+    with open(path, encoding='utf-8') as fh:
+        data = json.load(fh)
+data[sys.argv[1]] = sys.argv[2]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.providers-', suffix='.tmp')
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+        fh.write('\n')
+    os.replace(tmp, path)
+except BaseException:
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    raise
+print(path)
+" "$REPO" "<provider>"
+```
+
+Run rule 3's lookup before any of these bullets, even when rule 1 or 2 chose the provider: the
+bullets turn on what the file records, and the write assumes a file the lookup accepted, so it
+does not re-check it.
 
 ## 2. Re-anchor against the current head
 
@@ -157,10 +294,17 @@ Report the counts. `off-diff` means the excerpt was found but not on a line this
 `dead` means the excerpt is gone.
 
 **Dead or off-diff anchors need no decision from the user - never ask.** A finding whose anchor is
-dead or off-diff is still a real, verified, selected finding; it simply cannot attach to a line,
-and one off-diff anchor would fail the entire review POST. `payload` therefore moves every dead or
+dead or off-diff is still a real, verified, selected finding. On GitHub it simply cannot attach to
+a line, and one off-diff anchor would fail the entire review POST, so `payload` moves every dead or
 off-diff item into the review body automatically, under its own heading, and keeps it out of
-`comments[]`. Report which ids were demoted and why, then carry on. Refuted items are the opposite
+`comments[]`. On Reviewable only a dead anchor, a finding with no file or line, or a finding in a
+file the PR does not touch goes into the review body; any other off-diff finding posts inline as
+its own discussion, opening with a line telling the reader the PR does not change that code.
+Reviewable keys a discussion to one of the PR's own files, so a file outside the diff has nothing to
+key it to. `reanchor` records which case each finding is as `file_in_diff`, true when the diff
+names the finding's file at all - a rename, a mode change or a binary change included, though
+none of those prints a `+++` line. Report which ids were demoted or posted off the diff and why,
+then carry on. Refuted items are the opposite
 case and are never demoted: they were judged not real, so they appear nowhere unless re-admitted
 per-id with `--include-refuted`. `DOWNGRADED` and `INCONCLUSIVE` items are NOT routed by verdict -
 they post inline like anything else when they anchor (see step 1), so they appear in the demotion
@@ -170,7 +314,7 @@ warning only when their own anchor failed.
 `changed-lines` recorded, printing a `notice:` naming every id whose value changed. Do not treat
 that as noise: the diff moved under that finding since the review, which is worth checking before
 you trust the rest of its text. A wrong `true` fails the **entire** review POST, not just its own
-comment.
+comment; on Reviewable it posts a comment on unchanged code without the line that says so.
 
 Also scan the per-item output (or each item's `anchor_note`) for `ambiguous:` - it means the anchor
 excerpt matched more than one location and the nearest-to-old-line match was chosen automatically.
@@ -259,6 +403,7 @@ inline thread; the body file you write should not contain it at all.
 
 ```bash
 python3 ~/.claude/pr-review/pr-review-anchor.py payload <ledger> \
+  --provider <provider> \
   --select <tokens> \
   --include-refuted <overruled-ids> \
   --body-file "$SCRATCH/pr-review/pr$NUMBER/body.md" \
@@ -266,6 +411,23 @@ python3 ~/.claude/pr-review/pr-review-anchor.py payload <ledger> \
   2> "$SCRATCH/pr-review/pr$NUMBER/payload.stderr"
 STATUS=$?
 ```
+
+`--select` takes only step 7's selection - ids, ranges, cluster ids and `all` - never the
+`github` or `reviewable` word from $ARGUMENTS, which is step 1.5's.
+
+`--provider` takes the backend settled in step 1.5, `github` or `reviewable`. Pass it every time
+rather than leaning on the default: the default is `github`, so a forgotten flag on a Reviewable
+review does not fail - it silently builds the GitHub artifact, with every off-diff finding in the
+body. Both backends run the same selection, exclusions and warnings; they differ in where an
+off-diff finding lands and in the shape of the file.
+
+On Reviewable the review body becomes the review-level comment, and it carries every finding that
+has nowhere else to go: a dead anchor, a finding with no file or line, a finding in a file the pull
+request does not change, and a verdict routed by `--body-only-verdicts`. The comment is raised at
+the strongest disposition among those findings, as a merged discussion is, and at `informing` when
+it carries none. So it publishes resolved only when nothing in it asks for a reply, and a blocker
+in it makes the whole comment `blocking`, holding the merge for everything it carries. Say which
+applies when the body carries findings.
 
 Omit `--include-refuted` entirely when nothing is being overruled. Always read
 `payload.stderr` next - both the fatal-error path and the warning path write there, never to
@@ -289,7 +451,12 @@ the JSON (`REFUTED` without a matching `--include-refuted`), ids moved into the 
 the label `dead anchor` or `not on a changed line` (GitHub rejects the whole review over one
 off-diff anchor), ids named by `--include-refuted` that were **not** in `--select` and so
 re-admitted nothing, ids re-admitted **because** of `--include-refuted`, and `{{#id}}`
-cross-references to a finding that is not in this review. **Relay every line to the user, as message
+cross-references to a finding that is not in this review. With `--provider reviewable` the
+body-bound line reads `moved into the review-level comment, which publishes resolved only when
+nothing in it asks for a reply` and names only findings with nowhere in the pull request to attach
+a comment (`dead anchor`, `no file or line`, `file not in the pull request`); the
+`--body-only-verdicts` notice says the same of the review-level comment; and a `notice:` line names
+the off-diff ids that post inline instead. **Relay every line to the user, as message
 text, before presenting the plan.** They must see exactly what was dropped, moved or overridden, or they will
 believe they posted findings that never made it into the payload, or that a refuted finding they
 never asked to override went out anyway.
@@ -316,6 +483,16 @@ page M. Only after the last page, ask for approval once. Also give the path of `
 `preview` always writes the whole preview to `$SCRATCH/pr-review/pr$NUMBER/preview.txt`, beside
 `payload.json`, and prints no line saying so.
 
+`preview` renders whichever artifact the file holds. A Reviewable one shows the framing comment,
+under a `framing disposition:` line and headed `REVIEW FRAMING COMMENT - #<ids>` when it carries
+findings, and then each discussion as
+`DISCUSSION n/N - <path>:<line> [<disposition>] - #<ids>`. The disposition
+is part of what is being approved: `blocking` (raised only for a `blocker`) holds the merge until the
+raiser stands down, `discussing` clears when the author responds, and `informing` asks nothing. On
+Reviewable the preview is also the only place the user can read the review before it publishes:
+drafts are scoped to the identity that wrote them, so the agent's drafts never appear in the
+user's own Reviewable view.
+
 Show every page, **every time**, however long it runs. Never abbreviate it, never show only the
 first few comments, never replace a comment body with a description of it. A user approving a
 summary is approving text they have not read, which then posts under their own GitHub account. If
@@ -328,6 +505,11 @@ head SHA the anchors were resolved against (`$NOW`, recorded as `anchored_sha`).
 Honor any constraints in $ARGUMENTS - for example "do not say whether anything is blocking".
 
 ## 4. Post
+
+Take the branch for the backend settled in step 1.5. Neither starts before the approval in step 3,
+and both re-read the head before anything is sent.
+
+### GitHub
 
 Only after approval. **Re-read the head first** - approval takes human time, and a rebase landing
 in that window is exactly what leaves the anchors stale:
@@ -367,6 +549,217 @@ If a review matching this payload's body is there, the POST succeeded: verify it
 nothing landed should you retry, and then re-run step 2 first, since a genuine wholesale rejection
 usually means the head moved.
 
+### Reviewable
+
+Every call below takes `owner`, `repo` and `prNumber` as separate arguments, not the `owner/repo`
+string the ledger carries: split `$REPO` on the `/` and pass `$NUMBER` as `prNumber`. The steps are
+lettered R1-R6 so that "step 2" still means the re-anchor step above.
+
+`payload.json` holds a `framing` comment and a `discussions[]` array. The framing comment carries
+`markdownBody`, `disposition` and the `item_ids` of the findings it publishes - empty when the body
+carries none; each discussion carries `path`, `line`, `markdownBody`, `disposition` and the
+`item_ids` it publishes. It deliberately holds
+no Reviewable file key and no revision: those are opaque ids only the live API can supply, so they
+are resolved here, after approval, and checked, because they are the one part of the review nobody
+saw in the preview.
+
+**R1. Re-read the head, on both sides.** Run the same check as the GitHub branch first:
+
+```bash
+NOW=$(GH_REPO="$REPO" gh pr view "$NUMBER" --json headRefOid --jq .headRefOid)
+[ "$NOW" = "<ledger anchored_sha>" ] || { echo "head moved to $NOW - go back to step 2"; exit 1; }
+```
+
+Then `mcp__reviewable__review_revisions_list`, which returns revisions oldest to newest, each with a
+`key`, a `headCommitSha` and a `baseCommitSha`. The LAST entry's `headCommitSha` must also equal the
+ledger's `anchored_sha`. If GitHub matches and Reviewable does not, Reviewable has not yet recorded
+a revision for this head. Call `mcp__reviewable__review_revisions_list` once more, straight away -
+no sleep, no `ScheduleWakeup`, no loop. If the last entry still differs, **stop**: tell the user
+"GitHub head is <NOW> but Reviewable's newest revision is <its headCommitSha>; Reviewable has not
+recorded this head yet", post nothing, and ask them to re-run once Reviewable has caught up. Never
+attach to the older revision. Nothing further
+down this branch rejects a stale anchor for you. GitHub's wholesale rejection is blunt, but it is a
+guard; Reviewable attaches a comment to whatever revision and line it is handed, so a finding against
+superseded code posts quietly. Carry that `headCommitSha` forward as the `commitSha` of every
+discussion in R4.
+
+**R2. Resolve every discussion's `path` to a Reviewable file key.**
+`mcp__reviewable__review_files_list` returns one entry per file with a `key` and a `path`. Build the
+map from it, look up each `discussions[]` entry's `path`, and **check that the entry you matched
+carries back exactly the path you searched for.** A wrong key does not fail - it posts the comment
+to another file, on a line number that will resolve to something. The listing also holds virtual
+entries (`-commits`, whose `path` is `-- commits`, marked `virtual: true`), so match the full path
+exactly, never by containment.
+
+**A path with no entry is fatal: report it and stop.** Do not fall back to a near match and do not
+post the rest without it. `payload` has already moved into the framing comment every finding whose
+file `reanchor` found outside the diff, so a discussion whose path Reviewable does not list means
+the two disagree about what this PR changes: the head moved or a file was renamed since step 2, or
+the ledger was never re-anchored and carries no `file_in_diff`. Say which files are missing, then
+go back to step 2 and build and approve the payload again in step 3 - not a review published with
+the finding that noticed it quietly missing.
+
+**R3. Enumerate the identity's drafts before creating anything:**
+`mcp__reviewable__review_discussions_list` with `query` `+draft`.
+
+Nothing in this run has been created yet, so nothing this returns is yours. **That does not make it
+abandoned.** Drafts belong to the Reviewable *identity*, not to the session, and every agent session
+shares that identity - so a draft here may be a posting run that died between creating and
+publishing, a different review, or a session working **right now**, one call away from publishing it
+itself. Nothing in a draft says which session made it, so report the possibilities as
+possibilities and never state which one it is. A `-top` key is the identity's single top-level
+draft - the slot a review-level comment occupies, which R4's framing comment will need.
+
+The listing gives each draft a `key` and a `resource` URI and nothing else; read each draft's
+`resource` over the same MCP connection for its path, line and body.
+
+This query also sees less than the publish sends: `+draft` names comment drafts only, so a staged
+disposition change, acknowledgement, dismissal or file mark is not here at all. R5's
+`review_state` is the first place those surface.
+
+`mcp__reviewable__review_publish` sends every pending draft the identity owns and there is no
+publish-one call, so a stray draft would go out attached to this review, mirrored to GitHub under
+the user's own name. The user cannot catch it either: the agent's drafts are invisible to them in
+Reviewable. So **report exactly what is there** - key, path, line and the opening line of each body -
+and **ASK before deleting anything.** Delete only on the user's word, with
+`mcp__reviewable__review_discussions_delete`, one `discussionKey` per call. Never publish over a
+draft you did not create and never delete one unasked: a concurrent session's staged work is as
+unrecoverable as an abandoned run's, and likelier to be missed.
+
+**Then list `+draft` again, and create nothing until it comes back empty.** After the user has
+answered and every deletion they approved is done, run the same query once more. If any draft is
+still listed - a kept one, one whose delete did not take, one that arrived meanwhile, and a `-top`
+draft included - **stop before R4**: report each remaining key, tell the user to publish, delete or
+otherwise settle those drafts first, and ask them to re-run. A kept comment draft is an extra that R5 always stops on, after this run has already created its whole
+review as drafts. A kept `-top` is worse: the framing comment needs that single slot, and R5
+cannot tell two `-top` drafts apart by key, so the check has to happen here, before anything is
+created.
+
+**R4. Create the discussions, framing comment first.** The framing comment is a
+`mcp__reviewable__review_discussions_create` call with **no `location`** - that absence is what makes
+it review-level:
+
+```
+markdownBody: <framing.markdownBody, verbatim>
+disposition:  <framing.disposition>
+```
+
+It goes first so that a run failing partway leaves the review's context standing rather than
+findings with nothing explaining them. Then one call per `discussions[]` entry, in the order the
+array gives - the order the preview showed:
+
+```
+markdownBody: <markdownBody, verbatim>
+disposition:  <disposition>
+location:
+  file:     { key: <key from R2>, path: <path> }
+  line:     <line>
+  revision: { commitSha: <headCommitSha from R1> }
+```
+
+`markdownBody` posts **verbatim** - any rewrapping, added heading or signature makes what posts
+differ from what was approved. `payload` has already put `_(AI-assisted, with my guidance)_` in the
+framing body exactly once; do not add it to a discussion. `disposition` comes from the payload and is
+not yours to revise.
+
+Record each created discussion's key against the `item_ids` the payload gave it, and the framing
+comment's key against `framing.item_ids`. That map is what
+R5 reconciles against and what a partial failure is reported from - without it, a failed run leaves
+drafts nobody can name. Take the key from the create call's own response; if a response names no
+key, stop and report rather than guessing which new draft is which from a later listing.
+
+**If any create fails, do NOT publish.** Everything that succeeded is an unpublished draft, and
+`review_publish` would send that half-review as though it were the whole one.
+
+**A failed create may still have landed.** An error Reviewable returned means it did not; a timeout
+or a lost response may be a draft Reviewable made whose key never came back, and from here the two
+look alike. So after ANY failed create, before retrying anything, list `+draft` again. R3 left the
+listing empty, so every key in it that you have not recorded is unexplained. Read each unexplained
+key's `resource`. One whose path and line are the failed site's (no location, for the framing
+comment) and whose body is the failed call's `markdownBody` exactly is this run's own: record its
+key against that site's `item_ids` (`framing.item_ids`, for the framing comment) as if the create
+had returned it, and do not create that site again. Retry only the sites with no such draft. Any unexplained key that does not match - or whose
+resource does not show a path, line and body to match against - is not yours: stop, and report it
+as R5 would.
+
+Then report which finding ids landed and which did not, and either retry the ones still missing or
+delete this run's drafts and start R4 again. Delete **only the keys you recorded**, never everything
+`+draft` returns: the rest is not this run's to clean up, and some of it may belong to a session
+still working.
+
+This check is not the GitHub branch's retry rule carried over. There, a 5xx may be a review the
+author can already see. Here nothing reaches the author until `review_publish`, so a lost response
+can only leave a duplicate draft, and the listing finds it before a retry makes a second one.
+
+**R5. Reconcile before sending.** Two checks, both against what R4 recorded:
+
+- `mcp__reviewable__review_discussions_list` with `query` `+draft` must list **exactly** the keys
+  you recorded - no more, no fewer.
+- `mcp__reviewable__review_state` must show `drafts.comments` equal to the number you created (the
+  framing comment plus one per `discussions[]` entry), and `drafts.acknowledgements`,
+  `drafts.dismissals`, `drafts.dispositionChanges` and `drafts.marks` all 0.
+
+Two checks and not one because they see different things: `+draft` enumerates comment drafts by
+key, while `review_state.drafts` also counts the kinds of pending change `+draft` cannot name, every
+one of which `review_publish` also sends and none of which this review created. Anything extra in
+either means something appeared that this run did not make - most likely the concurrent session R3
+could not rule out - so **stop and report, do not publish**, and treat it as live work until the
+user says otherwise. One extra is reported differently, though the run still stops: a draft whose
+path, line and body match a create that failed in this run is most likely this run's own
+duplicate from a lost response, so say so - and still ask before deleting it. Anything missing means a create did not land despite appearing
+to.
+
+On either stop, also report this run's own drafts: every key R4 recorded, with its finding ids.
+Say that they remain unpublished on the shared identity and that the next publish by any session
+would send them along with anything else pending, and ask whether to delete them or leave them for
+now - leaving them is a fair answer if the user means to settle the extras and publish. Ask about
+this run's keys on their own, never bundled with the extras. Delete only recorded keys, one
+`mcp__reviewable__review_discussions_delete` per key and only on the user's word; never delete a
+key that `+draft` or `review_state` showed and this run did not create.
+
+**R6. Publish once, then report links.** `mcp__reviewable__review_publish`, with `publishOnPush`
+left off. It is all-or-nothing for the identity, so there is nothing to batch and nothing to repeat.
+It returns the review state: confirm from that response that `drafts.comments` is 0 rather than
+calling `review_state` again to repeat what the server just said. A publish that leaves drafts
+behind has not posted the whole review - say so rather than reporting it as posted.
+
+Then report every finding as a link, since a discussion key is not something anyone can click.
+`mcp__reviewable__review_discussions_list` with no `query` returns the shared list, each entry a
+`key` and a `resource` URI (`reviewable://reviews/<owner>/<repo>/<prNumber>/discussions/<key>`), and
+no browser address. **Read ONE of them** - any key R4 recorded - over the same MCP connection:
+
+- If it carries a `url` ending with `#` followed by **exactly** the key you asked for, take
+  everything before that final `#` as this review's URL and build the rest as
+  `<review url>#<key>`, one per recorded key. That is the server's own answer for this very review,
+  reused, with the one relationship the reuse depends on checked on the spot against a key you
+  chose - one read instead of one per discussion.
+- If it carries no `url`, or one that does not end with `#<that key>`, the relationship does not hold
+  here: **read every recorded key's resource individually** and take each link from its own `url`. A
+  wrong assumption about link shape would mis-link every finding at once, so one mismatch retires the
+  shortcut for the whole run.
+- On either path, report any finding whose link you still do not have with no link, and say the link
+  was unavailable.
+
+**Never construct a hostname.** Reviewable runs on enterprise installs as well as reviewable.io, so
+every character of every link must have come back from this review's own server in this run. An id
+with no link is a small gap; a fabricated link reads exactly like a real one and fails in a browser.
+
+Report the number of discussions published, the head SHA they were attached to, and one line per
+discussion:
+
+```
+#12, #15  src/renderer/foo.component.tsx:88  [discussion](<that discussion's url>)
+```
+
+When `framing.item_ids` is non-empty, add one line for the framing comment, from its recorded key,
+listing the findings it carries:
+
+```
+#3, #9  review-level comment  [discussion](<the framing comment's url>)
+```
+
+Then go to step 5.
+
 ## 5. Tear down
 
 ```bash
@@ -382,4 +775,5 @@ save it before calling `remove`. It refuses, with an `error` line on stderr and 
 a path that is not a linked worktree, and on Windows a worktree holding a link it could not
 unlink (`error <path> links-remain`); report either and leave the directory alone.
 
-Report the posted review URL and confirm the worktree is gone.
+Report the posted review URL (on Reviewable, the per-discussion links from R6) and confirm the
+worktree is gone.
