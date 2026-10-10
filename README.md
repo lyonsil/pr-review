@@ -14,7 +14,8 @@ deterministic scripts they call.
 links.
 
 `/pr-review-post` publishes through GitHub's review API or through Reviewable's MCP server
-(`payload --provider github|reviewable`). The per-repo choice is remembered in `providers.json`
+(`payload --provider github|reviewable`); a private repo uses GitHub unless told otherwise. A
+per-repo choice, once detected or approved by the operator, is remembered in `providers.json`
 here, which is local state and not tracked.
 
 Spec and plan: paranext-core `docs/superpowers/specs|plans/2026-08-28-pr-review-pipeline*.md`

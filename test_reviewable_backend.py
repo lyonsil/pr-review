@@ -212,12 +212,35 @@ class TestDispositions(unittest.TestCase):
         self.assertEqual(got, {1: "blocking", 2: "discussing", 3: "informing", 4: "discussing"})
 
 
+class TestFramingIds(unittest.TestCase):
+    """The framing comment names the findings it carries, so the posting step
+    can account for them and link them as it does a discussion's."""
+
+    def test_a_dead_anchor_finding_is_named_by_the_framing_comment(self):
+        art, _ = reviewable(ledger(item(1), item(2, line=5, anchor_status="dead"),
+                                   off(3, f="b.ts", line=7, file_in_diff=False)))
+        self.assertEqual(art["framing"]["item_ids"], [2, 3])
+        self.assertEqual(by_ids(art).keys(), {(1,)})
+
+    def test_the_list_is_empty_when_nothing_is_body_bound(self):
+        art, _ = reviewable(ledger(item(1), off(2, line=5)))
+        self.assertEqual(art["framing"]["item_ids"], [])
+
+    def test_the_preview_header_names_them_only_when_there_are_some(self):
+        for led, want in ((ledger(item(1), item(2, line=5, anchor_status="dead")),
+                           "REVIEW FRAMING COMMENT - #2\n"),
+                          (ledger(item(1)), "REVIEW FRAMING COMMENT\n")):
+            with self.subTest(want=want):
+                art, _ = reviewable(led)
+                self.assertIn(want, anchor.render_preview(art))
+
+
 class TestArtifactShape(unittest.TestCase):
     def test_path_and_line_only(self):
         art, _ = reviewable(ledger(item(1)))
         self.assertEqual(set(art), {"provider", "framing", "discussions"})
         self.assertEqual(art["provider"], "reviewable")
-        self.assertEqual(set(art["framing"]), {"markdownBody", "disposition"})
+        self.assertEqual(set(art["framing"]), {"markdownBody", "disposition", "item_ids"})
         self.assertEqual(set(art["discussions"][0]),
                          {"path", "line", "markdownBody", "disposition", "item_ids"})
 
@@ -430,6 +453,43 @@ class TestQuotedPaths(unittest.TestCase):
         self.assertEqual(err, "")
 
 
+class TestHunkCounts(unittest.TestCase):
+    """A line inside a hunk is content, whatever it starts with: the hunk
+    header's counts say where its body ends."""
+
+    @staticmethod
+    def diff(header, *body):
+        return "\n".join(["diff --git a/x.md b/x.md", "--- a/x.md", "+++ b/x.md", header,
+                          *body]) + "\n"
+
+    def test_an_added_line_starting_plus_plus_is_content(self):
+        diff = self.diff("@@ -1,2 +1,6 @@", " a", "+++ y", "+b", "+c", "+d", " e")
+        self.assertEqual(anchor.lt.parse_changed_lines(diff), {"x.md": {2, 3, 4, 5}})
+        self.assertEqual(anchor.lt.diff_files(diff), {"x.md"})
+
+    def test_an_omitted_count_is_one(self):
+        diff = self.diff("@@ -0,0 +1 @@", "+++ y")
+        self.assertEqual(anchor.lt.parse_changed_lines(diff), {"x.md": {1}})
+        self.assertEqual(anchor.lt.diff_files(diff), {"x.md"})
+
+    def test_a_no_newline_marker_spends_neither_count(self):
+        diff = self.diff("@@ -1 +1,2 @@", "-old", "\\ No newline at end of file", "+old",
+                         "+++ y")
+        self.assertEqual(anchor.lt.parse_changed_lines(diff), {"x.md": {1, 2}})
+        self.assertEqual(anchor.lt.diff_files(diff), {"x.md"})
+
+    def test_a_hunk_that_overstates_its_counts_still_ends_at_the_next_file(self):
+        diff = self.diff("@@ -1 +1,3 @@", " a", "+++ y") + self.diff(
+            "@@ -1 +1 @@", "-a", "+b").replace("x.md", "z.md")
+        self.assertEqual(anchor.lt.parse_changed_lines(diff), {"x.md": {2}, "z.md": {1}})
+
+
+class TestReportLabel(unittest.TestCase):
+    def test_the_count_is_labelled_as_githubs_placement(self):
+        text = anchor.lt.render_report(ledger(item(1), off(2, line=5)), "/s/l.json")
+        self.assertIn("# on GitHub: 1 inline + 1 in the body", text)
+
+
 class TestCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -589,6 +649,8 @@ class TestProviderLookup(unittest.TestCase):
             md = fh.read()
         blocks = [seg.split('\n" "$REPO"')[0] for seg in md.split('python3 -c "\n')[1:]]
         self.lookup = next(b for b in blocks if "keyed by owner/repo" in b)
+        self.writer = next(b.split('\n" "$REPO" "')[0]
+                           for b in md.split('python3 -c "\n')[1:] if "sys.argv[2]" in b)
         self.tmp = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.tmp.name, ".claude", "pr-review", "providers.json")
         os.makedirs(os.path.dirname(self.path))
@@ -608,6 +670,25 @@ class TestProviderLookup(unittest.TestCase):
         self.assertEqual(self.run_lookup({"o/r": "reviewable", "x/y": "github"}),
                          (0, "reviewable", ""))
         self.assertEqual(self.run_lookup({"x/y": "github"}), (0, "", ""))
+
+    def write_default(self, repo, provider):
+        env = dict(os.environ, HOME=self.tmp.name, USERPROFILE=self.tmp.name)
+        return subprocess.run([sys.executable, "-B", "-c", self.writer, repo, provider],
+                              capture_output=True, text=True, env=env)
+
+    def test_the_writer_replaces_the_file_and_keeps_other_entries(self):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump({"x/y": "github"}, fh)
+        before = os.stat(self.path).st_ino
+        proc = self.write_default("o/r", "reviewable")
+        self.assertEqual((proc.returncode, os.path.normpath(proc.stdout.strip()), proc.stderr),
+                         (0, os.path.normpath(self.path), ""))
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"o/r": "reviewable", "x/y": "github"})
+        # Renamed over, not rewritten in place: an interrupted write leaves
+        # the old file whole. No temporary file is left beside it.
+        self.assertNotEqual(os.stat(self.path).st_ino, before)
+        self.assertEqual(os.listdir(os.path.dirname(self.path)), ["providers.json"])
 
     def test_another_repos_bad_entry_stops_the_run_and_is_named(self):
         code, out, err = self.run_lookup({"o/r": "github", "x/y": "gitlab"})

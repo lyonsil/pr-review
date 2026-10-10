@@ -87,6 +87,8 @@ print(r)
    matching the target repo - prefix each with `GH_REPO="$REPO"` so `gh`'s own `{owner}/{repo}`
    placeholder resolves correctly regardless of where the command happens to run.
 7. Resolve the selection. `--select` takes ids, ranges (`3-7`), cluster ids, commas and `all`.
+   A `github` or `reviewable` word in $ARGUMENTS is the provider, which step 1.5 consumes: never
+   pass it to `--select`, which rejects it as an unrecognized selection token.
    **Refuse any REFUTED id** unless the user explicitly overrides it. To post an overruled item,
    use `payload`'s `--include-refuted <ids>` (see step 3) - a per-id, not blanket, override: the
    id must ALSO be in `--select`, and `--include-refuted` errors (exit 1) on an id that's unknown
@@ -128,7 +130,8 @@ The choice decides the artifact `payload` builds in step 3 and the whole of step
 here, before anything is built. Take the first of these that answers:
 
 1. **A provider named in $ARGUMENTS** (`github` or `reviewable`). An explicit instruction wins
-   over everything below it.
+   over everything below it. The word belongs to this step, not to the selection: step 7 never
+   passes it to `--select`.
 2. **A provider already chosen earlier in this conversation for this same `$REPO`.** Re-deriving
    it mid-session is how a second posting run lands somewhere the first did not. A choice made for
    another repo does not carry over: whether Reviewable covers a repo is decided per repo (its free
@@ -156,42 +159,64 @@ print(data.get(sys.argv[1], ''))
 " "$REPO"
    ```
 
-   A missing file or an empty line means no default is recorded - fall through to detection.
-   Neither is an error. An `error:` line means the file is damaged: **stop**, show the line to the
-   user and ask them to fix or delete the file. The line names the entry at fault, which may be
-   another repo's: every entry is checked, because every write carries the others forward
-   unchanged. Do not fall through to detection, which would choose a backend while the user's
-   recorded choice is unreadable, and do not rewrite the file unasked. The key is per repo because
-   the answer is per repo: a team on Reviewable for one repo reviews another on GitHub, and one
-   global default would carry the wrong answer across silently.
-4. **Detection.** Read the Reviewable MCP server's own `reviewable://skills/choose-review-provider`
-   resource and follow it. Read it - do not reconstruct it from memory, and do not infer the answer
-   from whether some tool call happens to work. It is the server's statement about its own
-   configuration, and this command does not restate its rules so that they stay in one place.
+   A missing file or an empty line means no default is recorded - go on to rule 4. Neither is an
+   error. An `error:` line means the file is damaged: **stop**, show the line to the user and ask
+   them to fix or delete the file. The line names the entry at fault, which may be another repo's:
+   every entry is checked, because every write carries the others forward unchanged. Do not go on
+   down this list, which would choose a backend while the user's recorded choice is unreadable,
+   and do not rewrite the file unasked. The key is per repo because the answer is per repo: a team
+   on Reviewable for one repo reviews another on GitHub, and one global default would carry the
+   wrong answer across silently.
+4. **A private repo uses GitHub.** Read the repo's visibility:
 
-**A connection failure is not a detection result.** If the Reviewable tools are unavailable, decide
-which of two situations this is before going any further:
+   ```bash
+   GH_REPO="$REPO" gh repo view "$REPO" --json visibility --jq .visibility
+   ```
 
-- **Configured but unreachable** - the server is set up for this repo and is not answering (a
-  timeout, a failed session-start handshake, an auth error). **Stop.** Say the server is
-  unreachable, ask the user to reconnect it, and wait. Do NOT fall back to GitHub: this server
-  fails at session start often enough that a silent fallback would be the routine outcome, and its
-  symptom is a review published in the wrong place under the user's own account, found by the PR
-  author.
-- **Not configured at all** - Reviewable is not in use here. That, and only that, selects GitHub.
+   Anything other than `PUBLIC` counts as private and selects GitHub. The team reviews its private
+   repos on GitHub whatever Reviewable plan covers them - Reviewable's free tier covers only public
+   repos, and the team works with private repos through GitHub anyway - so this rung is a policy,
+   not a reading of the server: it applies whether or not the Reviewable server is connected, and
+   it is not a fallback from a failed connection. If the command fails or prints nothing, the
+   visibility is unknown: do not assume private, and go on to rule 5 as for a public repo.
+5. **Detection, for a public repo.** Read the Reviewable MCP server's own
+   `reviewable://skills/choose-review-provider` resource and follow it. Read it - do not
+   reconstruct it from memory, and do not infer the answer from whether some tool call happens to
+   work. It is the server's statement about its own configuration, and this command does not
+   restate its rules so that they stay in one place.
 
-An unreachable server and an absent one both look like "the tools do not work", so tell them apart
-deliberately, using the recorded default and the `choose-review-provider` resource. When you still
-cannot, treat it as unreachable and ask: stopping costs a delay, guessing costs a published review.
+**A connection failure is not a detection result.** When rule 5 is reached, or a rule chose
+`reviewable`, and the Reviewable tools are unavailable, decide which of two situations this is
+before going any further. The test is the Claude Code MCP configuration, not whether a call works:
+
+- **Configured but unreachable** - a `reviewable` MCP server is in the Claude Code configuration,
+  but its tools are unavailable or it failed to connect (for example a `CONNECT_TIMEOUT` reported
+  at session start, a failed handshake, an auth error). **Stop.** Say the server is unreachable,
+  ask the user to reconnect it, and wait. Do NOT fall back to GitHub: this server fails at session
+  start often enough that a silent fallback would be the routine outcome, and its symptom is a
+  review published in the wrong place under the user's own account, found by the PR author. A
+  saved `reviewable` default with the server unreachable stops the same way.
+- **Not configured at all** - no `reviewable` MCP server is in the configuration. That, and only
+  that, selects GitHub, and **for this run only**: nothing was detected, so nothing is recorded.
+
+When you cannot tell which of the two it is, treat it as unreachable and ask: stopping costs a
+delay, guessing costs a published review.
 
 Then record and say so:
 
-- If detection produced the provider and `providers.json` records nothing for this repo, write it
-  so the next run does not re-derive it.
+- If rule 5's resource was read and returned the provider, and `providers.json` records nothing
+  for this repo, write it so the next run does not re-derive it. Only a provider the resource
+  actually returned is recorded without asking.
+- If rule 4 chose GitHub for a private repo and `providers.json` records nothing for it, use
+  GitHub for this run and **ask once whether to record `github` as this repo's default**; write
+  only on a yes.
 - If $ARGUMENTS produced the provider and `providers.json` records nothing for this repo, use it
   for this run and **ask once whether to record it as this repo's default**; write only on a yes.
   A provider named for one run is a decision about one review until the user says otherwise, and
   a default recorded from it would send every later plain run there without a word.
+- If GitHub was chosen because Reviewable is not configured at all, write nothing. The repo goes
+  down this list again on its next run, so a Reviewable server connected later is detected
+  without anyone editing `providers.json`.
 - If `providers.json` records a different provider for this repo, use the chosen one for this run
   and **ask before rewriting the file. Never change a saved default silently.** A one-off
   `/pr-review-post all reviewable` against a GitHub repo is a decision about one review, not about
@@ -200,21 +225,31 @@ Then record and say so:
   absolute path you wrote to. When nothing was written, name no path.
 
 Every write goes through this, which keeps every other repo's entry, sets only `$REPO`'s, and
-creates the file and its directory if needed. Pass `github` or `reviewable` as the second argument;
-it prints the path it wrote:
+creates the file and its directory if needed. It writes a temporary file beside `providers.json`
+and renames it over the original, so an interrupted write leaves the previous file whole, never a
+truncated one that would stop every repo's run. Pass `github` or `reviewable` as the second
+argument; it prints the path it wrote:
 
 ```bash
 python3 -c "
-import json, os, sys
+import json, os, sys, tempfile
 path = os.path.expanduser('~/.claude/pr-review/providers.json')
 data = {}
 if os.path.exists(path):
-    data = json.load(open(path, encoding='utf-8'))
+    with open(path, encoding='utf-8') as fh:
+        data = json.load(fh)
 data[sys.argv[1]] = sys.argv[2]
 os.makedirs(os.path.dirname(path), exist_ok=True)
-with open(path, 'w', encoding='utf-8') as fh:
-    json.dump(data, fh, indent=2, sort_keys=True)
-    fh.write('\n')
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.providers-', suffix='.tmp')
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+        fh.write('\n')
+    os.replace(tmp, path)
+except BaseException:
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    raise
 print(path)
 " "$REPO" "<provider>"
 ```
@@ -377,6 +412,9 @@ python3 ~/.claude/pr-review/pr-review-anchor.py payload <ledger> \
 STATUS=$?
 ```
 
+`--select` takes only step 7's selection - ids, ranges, cluster ids and `all` - never the
+`github` or `reviewable` word from $ARGUMENTS, which is step 1.5's.
+
 `--provider` takes the backend settled in step 1.5, `github` or `reviewable`. Pass it every time
 rather than leaning on the default: the default is `github`, so a forgotten flag on a Reviewable
 review does not fail - it silently builds the GitHub artifact, with every off-diff finding in the
@@ -446,7 +484,8 @@ page M. Only after the last page, ask for approval once. Also give the path of `
 `payload.json`, and prints no line saying so.
 
 `preview` renders whichever artifact the file holds. A Reviewable one shows the framing comment,
-under a `framing disposition:` line, and then each discussion as
+under a `framing disposition:` line and headed `REVIEW FRAMING COMMENT - #<ids>` when it carries
+findings, and then each discussion as
 `DISCUSSION n/N - <path>:<line> [<disposition>] - #<ids>`. The disposition
 is part of what is being approved: `blocking` (raised only for a `blocker`) holds the merge until the
 raiser stands down, `discussing` clears when the author responds, and `informing` asks nothing. On
@@ -516,8 +555,10 @@ Every call below takes `owner`, `repo` and `prNumber` as separate arguments, not
 string the ledger carries: split `$REPO` on the `/` and pass `$NUMBER` as `prNumber`. The steps are
 lettered R1-R6 so that "step 2" still means the re-anchor step above.
 
-`payload.json` holds a `framing` comment and a `discussions[]` array, each discussion carrying
-`path`, `line`, `markdownBody`, `disposition` and the `item_ids` it publishes. It deliberately holds
+`payload.json` holds a `framing` comment and a `discussions[]` array. The framing comment carries
+`markdownBody`, `disposition` and the `item_ids` of the findings it publishes - empty when the body
+carries none; each discussion carries `path`, `line`, `markdownBody`, `disposition` and the
+`item_ids` it publishes. It deliberately holds
 no Reviewable file key and no revision: those are opaque ids only the live API can supply, so they
 are resolved here, after approval, and checked, because they are the one part of the review nobody
 saw in the preview.
@@ -621,7 +662,8 @@ differ from what was approved. `payload` has already put `_(AI-assisted, with my
 framing body exactly once; do not add it to a discussion. `disposition` comes from the payload and is
 not yours to revise.
 
-Record each created discussion's key against the `item_ids` the payload gave it. That map is what
+Record each created discussion's key against the `item_ids` the payload gave it, and the framing
+comment's key against `framing.item_ids`. That map is what
 R5 reconciles against and what a partial failure is reported from - without it, a failed run leaves
 drafts nobody can name. Take the key from the create call's own response; if a response names no
 key, stop and report rather than guessing which new draft is which from a later listing.
@@ -635,8 +677,8 @@ look alike. So after ANY failed create, before retrying anything, list `+draft` 
 listing empty, so every key in it that you have not recorded is unexplained. Read each unexplained
 key's `resource`. One whose path and line are the failed site's (no location, for the framing
 comment) and whose body is the failed call's `markdownBody` exactly is this run's own: record its
-key against that site's `item_ids` as if the create had returned it, and do not create that site
-again. Retry only the sites with no such draft. Any unexplained key that does not match - or whose
+key against that site's `item_ids` (`framing.item_ids`, for the framing comment) as if the create
+had returned it, and do not create that site again. Retry only the sites with no such draft. Any unexplained key that does not match - or whose
 resource does not show a path, line and body to match against - is not yours: stop, and report it
 as R5 would.
 
@@ -707,6 +749,13 @@ discussion:
 
 ```
 #12, #15  src/renderer/foo.component.tsx:88  [discussion](<that discussion's url>)
+```
+
+When `framing.item_ids` is non-empty, add one line for the framing comment, from its recorded key,
+listing the findings it carries:
+
+```
+#3, #9  review-level comment  [discussion](<the framing comment's url>)
 ```
 
 Then go to step 5.

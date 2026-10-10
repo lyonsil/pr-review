@@ -130,8 +130,17 @@ def _parse_diff(diff_text):
     `changed`. Each file's `diff --git` header names it - or its
     `rename to`/`copy to` line, for a path that moved. A deleted file has no
     new side and is in neither. Paths git quotes are decoded, so both match
-    the plain path a ledger records."""
+    the plain path a ledger records.
+
+    Each hunk header's counts say how many old-side and new-side lines its
+    body holds, and a line inside a body is never a header: an added line
+    whose text starts `++ ` reads `+++ ...`, and a removed one starting `-- `
+    reads `--- ...`. So `+++ ` is a file header only once the current hunk's
+    counts are spent. `diff --git` and `@@` need no such check, since no body
+    line can start with either."""
     changed, files, path, newline = {}, set(), None, None
+    # Old-side and new-side lines the current hunk's body has yet to show.
+    old_left = new_left = 0
     # Between a `diff --git` line and its first hunk: the file that header
     # names, recorded when the header ends.
     in_header, header = False, None
@@ -143,12 +152,13 @@ def _parse_diff(diff_text):
     for line in diff_text.splitlines():
         if line.startswith("diff --git "):
             flush()
+            old_left = new_left = 0
             in_header, header = True, _diff_git_new_path(line[len("diff --git "):])
         elif in_header and line.startswith(("rename to ", "copy to ")):
             header = git_path(line.split(" ", 2)[2])
         elif in_header and line.startswith("deleted file mode"):
             header = None
-        elif line.startswith("+++ "):
+        elif line.startswith("+++ ") and not (old_left or new_left):
             raw = git_path(line[4:].strip())
             path = None if raw == "/dev/null" else _strip_b(raw)
             if path:
@@ -160,11 +170,20 @@ def _parse_diff(diff_text):
             in_header = False
             m = re.search(r"\+(\d+)", line)
             newline = int(m.group(1)) if m else None
-        elif path and newline is not None:
-            if line.startswith("+"):
-                changed[path].add(newline); newline += 1
-            elif line.startswith(" "):
-                newline += 1
+            counts = re.match(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)
+            # An omitted count means one line.
+            old_left, new_left = ((int(c) if c is not None else 1 for c in counts.groups())
+                                  if counts else (0, 0))
+        else:
+            if line.startswith(("+", " ")):
+                new_left = max(new_left - 1, 0)
+            if line.startswith(("-", " ")):
+                old_left = max(old_left - 1, 0)
+            if path and newline is not None:
+                if line.startswith("+"):
+                    changed[path].add(newline); newline += 1
+                elif line.startswith(" "):
+                    newline += 1
     flush()
     return changed, files
 
@@ -911,7 +930,7 @@ def render_report(ledger, ledger_path):
             f"    Report:   {os.path.join(ldir, 'report.md')}",
             f"    Worktree: {ledger.get('worktree')}",
             "", "## To post", "",
-            f"    /pr-review-post all          # {inline} inline + {body} in the body; "
+            f"    /pr-review-post all          # on GitHub: {inline} inline + {body} in the body; "
             f"{len(by_v['REFUTED'])} refuted excluded",
             "    /pr-review-post 1 3-7        # a chosen subset (ranges allowed)",
             "    /pr-review-post all --include-refuted <id>   # also post a refuted finding",

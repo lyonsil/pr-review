@@ -440,6 +440,15 @@ than reasoned about.
   the merge for everything in it, its context and every lesser finding beside the blocker, until
   the raiser stands down; if that proves too blunt, raise only blockers there and leave the rest
   `informing`.
+- **The framing comment names the findings it carries, as a discussion does.** The artifact's
+  `framing` has `item_ids`: the ids of the findings the body carries, empty when it carries none.
+  Without them the posting step's key map and its final link report covered discussions only, so
+  after a failed create it could not say whether a dead-anchor finding had landed, and the report
+  had no line or link for it - a dead-anchor blocker included, which holds the merge through the
+  framing comment's disposition. The preview header names the ids only when there are some,
+  mirroring the discussion header. GitHub's payload is unaffected. *If wrong:* the field is never
+  sent to Reviewable - it feeds only the run's key map and report - so a mistake in it misreports
+  a finding's landing or link and changes nothing that publishes.
 - **Reviewable gets its own accounting lines; GitHub's is untouched.** GitHub's one warning says
   off-diff and dead findings were moved into the body, which is false on Reviewable. The Reviewable
   plan prints a warning naming the findings with no location in this pull request - a dead anchor,
@@ -501,25 +510,53 @@ than reasoned about.
   rather than here. `review_publish` returns the review state, so the confirmation reads it there.
 - **Provider selection is a ladder with an explicit unreachable state, kept per repo.** Arguments,
   then this conversation's earlier choice for the same repo, then `providers.json` keyed by
-  `owner/repo`, then the server's own `choose-review-provider` resource. Every rung is per repo,
-  the conversation's included: Reviewable can cover one repo and not the next (its free tier
-  covers public repos only), and a choice carried across repos would send a private repo's review
-  to a backend that cannot see it, where the failure reads as an unreachable server rather than
-  the wrong backend. A connection failure is not a detection result:
-  configured-but-unreachable stops and asks, only an absent configuration selects GitHub, and when
-  the two cannot be told apart it counts as unreachable - stopping costs a delay, guessing costs a
-  review published in the wrong place. A differing saved default is never overwritten unasked.
-- **A provider named in the arguments is a one-off until confirmed.** With no saved default, a
-  detected provider is recorded silently, but one named for a single run is recorded only if the
-  operator says yes when asked. Every write merges into the file and sets only this repo's key. A
-  file that is not a JSON object of `github`/`reviewable` values stops the run rather than falling
-  through to detection, which would choose a backend while the recorded choice is unreadable.
-  Every entry is checked, not only this repo's, and the `error:` line names the entry at fault:
-  each write carries the other entries forward unchanged, so a bad one left alone would surface
-  later, on a run for the repo it belongs to. The cost is that one repo's run stops on another
-  repo's bad entry until someone fixes or deletes it.
+  `owner/repo`, then GitHub for a private repo, then, for a public one, the server's own
+  `choose-review-provider` resource. Every rung is per repo, the conversation's included:
+  Reviewable can cover one repo and not the next (its free tier covers public repos only), and a
+  choice carried across repos would send a private repo's review to a backend that cannot see it,
+  where the failure reads as an unreachable server rather than the wrong backend. A connection
+  failure is not a detection result, and the test is the Claude Code MCP configuration:
+  a `reviewable` server that is configured but failed to connect (a `CONNECT_TIMEOUT` at session
+  start, say) stops and asks the operator to reconnect, as does a saved `reviewable` default with
+  the server down; only a configuration with no `reviewable` server selects GitHub, for that run
+  alone; and when the two cannot be told apart it counts as unreachable - stopping costs a delay,
+  guessing costs a review published in the wrong place. A differing saved default is never
+  overwritten unasked.
+- **A private repo uses GitHub, as a policy rung.** The team reviews its private repos on GitHub
+  whatever Reviewable plan covers them: Reviewable's free tier covers only public repos, and the
+  team works with private repos through GitHub anyway. So once no argument, earlier choice or saved
+  default answers, a repo whose `gh repo view` visibility is anything but `PUBLIC` posts to GitHub,
+  connected server or not; it is a rule about the repo, not a fallback from a failed connection.
+  With no saved default the operator is asked once whether to record `github` for the repo. A
+  visibility `gh` cannot report is not assumed private: the repo goes on to detection and the
+  unreachable rules, as a public one does, so a failed lookup never routes a review by itself.
+  *If wrong:* a private repo the team does want on Reviewable needs an explicit `reviewable`
+  argument and a yes when asked to record it; after that its saved default answers first.
+- **A provider is recorded only when detection returned it or the operator agreed.** With no
+  saved default, a provider the `choose-review-provider` resource returned is recorded silently.
+  One named for a single run, or chosen by the private-repo rung, is recorded only if the operator
+  says yes when asked. GitHub chosen because no Reviewable server is configured is used for that
+  run and not recorded: nothing was detected, and a recorded `github` would keep the repo off
+  Reviewable, with no prompt, after the server is connected. Every write merges into the file and
+  sets only this repo's key. A file that is not a JSON object of `github`/`reviewable` values stops
+  the run rather than going on down the ladder, which would choose a backend while the recorded
+  choice is unreadable. Every entry is checked, not only this repo's, and the `error:` line names
+  the entry at fault: each write carries the other entries forward unchanged, so a bad one left
+  alone would surface later, on a run for the repo it belongs to. The cost is that one repo's run
+  stops on another repo's bad entry until someone fixes or deletes it.
   *If wrong:* one extra question on a repo's first explicit run, against a silent default that
-  would send later reviews to the wrong place.
+  would send later reviews to the wrong place; and a repo with no Reviewable server reads its
+  visibility and the configuration again on every run until a default is recorded.
+- **`providers.json` is replaced, never rewritten in place, and not locked.** The writer writes a
+  temporary file in the same directory and renames it over the original, as `write_ledger` does,
+  so an interrupted write leaves the previous file whole and a reader never sees a half-written
+  one; a truncated file would stop every repo's run until repaired. Two sessions recording
+  defaults for different repos at the same moment can still lose one entry: each reads the file,
+  sets its key and replaces it, and the later replace carries the copy it read. That is accepted:
+  the window is milliseconds, and the loss heals itself - the dropped repo is detected or asked
+  about again on its next run, and never posts to the wrong place. A lock with stale-lock handling
+  for a killed run would add more prompt code than that risk warrants. *If wrong:* an operator
+  running many first-time posts in parallel answers a repo's question twice; add the lock then.
 - **Paths git quotes are decoded wherever the diff is read.** Git writes a path with a non-ASCII
   byte (under the default `core.quotePath`), a control character, a quote or a backslash as a
   C-quoted string - `+++ "b/caf\303\251.ts"` - in its `+++`, `diff --git` and `rename to` lines.
@@ -528,11 +565,26 @@ than reasoned about.
   framing comment as in a file the pull request does not change. Decoding it, with the standard
   library, deliberately changes GitHub's output for those files and no others: their findings now
   post inline. *If wrong:* the decode is one function, `git_path`.
+- **A hunk's body is read by its header's counts, so a `+++ ` line inside it is content.** An
+  added line whose text starts `++ ` appears in the diff as `+++ ...`, and was read as the next
+  file's header: the rest of the real file's added lines were lost, and a file that does not exist
+  was recorded as part of the pull request. The diff reader now takes both counts from each
+  `@@ -a[,b] +c[,d] @@` header (an omitted count is 1), spends them line by line (a context line
+  both, `-` the old, `+` the new, a `\ No newline at end of file` line neither), and reads `+++ `
+  as a header only once both are spent. `diff --git` and `@@` are not gated, since no body line
+  can start with either, so a hunk whose counts overstate its body still ends at the next file.
+  This deliberately changes GitHub's output, for diffs holding such a line only: a finding on one
+  of the recovered lines now posts inline. It is the third such change, beside the quoted-path
+  decode above and the positive-integer line check under "A line that is not a positive integer";
+  GitHub's output matches `master` everywhere else, and the golden file is unchanged.
+  *If wrong:* a diff whose header counts are wrong reads `+++ ` lines as content until the next
+  `diff --git`; the counting is confined to `_parse_diff`.
 - **Reviewable discussions are GitHub review comments** (keyed `gh-<comment id>`), and an agent's
   comment mirrors to GitHub authored by the human with a note naming the agent, so attribution and
   the S2 read of prior feedback are unchanged. GitHub does not carry Reviewable's resolution state;
   a re-review that wants to skip settled points must read it from Reviewable.
 - **Known gaps.** `report`'s "N inline + M in the body" line counts GitHub's placement, since the
-  backend is chosen later, in `/pr-review-post`; on Reviewable, off-diff findings in files the diff
-  touches move from the second number to the first. The key `review_discussions_create` returns cannot be confirmed by a
-  read-only call, so the prompt stops rather than guesses if a create response names none.
+  backend is chosen later, in `/pr-review-post`, and labels it so (`on GitHub:`); on Reviewable,
+  off-diff findings in files the diff touches move from the second number to the first. The key
+  `review_discussions_create` returns cannot be confirmed by a read-only call, so the prompt stops
+  rather than guesses if a create response names none.

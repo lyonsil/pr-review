@@ -1170,12 +1170,17 @@ def render_reviewable(plan):
     plausible, wrong, and already approved by a human by the time anything
     noticed.
 
+    The framing comment names the findings it carries in `item_ids`, as a
+    discussion does, so the posting step can report each of them with the
+    comment's link and account for them after a failed create.
+
     A line Reviewable cannot take - anything but a positive integer - never
     reaches here: the plan refuses it, before the sites are sorted and before
     approval."""
     return {"provider": "reviewable",
             "framing": {"markdownBody": plan.body,
-                        "disposition": strongest_disposition(plan.body_findings)},
+                        "disposition": strongest_disposition(plan.body_findings),
+                        "item_ids": [f.item_id for f in plan.body_findings]},
             "discussions": [{"path": site.path, "line": site.line,
                              "markdownBody": site.body,
                              "disposition": site_disposition(site),
@@ -1241,9 +1246,17 @@ def cmd_payload(args):
     return 0
 
 
+def named_ids(comment):
+    """` - #n, #m` naming the findings a Reviewable comment carries, or
+    nothing when it names none."""
+    ids = comment.get("item_ids") or []
+    return " - " + ", ".join(f"#{i}" for i in ids) if ids else ""
+
+
 def reviewable_preview_chunks(payload):
     """The Reviewable artifact as `preview_chunks` pieces: a header and framing
-    chunk, then one chunk per discussion carrying its path:line, the
+    chunk, the framing comment named by the finding ids it carries, then one
+    chunk per discussion carrying its path:line, the
     disposition it will be raised at, the finding ids it holds, and its whole
     body.
 
@@ -1261,13 +1274,11 @@ def reviewable_preview_chunks(payload):
     chunks = ["\n".join([rule, "PR REVIEW PAYLOAD PREVIEW (reviewable)",
                          f"discussions: {len(discussions)}",
                          f"framing disposition: {framing.get('disposition', '')}", rule, "",
-                         "REVIEW FRAMING COMMENT", "-" * 72, framing.get("markdownBody", ""), ""])]
+                         "REVIEW FRAMING COMMENT" + named_ids(framing), "-" * 72,
+                         framing.get("markdownBody", ""), ""])]
     for n, d in enumerate(discussions, start=1):
         head = (f"DISCUSSION {n}/{len(discussions)} - {d.get('path', '')}:{d.get('line', '')} "
-                f"[{d.get('disposition', '')}]")
-        ids = d.get("item_ids") or []
-        if ids:
-            head += " - " + ", ".join(f"#{i}" for i in ids)
+                f"[{d.get('disposition', '')}]") + named_ids(d)
         chunks.append("\n".join(["-" * 72, head, "-" * 72, d.get("markdownBody", ""), ""]))
     return chunks
 
