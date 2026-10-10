@@ -391,6 +391,15 @@ class TestFileInDiff(unittest.TestCase):
                     self.assertFalse(next(it for it in led["items"]
                                           if it["id"] == 2)["on_changed_line"])
 
+    def test_a_bare_carriage_return_in_the_diff_file_is_content(self):
+        # Read with universal newlines, the "\r" would end the added line and
+        # the "+++ b/b.ts" after it would read as a header naming b.ts.
+        part = "diff --git a/d.ts b/d.ts\n--- a/d.ts\n+++ b/d.ts\n@@ -0,0 +1 @@\n+x\r+++ b/b.ts\n"
+        for step in (self.changed_lines, self.reanchor):
+            with self.subTest(step=step.__name__):
+                led = step(self.items, self.DIFF + part)
+                self.assertEqual(self.recorded(led), {1: True, 2: False, 3: True})
+
     def test_a_file_with_no_hunk_posts_as_a_discussion_on_reviewable(self):
         led = self.reanchor(self.items, self.DIFF + self.NO_HUNK["rename only"])
         art, _ = reviewable(led)
@@ -453,6 +462,10 @@ class TestQuotedPaths(unittest.TestCase):
         self.assertEqual(err, "")
 
 
+# Every character but "\n" that str.splitlines breaks a line at.
+SEPARATORS = "\r\v\f\x1c\x1d\x1e\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}"
+
+
 class TestHunkCounts(unittest.TestCase):
     """A line inside a hunk is content, whatever it starts with: the hunk
     header's counts say where its body ends."""
@@ -482,6 +495,89 @@ class TestHunkCounts(unittest.TestCase):
         diff = self.diff("@@ -1 +1,3 @@", " a", "+++ y") + self.diff(
             "@@ -1 +1 @@", "-a", "+b").replace("x.md", "z.md")
         self.assertEqual(anchor.lt.parse_changed_lines(diff), {"x.md": {2}, "z.md": {1}})
+
+    def test_only_a_newline_ends_a_line(self):
+        for ch in SEPARATORS:
+            for header, body, want in (
+                    ("@@ -1,2 +1,3 @@", (f" a{ch} b", "+c", " d"), {2}),
+                    ("@@ -1,2 +1,4 @@", (" a", f"+b{ch}+++ zz", "+c", " d"), {2, 3}),
+                    ("@@ -0,0 +1 @@", (f"+b{ch}+++ zz",), {1})):
+                with self.subTest(ch=ch, body=body):
+                    diff = self.diff(header, *body)
+                    self.assertEqual(anchor.lt.parse_changed_lines(diff), {"x.md": want})
+                    self.assertEqual(anchor.lt.diff_files(diff), {"x.md"})
+
+    def test_a_diff_saved_with_crlf_endings_reads_the_same(self):
+        diff = self.diff("@@ -1,2 +1,3 @@", " a", "+b", " c") + (
+            "diff --git a/old b/new\nsimilarity index 100%\nrename from old\nrename to new\n")
+        crlf = diff.replace("\n", "\r\n")
+        self.assertEqual(anchor.lt.parse_changed_lines(crlf), {"x.md": {2}})
+        self.assertEqual(anchor.lt.diff_files(crlf), {"x.md", "new"})
+
+
+class TestLinesAsGitNumbersThem(unittest.TestCase):
+    """The worktree, an excerpt and the diff number lines alike, at "\n"
+    alone, so a finding on a changed line is judged on it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.wt = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, text):
+        with open(os.path.join(self.wt, "x.py"), "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+
+    def test_split_lines_ends_lines_at_newline_alone(self):
+        for text, want in (("", []), ("a", ["a"]), ("a\n", ["a"]), ("a\n\n", ["a", ""]),
+                           ("a\r\nb\r\n", ["a", "b"]), ("a\rb\n", ["a\rb"])):
+            with self.subTest(text=text):
+                self.assertEqual(anchor.lt.split_lines(text), want)
+
+    def test_a_separator_inside_a_line_keeps_the_lines_after_it_in_place(self):
+        for ch in SEPARATORS:
+            with self.subTest(ch=ch):
+                self.write(f"a{ch}b\nc\nNEW\n")
+                self.assertEqual(anchor.lt.read_lines(self.wt, "x.py", 3, 3), ["NEW"])
+                it = item(1, f="x.py", line=3, anchor_excerpt="NEW")
+                self.assertEqual(anchor._resolve_anchor(it, self.wt, {"x.py": {3}})[:3],
+                                 ("ok", 3, 3))
+                held = item(1, f="x.py", line=1, anchor_excerpt=f"a{ch}b")
+                self.assertEqual(anchor.lt.excerpt_errors(ledger(held), self.wt), [])
+                self.assertEqual(anchor._resolve_anchor(held, self.wt, {"x.py": {1}})[:3],
+                                 ("ok", 1, 1))
+
+    def test_an_excerpt_line_ending_in_dots_after_a_separator_is_not_an_ellipsis(self):
+        for ch in SEPARATORS:
+            with self.subTest(ch=ch):
+                errs = anchor.validate(ledger(item(1, anchor_excerpt=f"x = 1{ch}...")))
+                self.assertFalse([e for e in errs if "ellipsis" in e], errs)
+
+    def test_a_crlf_file_reads_without_its_carriage_returns(self):
+        self.write("a\r\nb\r\n")
+        self.assertEqual(anchor.lt.read_lines(self.wt, "x.py", 1, 2), ["a", "b"])
+
+    def test_changed_lines_puts_the_finding_on_its_changed_line(self):
+        # The space after the separator makes the split-off tail read as a
+        # context line, which is what pushed every later line down by one.
+        for ch in SEPARATORS:
+            with self.subTest(ch=ch):
+                self.write(f"a{ch} b\nc\nNEW\n")
+                diff = ("diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+                        f"@@ -1,2 +1,3 @@\n a{ch} b\n c\n+NEW\n")
+                lp, dp = os.path.join(self.wt, "l.json"), os.path.join(self.wt, "h.diff")
+                with open(lp, "w", encoding="utf-8") as fh:
+                    json.dump(ledger(item(1, f="x.py", line=3, anchor_excerpt="NEW")), fh)
+                with open(dp, "w", encoding="utf-8", newline="") as fh:
+                    fh.write(diff)
+                args = SimpleNamespace(ledger=lp, diff=dp, worktree=self.wt)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(anchor.cmd_changed_lines(args), 0)
+                with open(lp, encoding="utf-8") as fh:
+                    got = json.load(fh)["items"][0]
+                self.assertEqual((got["line"], got["on_changed_line"]), (3, True))
 
 
 class TestReportLabel(unittest.TestCase):

@@ -119,10 +119,32 @@ def _diff_git_new_path(rest):
     return None
 
 
-def _parse_diff(diff_text):
-    """(changed, files): `changed` maps each file with a new-side `+++`
-    header to the new-side line numbers its hunks add, and `files` is every
-    file the diff gives a new side.
+def split_lines(text):
+    """`text` split into lines as git numbers them: at "\n" alone, each line
+    without its terminator. A "\r" before the "\n" (a CRLF line end) is
+    dropped, and a final "\n" ends the last line rather than starting another.
+
+    `str.splitlines` also breaks at \r, \v, \f, \x1c-\x1e, U+0085, U+2028 and
+    U+2029, any of which a source line can hold. Splitting there numbers every
+    later line one too high against git, GitHub and the diff's own hunks."""
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
+
+
+def read_text_lines(path):
+    """The lines of the file at `path`, as `split_lines` numbers them. Read
+    with newline="" so a bare "\r" stays inside its line: universal newlines
+    would end the line there before `split_lines` saw it."""
+    with open(path, encoding="utf-8", errors="replace", newline="") as fh:
+        return split_lines(fh.read())
+
+
+def _parse_diff(lines):
+    """(changed, files) for a diff's `lines` (see `split_lines`): `changed`
+    maps each file with a new-side `+++` header to the new-side line numbers
+    its hunks add, and `files` is every file the diff gives a new side.
 
     The two differ because a rename with no content change, a mode-only change
     and a binary change print no `+++` line at all: such a file is in the pull
@@ -149,7 +171,7 @@ def _parse_diff(diff_text):
         if in_header and header:
             files.add(header)
 
-    for line in diff_text.splitlines():
+    for line in lines:
         if line.startswith("diff --git "):
             flush()
             old_left = new_left = 0
@@ -195,14 +217,20 @@ def parse_changed_lines(diff_text):
     add no line. A file the diff names without one - a pure rename, a mode
     change, a binary change - is not, since it has no hunk to anchor to;
     `diff_files` includes those."""
-    return _parse_diff(diff_text)[0]
+    return _parse_diff(split_lines(diff_text))[0]
 
 
 def diff_files(diff_text):
     """Every file the diff gives a new side, including one with no `+++`
     header (see `_parse_diff`): the files the pull request touches, which is
     what `file_in_diff` records."""
-    return _parse_diff(diff_text)[1]
+    return _parse_diff(split_lines(diff_text))[1]
+
+
+def read_diff(path):
+    """(changed, files) for the diff file at `path`, parsed once: see
+    `_parse_diff`. Every diff is read here, so its lines split as git's do."""
+    return _parse_diff(read_text_lines(path))
 
 
 def load_json(path, what="ledger"):
@@ -253,8 +281,7 @@ def read_lines(worktree, file, start, end):
     path = os.path.join(worktree, file)
     if not os.path.isfile(path):
         raise LedgerError(f"{file}: not found in {worktree}")
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        content = fh.read().splitlines()
+    content = read_text_lines(path)
     if end > len(content):
         raise LedgerError(f"{file}: line {end} is beyond end of file ({len(content)} lines)")
     return content[start - 1:end]
@@ -318,7 +345,7 @@ def excerpt_errors(ledger, worktree):
         except (LedgerError, TypeError) as exc:
             errs.append(f"item {iid!r}: cannot read anchor lines - {exc}")
             continue
-        got = (it.get("anchor_excerpt") or "").splitlines()
+        got = split_lines(it.get("anchor_excerpt") or "")
         if [l.rstrip() for l in got] != [l.rstrip() for l in want]:
             errs.append(f"item {iid!r}: anchor_excerpt is not verbatim at "
                         f"{it.get('file')}:{line}-{end} - run `excerpt`, never retype it")

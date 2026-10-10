@@ -574,11 +574,25 @@ than reasoned about.
   as a header only once both are spent. `diff --git` and `@@` are not gated, since no body line
   can start with either, so a hunk whose counts overstate its body still ends at the next file.
   This deliberately changes GitHub's output, for diffs holding such a line only: a finding on one
-  of the recovered lines now posts inline. It is the third such change, beside the quoted-path
-  decode above and the positive-integer line check under "A line that is not a positive integer";
-  GitHub's output matches `master` everywhere else, and the golden file is unchanged.
+  of the recovered lines now posts inline. It is one of four such changes, beside the quoted-path
+  decode above, the positive-integer line check under "A line that is not a positive integer" and
+  the line splitting in the next entry; GitHub's output matches `master` everywhere else, and the
+  golden file is unchanged.
   *If wrong:* a diff whose header counts are wrong reads `+++ ` lines as content until the next
   `diff --git`; the counting is confined to `_parse_diff`.
+- **Lines are numbered as git numbers them, at `\n` alone, everywhere.** Git, GitHub and the
+  review agents' tools end a line at `\n` only. The diff reader, the worktree reader behind
+  `excerpt` and the excerpt checks, and `reanchor`'s matching all split with `str.splitlines`,
+  which also breaks at `\r`, `\v`, `\f`, `\x1c`-`\x1e`, U+0085, U+2028 and U+2029, and opened
+  their files with universal newlines, which turn a bare `\r` into a line end. A source line
+  holding any of these became two: every later line was numbered one too high, a correct excerpt
+  read as not verbatim, a diff hunk's counts were spent early, and a tail reading `+++ ...` was
+  taken for a file header naming a file that does not exist. All of them now go through
+  `split_lines` and `read_text_lines` in `ledger_tools`, which open with `newline=""`, split on
+  `\n` alone and drop a trailing `\r`, so a CRLF file or diff reads as before. This deliberately
+  changes GitHub's output, for files and diffs holding such a character only: a finding after one
+  is judged on its own line. *If wrong:* a tool that rewrites line ends to bare `\r` yields one
+  unreadable line; git and `gh pr diff` never do, and the splitting is confined to `split_lines`.
 - **Reviewable discussions are GitHub review comments** (keyed `gh-<comment id>`), and an agent's
   comment mirrors to GitHub authored by the human with a note naming the agent, so attribution and
   the S2 read of prior feedback are unchanged. GitHub does not carry Reviewable's resolution state;

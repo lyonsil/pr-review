@@ -249,7 +249,7 @@ def validate(ledger, worktree=None):
                 or it.get("claim_original") or it.get("fix_original")):
             errs.append(f"item {iid!r} is REFUTED but carries a rewrite - a refuted claim has "
                         "nothing to rewrite; if something true survives it is DOWNGRADED")
-        if any(lt.is_ellipsis_line(l) for l in (it.get("anchor_excerpt") or "").splitlines()):
+        if any(lt.is_ellipsis_line(l) for l in lt.split_lines(it.get("anchor_excerpt") or "")):
             errs.append(f"item {iid!r} anchor_excerpt contains an ellipsis line - run `excerpt`")
         for field in ("file", "claim", "anchor_excerpt"):
             if not it.get(field):
@@ -396,9 +396,8 @@ def _resolve_anchor(item, worktree, changed):
     path = os.path.join(worktree, item["file"])
     if not os.path.isfile(path):
         return "dead", None, None, "file no longer present at head"
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        content = fh.read().splitlines()
-    excerpt = item.get("anchor_excerpt", "").splitlines()
+    content = lt.read_text_lines(path)
+    excerpt = lt.split_lines(item.get("anchor_excerpt", ""))
     if not excerpt:
         return "dead", None, None, "empty anchor excerpt"
     # Trailing whitespace is normalized away (formatters trim it harmlessly).
@@ -454,9 +453,7 @@ def cmd_reanchor(args):
         return 1
 
     try:
-        with open(args.diff, encoding="utf-8", errors="replace") as fh:
-            diff_text = fh.read()
-        changed, files = parse_changed_lines(diff_text), lt.diff_files(diff_text)
+        changed, files = lt.read_diff(args.diff)
     except FileNotFoundError:
         print(f"error: diff file not found: {args.diff}", file=sys.stderr)
         return 1
@@ -1397,14 +1394,12 @@ def cmd_excerpt(args):
 def cmd_changed_lines(args):
     led = lt.load_json(args.ledger)
     try:
-        with open(args.diff, encoding="utf-8", errors="replace") as fh:
-            diff_text = fh.read()
+        changed, files = lt.read_diff(args.diff)
     except FileNotFoundError:
         raise lt.LedgerError(f"diff file not found: {args.diff}")
     except OSError as exc:
         raise lt.LedgerError(f"could not read diff file {args.diff}: {exc}")
-    notes = lt.mark_changed_lines(led, args.worktree, parse_changed_lines(diff_text),
-                                  lt.diff_files(diff_text))
+    notes = lt.mark_changed_lines(led, args.worktree, changed, files)
     lt.write_ledger(args.ledger, led, "changed-lines")
     print("\n".join(notes))
     return 0
