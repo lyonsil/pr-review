@@ -508,6 +508,7 @@ def edit_field(ledger, iid, field, text):
 # --- Refuter brief -----------------------------------------------------
 
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "refuter-brief.tmpl.md")
+WT_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pr-review-wt.sh")
 VERDICT_FIELDS = ("ITEM", "VERDICT", "SEVERITY", "ON_CHANGED_LINE", "REASON", "CLAIM_VERDICT",
                   "CLAIM_REASON", "CLAIM_REWRITE", "FIX_VERDICT", "FIX_REASON", "FIX_REWRITE")
 HEADER_FIELDS = ("BRIEF", "RUN", "KEY", "OWNS")
@@ -623,6 +624,7 @@ def render_brief(ledger, key, context, ledger_dir, template_path=TEMPLATE_PATH):
         "VERDICT_PATH": os.path.join(ledger_dir, "verdicts", f"{key}.txt"),
         "PROBE_DIR": f"{scratch}/probes/{key}",
         "REFUTER_WT": f"{scratch}/wt-pr{n}-r{key.lower()}",
+        "WT_SCRIPT": WT_SCRIPT_PATH,
     }
     with open(template_path, encoding="utf-8") as fh:
         text = fh.read()

@@ -251,6 +251,21 @@ class TestBrief(unittest.TestCase):
         self.assertIn(f"RUN: {lt.run_id(brief_ledger())}", text)
         self.assertIn(f"BRIEF: {lt.template_hash()}", text)
 
+    def test_brief_names_the_worktree_script_beside_the_tools(self):
+        text, _ = lt.render_brief(brief_ledger(), "C1", CTX, "/s/pr-review/pr13")
+        wt = os.path.join(HERE, "pr-review-wt.sh")
+        self.assertTrue(os.path.isabs(lt.WT_SCRIPT_PATH))
+        self.assertEqual(lt.WT_SCRIPT_PATH, wt)
+        self.assertTrue(os.path.exists(wt))
+        self.assertIn(wt, text)
+        self.assertNotIn("~/.claude/pr-review", text)
+
+    def test_brief_quotes_the_worktree_script(self):
+        text, _ = lt.render_brief(brief_ledger(), "C1", CTX, "/s/pr-review/pr13")
+        wt = lt.WT_SCRIPT_PATH
+        for verb in ("create", "link-deps", "remove"):
+            self.assertIn(f'"{wt}" {verb}', text)
+
     def test_an_unknown_key_cannot_batch_unrelated_items(self):
         with self.assertRaisesRegex(lt.LedgerError, "unknown refuter key"):
             lt.render_brief(brief_ledger(), "i1", CTX, "/s")   # 1 is clustered
