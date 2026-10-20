@@ -56,7 +56,10 @@ Validate the manifest with `claude plugin validate .`.
 ## Migrating from the symlink install
 
 Earlier versions lived at exactly `~/.claude/pr-review/` with the commands symlinked into
-`~/.claude/commands/`. After installing the plugin:
+`~/.claude/commands/`. **Do not update that checkout to this version while the symlinks are still
+in place:** commands loaded from `~/.claude/commands/` get no plugin path substitution, so
+`/pr-review` cannot find its scripts and `/pr-review-post` loses your remembered providers. Install
+the plugin and finish these steps first; after that, the checkout can be updated freely.
 
 1. Keep your remembered providers, if you have any:
    ```bash

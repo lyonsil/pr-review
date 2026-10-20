@@ -195,8 +195,8 @@ git commit -m "Package pr-review as a Claude Code plugin"
 ### Task 3: Merge and tag `v1.0.0` (operator-gated)
 
 - [ ] **Step 1:** Ask the operator before pushing. Then `git push -u origin team-marketplace` and `gh pr create --base master`. The title is "Package pr-review as a plugin for the paratext-team marketplace". The body summarizes Tasks 1-2, links the spec, and ends with the attribution line.
-- [ ] **Step 2:** The operator merges. Then `git switch master && git pull`, and confirm `.claude-plugin/plugin.json` exists on `master`.
-- [ ] **Step 3:** Ask the operator, then `git tag -a v1.0.0 -m "First plugin release" && git push origin v1.0.0`.
+- [ ] **Step 2:** The operator merges. Then `git fetch origin` and `git show origin/master:.claude-plugin/plugin.json` to confirm the manifest is on `master`. Do **not** pull into `~/.claude/pr-review`: the symlinked commands there would get the plugin text without substitution and break until Task 6.
+- [ ] **Step 3:** Ask the operator, then `git tag -a v1.0.0 -m "First plugin release" origin/master && git push origin v1.0.0`.
   Expected: `git ls-remote origin refs/tags/v1.0.0` prints one line.
 
 ---
@@ -238,6 +238,7 @@ The operator's own machine is used; the symlinks stay in place for now. Plugin c
 
 ### Task 6: Operator switch-over
 
+- [ ] **Step 0:** Only now may `~/.claude/pr-review` be pulled to the new `master`, and only together with Step 2.
 - [ ] **Step 1:** Copy `~/.claude/pr-review/providers.json` into the data directory Task 5 Step 3 printed, if the file exists. Verify with `python3 -m json.tool` on the copy.
 - [ ] **Step 2:** `rm ~/.claude/commands/pr-review.md ~/.claude/commands/pr-review-post.md`, after `ls -l` confirms both are symlinks into this repo.
 - [ ] **Step 3:** In a new session, `/pr-review` appears in the slash-command list as the plugin's command.
