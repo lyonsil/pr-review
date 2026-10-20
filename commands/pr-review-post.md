@@ -15,7 +15,7 @@ text, copied verbatim where it says so.
    under it:
 
    ```bash
-   SCRATCH=$(~/.claude/pr-review/pr-review-wt.sh scratchpad)
+   SCRATCH=$("${CLAUDE_PLUGIN_ROOT}/pr-review-wt.sh" scratchpad)
    ```
 
    There is **no `$CLAUDE_SCRATCHPAD` environment variable** in this harness - do not reference
@@ -28,11 +28,11 @@ text, copied verbatim where it says so.
    depends on the **current directory** - so either re-run the subcommand from the same repo root
    in every later shell, or resolve it once here and substitute the literal path into the commands
    below. Do not resolve it from inside `$WT` or any other directory.
-2. Run `~/.claude/pr-review/pr-review-wt.sh reap`. `kept ... not-a-review-worktree` lines are
+2. Run `"${CLAUDE_PLUGIN_ROOT}/pr-review-wt.sh" reap`. `kept ... not-a-review-worktree` lines are
    suppressed by default; pass `reap -v` if you want them.
 3. Find the newest `ledger.json` under `$SCRATCH/pr-review/`. If none exists, stop: the
    review did not run in this session, and the ledger is session-scoped by design.
-4. `python3 ~/.claude/pr-review/pr-review-anchor.py validate <ledger>` - stop on any `error: ...`
+4. `python3 "${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py" validate <ledger>` - stop on any `error: ...`
    line (exit 1). Do not proceed on a failing validate; if the ledger is malformed, that is a bug
    in how `/pr-review` wrote it, not something to work around here.
 
@@ -137,13 +137,14 @@ here, before anything is built. Take the first of these that answers:
    another repo does not carry over: whether Reviewable covers a repo is decided per repo (its free
    tier, for one, covers only public ones), so a later repo in the same conversation goes on down
    this list.
-3. **The repo-scoped default in `~/.claude/pr-review/providers.json`** - a flat JSON object keyed by
-   `owner/repo`, the same string step 1 read into `$REPO`:
+3. **The repo-scoped default in `"${CLAUDE_PLUGIN_DATA}/providers.json"`** - a flat JSON object keyed by
+   `owner/repo`, the same string step 1 read into `$REPO`. It lives in the plugin's data
+   directory, which survives plugin updates:
 
    ```bash
    python3 -c "
 import json, os, sys
-path = os.path.expanduser('~/.claude/pr-review/providers.json')
+path = sys.argv[2]
 if not os.path.exists(path):
     sys.exit(0)
 try:
@@ -156,7 +157,7 @@ for repo, v in sorted(data.items()):
     if v not in ('github', 'reviewable'):
         sys.exit('error: %s: the entry for %s is %r, not github or reviewable' % (path, repo, v))
 print(data.get(sys.argv[1], ''))
-" "$REPO"
+" "$REPO" "${CLAUDE_PLUGIN_DATA}/providers.json"
    ```
 
    A missing file or an empty line means no default is recorded - go on to rule 4. Neither is an
@@ -228,12 +229,12 @@ Every write goes through this, which keeps every other repo's entry, sets only `
 creates the file and its directory if needed. It writes a temporary file beside `providers.json`
 and renames it over the original, so an interrupted write leaves the previous file whole, never a
 truncated one that would stop every repo's run. Pass `github` or `reviewable` as the second
-argument; it prints the path it wrote:
+argument and the file's path as the third; it prints the path it wrote:
 
 ```bash
 python3 -c "
 import json, os, sys, tempfile
-path = os.path.expanduser('~/.claude/pr-review/providers.json')
+path = sys.argv[3]
 data = {}
 if os.path.exists(path):
     with open(path, encoding='utf-8') as fh:
@@ -251,7 +252,7 @@ except BaseException:
         os.remove(tmp)
     raise
 print(path)
-" "$REPO" "<provider>"
+" "$REPO" "<provider>" "${CLAUDE_PLUGIN_DATA}/providers.json"
 ```
 
 Run rule 3's lookup before any of these bullets, even when rule 1 or 2 chose the provider: the
@@ -273,7 +274,7 @@ fi
 git -C "$WT" fetch origin "pull/$NUMBER/head"
 git -C "$WT" checkout --detach FETCH_HEAD
 GH_REPO="$REPO" gh pr diff "$NUMBER" > "$SCRATCH/pr-review/pr$NUMBER/head.diff"
-python3 ~/.claude/pr-review/pr-review-anchor.py reanchor <ledger> \
+python3 "${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py" reanchor <ledger> \
   --worktree "$WT" --diff "$SCRATCH/pr-review/pr$NUMBER/head.diff" --head "$NOW"
 ```
 
@@ -353,10 +354,10 @@ with a file's contents, so write each file under `$SCRATCH/pr-review/pr$NUMBER/e
 Write tool:
 
 ```bash
-A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
-python3 $A edit $L <id> --field detail --text-file <f>        # the reworded Fix: slot, whole detail
-python3 $A edit $L <id> --field fix_verdict --text-file <f>   # the file holds exactly UNVERIFIABLE
-python3 $A edit $L <id> --field fix_reason --text-file <f>    # or --field verdict_reason
+A="${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py"; L=<ledger>
+python3 "$A" edit $L <id> --field detail --text-file <f>        # the reworded Fix: slot, whole detail
+python3 "$A" edit $L <id> --field fix_verdict --text-file <f>   # the file holds exactly UNVERIFIABLE
+python3 "$A" edit $L <id> --field fix_reason --text-file <f>    # or --field verdict_reason
 ```
 
 `fix_verdict` accepts only `UNVERIFIABLE`: a stale fix can be demoted, never promoted. Do not
@@ -375,7 +376,7 @@ reasoning and the correction are both visible. The two fields differ in who read
 After the last edit, re-run `validate` before building the payload, and stop on any `error:`:
 
 ```bash
-python3 ~/.claude/pr-review/pr-review-anchor.py validate <ledger>
+python3 "${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py" validate <ledger>
 ```
 
 ## 3. Build the posting plan
@@ -402,7 +403,7 @@ revisions. A reader should be able to act on the review without knowing how it w
 inline thread; the body file you write should not contain it at all.
 
 ```bash
-python3 ~/.claude/pr-review/pr-review-anchor.py payload <ledger> \
+python3 "${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py" payload <ledger> \
   --provider <provider> \
   --select <tokens> \
   --include-refuted <overruled-ids> \
@@ -474,7 +475,7 @@ Show the preview page by page, as your own message text - tool output does not r
 user's screen:
 
 ```bash
-python3 ~/.claude/pr-review/pr-review-anchor.py preview "$SCRATCH/pr-review/pr$NUMBER/payload.json" --page 1
+python3 "${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py" preview "$SCRATCH/pr-review/pr$NUMBER/payload.json" --page 1
 ```
 
 Its first line says `page 1/M`. Paste each page verbatim into a message of its own (copy the
@@ -763,8 +764,8 @@ Then go to step 5.
 ## 5. Tear down
 
 ```bash
-~/.claude/pr-review/pr-review-wt.sh remove-refuters "$SCRATCH" "$NUMBER"
-~/.claude/pr-review/pr-review-wt.sh remove "$WT"
+"${CLAUDE_PLUGIN_ROOT}/pr-review-wt.sh" remove-refuters "$SCRATCH" "$NUMBER"
+"${CLAUDE_PLUGIN_ROOT}/pr-review-wt.sh" remove "$WT"
 ```
 
 `remove-refuters` removes any refuter worktree (`wt-pr<n>-r*`) `/pr-review` S5 left behind.

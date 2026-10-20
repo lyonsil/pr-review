@@ -8,6 +8,13 @@ is still being iterated on and the reasoning is not recoverable from the diffs.
 - **Built as a git repo at `~/.claude/pr-review`, commands symlinked into `~/.claude/commands/`.**
   The plan put everything in untracked `~/.claude/`, leaving no commits or diffs to review.
   *If wrong:* a directory move and a sed.
+- **Superseded 2026-10-20: installed as a Claude Code plugin from the `paratext-team` marketplace.**
+  Commands reach the scripts through `"${CLAUDE_PLUGIN_ROOT}"`, which Claude Code substitutes into
+  the command text. The refuter brief never passes through that substitution, so `render_brief`
+  fills `{{WT_SCRIPT}}` from `WT_SCRIPT_PATH`, beside `ledger_tools.py`. `providers.json` lives in
+  `"${CLAUDE_PLUGIN_DATA}"`, passed to both inline snippets as an argument, because the plugin
+  root is replaced on every update. *If wrong:* the template placeholder and the two snippet
+  arguments are the only coupling points.
 - **Session-scoped ledger, in the scratchpad.** Chosen for zero cleanup burden. The triage gate
   must therefore close same-day; a `/clear` between the two commands loses the review.
   *If wrong:* re-run `/pr-review`; moving the ledger to `~/.claude/` touches two paths.
