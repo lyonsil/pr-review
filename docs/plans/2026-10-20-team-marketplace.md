@@ -268,5 +268,6 @@ The operator's own machine is used; the symlinks stay in place for now. Plugin c
   Expected: `gh api repos/lyonsil/pr-review --jq .visibility` prints `public`, and `gh api repos/lyonsil/pr-review/rulesets --jq '.[].name'` lists both rulesets.
 - [ ] **Step 7:** Draft (do not send) a short team announcement.
   - It links the index README and says to run `/plugin marketplace add paranext/claude-plugins` and `/plugin install pr-review@paratext-team`.
+  - It asks everyone to turn on auto-update for `paratext-team` (`/plugin` > Marketplaces), since it starts off for non-Anthropic marketplaces and releases otherwise reach people unevenly.
   - It invites teammates to add their own plugins per CONTRIBUTING.
   - Hand it to the operator.
