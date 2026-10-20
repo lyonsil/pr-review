@@ -738,7 +738,8 @@ class TestCli(unittest.TestCase):
 
 class TestProviderLookup(unittest.TestCase):
     """The step 1.5 lookup in commands/pr-review-post.md, run as written
-    against a providers.json in a throwaway home directory."""
+    against a providers.json passed as the plugin data path would be - here
+    a throwaway directory whose name has a space in it."""
 
     def setUp(self):
         with open(os.path.join(HERE, "commands", "pr-review-post.md"), encoding="utf-8") as fh:
@@ -746,9 +747,9 @@ class TestProviderLookup(unittest.TestCase):
         blocks = [seg.split('\n" "$REPO"')[0] for seg in md.split('python3 -c "\n')[1:]]
         self.lookup = next(b for b in blocks if "keyed by owner/repo" in b)
         self.writer = next(b.split('\n" "$REPO" "')[0]
-                           for b in md.split('python3 -c "\n')[1:] if "sys.argv[2]" in b)
+                           for b in md.split('python3 -c "\n')[1:] if "tempfile" in b)
         self.tmp = tempfile.TemporaryDirectory()
-        self.path = os.path.join(self.tmp.name, ".claude", "pr-review", "providers.json")
+        self.path = os.path.join(self.tmp.name, "plugin data", "providers.json")
         os.makedirs(os.path.dirname(self.path))
 
     def tearDown(self):
@@ -757,9 +758,8 @@ class TestProviderLookup(unittest.TestCase):
     def run_lookup(self, data, repo="o/r"):
         with open(self.path, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
-        env = dict(os.environ, HOME=self.tmp.name, USERPROFILE=self.tmp.name)
-        proc = subprocess.run([sys.executable, "-B", "-c", self.lookup, repo],
-                              capture_output=True, text=True, env=env)
+        proc = subprocess.run([sys.executable, "-B", "-c", self.lookup, repo, self.path],
+                              capture_output=True, text=True)
         return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
     def test_this_repos_entry_is_read(self):
@@ -768,9 +768,8 @@ class TestProviderLookup(unittest.TestCase):
         self.assertEqual(self.run_lookup({"x/y": "github"}), (0, "", ""))
 
     def write_default(self, repo, provider):
-        env = dict(os.environ, HOME=self.tmp.name, USERPROFILE=self.tmp.name)
-        return subprocess.run([sys.executable, "-B", "-c", self.writer, repo, provider],
-                              capture_output=True, text=True, env=env)
+        return subprocess.run([sys.executable, "-B", "-c", self.writer, repo, provider, self.path],
+                              capture_output=True, text=True)
 
     def test_the_writer_replaces_the_file_and_keeps_other_entries(self):
         with open(self.path, "w", encoding="utf-8") as fh:

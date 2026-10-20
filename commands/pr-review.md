@@ -17,7 +17,7 @@ text, copied verbatim where it says so.
 1. Resolve this session's scratchpad directory. Every path below hangs off it:
 
    ```bash
-   SCRATCH=$(~/.claude/pr-review/pr-review-wt.sh scratchpad)
+   SCRATCH=$("${CLAUDE_PLUGIN_ROOT}/pr-review-wt.sh" scratchpad)
    ```
 
    There is **no `$CLAUDE_SCRATCHPAD` environment variable** in this harness - do not reference
@@ -35,7 +35,7 @@ text, copied verbatim where it says so.
    depends on the **current directory** - so either re-run the subcommand from the same repo root
    in every later shell, or resolve it once here and substitute the literal path into the commands
    below. Do not resolve it from inside `$WT` or any other directory.
-2. Run `~/.claude/pr-review/pr-review-wt.sh reap` and report any `reaped`, `orphaned`, or
+2. Run `"${CLAUDE_PLUGIN_ROOT}/pr-review-wt.sh" reap` and report any `reaped`, `orphaned`, or
    `stranded-branch` lines. A `kept ... dirty-N-changes` line is normal, not an error: the reaper
    never removes a worktree with uncommitted or untracked changes, and never deletes branches -
    it only reports them. `kept ... current-session` / `kept ... locked-by-live-pid-N` lines mean
@@ -131,7 +131,7 @@ text, copied verbatim where it says so.
    a pipe, and never wrapped in `bash -c`:
 
    ```bash
-   WT=$(~/.claude/pr-review/pr-review-wt.sh create "$SCRATCH/wt-pr<n>" "$HEAD_SHA")
+   WT=$("${CLAUDE_PLUGIN_ROOT}/pr-review-wt.sh" create "$SCRATCH/wt-pr<n>" "$HEAD_SHA")
    ```
 
    Still use this direct-substitution form - it's the reliable way to capture `$WT` cleanly - but
@@ -147,8 +147,8 @@ text, copied verbatim where it says so.
    run (`kept ... age-Nh`) - a fallback for when the scratchpad cannot be resolved for the `reap`
    call, not something checked ahead of the lock.
 7. Snapshot the primary checkout so S6 can prove nothing touched it:
-   `~/.claude/pr-review/pr-review-wt.sh primary-status "$WT" > "$SCRATCH/primary.before"`
-8. Link dependencies now, not in S5: `~/.claude/pr-review/pr-review-wt.sh link-deps "$WT" "$MERGE_BASE"`.
+   `"${CLAUDE_PLUGIN_ROOT}/pr-review-wt.sh" primary-status "$WT" > "$SCRATCH/primary.before"`
+8. Link dependencies now, not in S5: `"${CLAUDE_PLUGIN_ROOT}/pr-review-wt.sh" link-deps "$WT" "$MERGE_BASE"`.
    Record the `linked ...` / `declined ...` line. It links the primary checkout's installed
    `node_modules` entries (per package, for npm, pnpm, yarn and bun), with workspace-package links
    pointed at `$WT` so tests run the head under review, only when no tracked lockfile differs between
@@ -368,8 +368,8 @@ Then write the draft ledger to `$SCRATCH/pr-review/pr<n>/ledger.json`, with the 
 Check the draft before any refuter sees it:
 
 ```bash
-A=~/.claude/pr-review/pr-review-anchor.py; L="$SCRATCH/pr-review/pr<n>/ledger.json"
-python3 $A excerpt $L --worktree "$WT" && python3 $A validate $L --draft
+A="${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py"; L="$SCRATCH/pr-review/pr<n>/ledger.json"
+python3 "$A" excerpt $L --worktree "$WT" && python3 "$A" validate $L --draft
 ```
 
 `excerpt` fails on a `file` or `line`/`line_end` that does not exist in `$WT`; `validate --draft`
@@ -435,7 +435,7 @@ Verdict fields are written by `ingest` at the end of S5, never by hand.
 For every refuter key - each cluster id, and `i<id>` for each unclustered item - render its brief:
 
 ```bash
-python3 ~/.claude/pr-review/pr-review-anchor.py brief <ledger> --key <KEY> \
+python3 "${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py" brief <ledger> --key <KEY> \
   --context "$SCRATCH/pr-review/pr<n>/ctx.json"
 ```
 
@@ -462,8 +462,8 @@ one or the other, do not re-arm.
 When every refuter has answered or stalled twice:
 
 ```bash
-python3 ~/.claude/pr-review/pr-review-anchor.py ingest <ledger>
-~/.claude/pr-review/pr-review-wt.sh remove-refuters "$SCRATCH" <n>
+python3 "${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py" ingest <ledger>
+"${CLAUDE_PLUGIN_ROOT}/pr-review-wt.sh" remove-refuters "$SCRATCH" <n>
 ```
 
 `ingest` reads the dispatched set from `briefs/*.json` and the answers from `verdicts/<KEY>.txt`,
@@ -476,7 +476,7 @@ earlier wakeup may already have stopped re-arming. If the same refuter fails aga
 twice - close its items, then run `remove-refuters` as above:
 
 ```bash
-python3 ~/.claude/pr-review/pr-review-anchor.py ingest <ledger> --inconclusive <ids> \
+python3 "${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py" ingest <ledger> --inconclusive <ids> \
   --reason "Not verified: the automated check did not complete."
 ```
 
@@ -524,9 +524,9 @@ this one could not have said.
 Run, in order, stopping on any `error:`:
 
 ```bash
-set -e; A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
-python3 $A excerpt $L --worktree "$WT"
-python3 $A changed-lines $L --diff "$SCRATCH/pr-review/pr<n>/head.diff" --worktree "$WT"
+set -e; A="${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py"; L=<ledger>
+python3 "$A" excerpt $L --worktree "$WT"
+python3 "$A" changed-lines $L --diff "$SCRATCH/pr-review/pr<n>/head.diff" --worktree "$WT"
 ```
 
 `excerpt` copies each anchor verbatim from `$WT`, so an excerpt is never retyped; `changed-lines`
@@ -541,8 +541,8 @@ write the complete new text to a file under `$SCRATCH/pr-review/pr<n>/edits/` wi
 tool, never under `/tmp`:
 
 1. For each DOWNGRADED item, fold what its `verdict_reason` means for the author into
-   `Why it matters:` (`python3 $A edit $L <id> --field detail --text-file <f>`), and record
-   `python3 $A edit $L <id> --field fold_note --text-file <f>` with `folded` or `bookkeeping`. Neither
+   `Why it matters:` (`python3 "$A" edit $L <id> --field detail --text-file <f>`), and record
+   `python3 "$A" edit $L <id> --field fold_note --text-file <f>` with `folded` or `bookkeeping`. Neither
    `severity_in -> severity` nor the refuter's reason publishes, so when the reason changes what
    the author needs to know - the path is gated, unreachable, pre-existing, or intentional - fold it
    in, in the author's terms, so the severity it posts at reads as sensible rather than arbitrary.
@@ -551,12 +551,12 @@ tool, never under `/tmp`:
 2. The quantifier sweep:
    `grep -inP '(?<![\w-])(every|all|any|always|never|only|whole|entire|cannot|no [a-z]+)(?![\w-])'`
    over the claims - case-insensitive, since a claim often opens with `Every` or `No`. For each
-   hit, cite the evidence or reword via `python3 $A edit $L <id> --field claim --text-file <f>`.
+   hit, cite the evidence or reword via `python3 "$A" edit $L <id> --field claim --text-file <f>`.
    Write each hit and its disposition into `$SCRATCH/pr-review/pr<n>/quantifiers.md`. To see
    each hit with its id:
 
    ```bash
-   A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
+   A="${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py"; L=<ledger>
    grep -P '^\s*"(id|claim)": ' $L \
      | grep -B1 -iP '^\s*"claim": .*(?<![\w-])(every|all|any|always|never|only|whole|entire|cannot|no [a-z]+)(?![\w-])'
    ```
@@ -569,11 +569,11 @@ tool, never under `/tmp`:
 Then:
 
 ```bash
-set -e; A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
-python3 $A renumber $L
-python3 $A validate $L --worktree "$WT"
-python3 $A reanchor $L --worktree "$WT" --diff "$SCRATCH/pr-review/pr<n>/head.diff" --dry-run
-~/.claude/pr-review/pr-review-wt.sh primary-status "$WT" | diff "$SCRATCH/primary.before" -
+set -e; A="${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py"; L=<ledger>
+python3 "$A" renumber $L
+python3 "$A" validate $L --worktree "$WT"
+python3 "$A" reanchor $L --worktree "$WT" --diff "$SCRATCH/pr-review/pr<n>/head.diff" --dry-run
+"${CLAUDE_PLUGIN_ROOT}/pr-review-wt.sh" primary-status "$WT" | diff "$SCRATCH/primary.before" -
 ```
 
 On a `validate` error: an excerpt mismatch means re-run `excerpt`; a wording error (process
@@ -585,12 +585,12 @@ If the primary-status diff is non-empty, stop and show the user the changed path
 anything without approval. Otherwise:
 
 ```bash
-A=~/.claude/pr-review/pr-review-anchor.py; L=<ledger>
-python3 $A report $L
+A="${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py"; L=<ledger>
+python3 "$A" report $L
 ```
 
 Relay `report`'s output in full as your own message text - tool output does not reach the
 user's screen - copied verbatim, never retyped or summarized. Then, also as message text, the
 quantifier dispositions from `quantifiers.md`, then the teardown one-liner in case the user
-abandons the round: `~/.claude/pr-review/pr-review-wt.sh remove $WT`.
+abandons the round: `"${CLAUDE_PLUGIN_ROOT}/pr-review-wt.sh" remove $WT`.
 Then **stop**. Do not post anything.

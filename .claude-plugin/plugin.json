@@ -1,0 +1,6 @@
+{
+  "name": "pr-review",
+  "description": "Deep PR review pipeline and posting to GitHub/Reviewable",
+  "author": { "name": "Matt Lyons, Ira Hopkinson" },
+  "repository": "https://github.com/lyonsil/pr-review"
+}

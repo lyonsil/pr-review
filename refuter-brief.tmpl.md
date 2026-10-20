@@ -21,9 +21,9 @@ need is in this brief. Do not rely on any other instructions about format.
   never create files there.
 - Put probe files under `{{PROBE_DIR}}`.
 - If you need a mutation test or a probe that must live inside a package, make your own worktree:
-  `~/.claude/pr-review/pr-review-wt.sh create "{{REFUTER_WT}}" {{HEAD_SHA}}` then
-  `~/.claude/pr-review/pr-review-wt.sh link-deps "{{REFUTER_WT}}" {{MERGE_BASE}}`. Work there, and
-  run `~/.claude/pr-review/pr-review-wt.sh remove "{{REFUTER_WT}}"` before you finish.
+  `"{{WT_SCRIPT}}" create "{{REFUTER_WT}}" {{HEAD_SHA}}` then
+  `"{{WT_SCRIPT}}" link-deps "{{REFUTER_WT}}" {{MERGE_BASE}}`. Work there, and
+  run `"{{WT_SCRIPT}}" remove "{{REFUTER_WT}}"` before you finish.
 - Never cd into, build in, or run tests in any directory other than `{{WT}}`, `{{REFUTER_WT}}` or
   `{{PROBE_DIR}}`. In particular never touch the checkout that `node_modules` links point at.
 
