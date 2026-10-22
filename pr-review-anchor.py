@@ -249,7 +249,7 @@ def validate(ledger, worktree=None):
                 or it.get("claim_original") or it.get("fix_original")):
             errs.append(f"item {iid!r} is REFUTED but carries a rewrite - a refuted claim has "
                         "nothing to rewrite; if something true survives it is DOWNGRADED")
-        if any(lt.is_ellipsis_line(l) for l in lt.split_lines(it.get("anchor_excerpt") or "")):
+        if any(lt.is_ellipsis_line(l) for l in lt.excerpt_lines(it.get("anchor_excerpt"))):
             errs.append(f"item {iid!r} anchor_excerpt contains an ellipsis line - run `excerpt`")
         for field in ("file", "claim", "anchor_excerpt"):
             if not it.get(field):
@@ -397,7 +397,7 @@ def _resolve_anchor(item, worktree, changed):
     if not os.path.isfile(path):
         return "dead", None, None, "file no longer present at head"
     content = lt.read_text_lines(path)
-    excerpt = lt.split_lines(item.get("anchor_excerpt", ""))
+    excerpt = lt.excerpt_lines(item.get("anchor_excerpt"))
     if not excerpt:
         return "dead", None, None, "empty anchor excerpt"
     # Trailing whitespace is normalized away (formatters trim it harmlessly).
