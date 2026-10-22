@@ -524,11 +524,13 @@ this one could not have said.
 Run, in order, stopping on any `error:`:
 
 ```bash
-set -e; A="${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py"; L=<ledger>
-python3 "$A" excerpt $L --worktree "$WT"
+A="${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py"; L=<ledger>
+python3 "$A" excerpt $L --worktree "$WT" &&
 python3 "$A" changed-lines $L --diff "$SCRATCH/pr-review/pr<n>/head.diff" --worktree "$WT"
 ```
 
+The steps are chained with `&&` because `set -e` does not stop a Bash tool call at a failed step
+(`set -e; false; echo after` prints `after` there), so the next step would run anyway.
 `excerpt` copies each anchor verbatim from `$WT`, so an excerpt is never retyped; `changed-lines`
 overwrites the refuters' `on_changed_line` from the posting diff, since a wrong `true` fails the
 **entire** review POST. Relay every `moved` and `flipped` line it prints: a flip means a refuter
@@ -549,7 +551,7 @@ tool, never under `/tmp`:
    When it is only bookkeeping ("less severe than first rated"), leave `detail` alone and record
    `bookkeeping`.
 2. The quantifier sweep:
-   `grep -inP '(?<![\w-])(every|all|any|always|never|only|whole|entire|cannot|no [a-z]+)(?![\w-])'`
+   `grep -inE '(^|[^[:alnum:]_-])(every|all|any|always|never|only|whole|entire|cannot|no [a-z]+)([^[:alnum:]_-]|$)'`
    over the claims - case-insensitive, since a claim often opens with `Every` or `No`. For each
    hit, cite the evidence or reword via `python3 "$A" edit $L <id> --field claim --text-file <f>`.
    Write each hit and its disposition into `$SCRATCH/pr-review/pr<n>/quantifiers.md`. To see
@@ -557,9 +559,12 @@ tool, never under `/tmp`:
 
    ```bash
    A="${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py"; L=<ledger>
-   grep -P '^\s*"(id|claim)": ' $L \
-     | grep -B1 -iP '^\s*"claim": .*(?<![\w-])(every|all|any|always|never|only|whole|entire|cannot|no [a-z]+)(?![\w-])'
+   grep -E '^[[:space:]]*"(id|claim)": ' $L \
+     | grep -B1 -iE '^[[:space:]]*"claim": .*[^[:alnum:]_-](every|all|any|always|never|only|whole|entire|cannot|no [a-z]+)([^[:alnum:]_-]|$)'
    ```
+
+   Both are POSIX extended regexes, not `grep -P`: Git Bash's default locale makes `grep -P`
+   fail with an error and print nothing, which reads as a clean sweep, and macOS grep has no `-P`.
 
    These are the stable S2 ids; `renumber` below prints the old -> new map (and records each
    item's `old_id`), so give both in `quantifiers.md`. The net
@@ -569,10 +574,10 @@ tool, never under `/tmp`:
 Then:
 
 ```bash
-set -e; A="${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py"; L=<ledger>
-python3 "$A" renumber $L
-python3 "$A" validate $L --worktree "$WT"
-python3 "$A" reanchor $L --worktree "$WT" --diff "$SCRATCH/pr-review/pr<n>/head.diff" --dry-run
+A="${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py"; L=<ledger>
+python3 "$A" renumber $L &&
+python3 "$A" validate $L --worktree "$WT" &&
+python3 "$A" reanchor $L --worktree "$WT" --diff "$SCRATCH/pr-review/pr<n>/head.diff" --dry-run &&
 "${CLAUDE_PLUGIN_ROOT}/pr-review-wt.sh" primary-status "$WT" | diff "$SCRATCH/primary.before" -
 ```
 

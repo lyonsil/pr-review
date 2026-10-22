@@ -133,6 +133,14 @@ def split_lines(text):
     return [line[:-1] if line.endswith("\r") else line for line in lines]
 
 
+def excerpt_lines(text):
+    """The lines of an `anchor_excerpt`, which is lines joined with "\n" and
+    no terminator after the last. Unlike a file, a trailing "\n" here means
+    the last line is blank, so it is kept: `split_lines` would drop it and
+    leave a range ending on a blank line one line short. None or "" is no lines."""
+    return split_lines(text + "\n") if text else []
+
+
 def read_text_lines(path):
     """The lines of the file at `path`, as `split_lines` numbers them. Read
     with newline="" so a bare "\r" stays inside its line: universal newlines
@@ -345,7 +353,7 @@ def excerpt_errors(ledger, worktree):
         except (LedgerError, TypeError) as exc:
             errs.append(f"item {iid!r}: cannot read anchor lines - {exc}")
             continue
-        got = split_lines(it.get("anchor_excerpt") or "")
+        got = excerpt_lines(it.get("anchor_excerpt"))
         if [l.rstrip() for l in got] != [l.rstrip() for l in want]:
             errs.append(f"item {iid!r}: anchor_excerpt is not verbatim at "
                         f"{it.get('file')}:{line}-{end} - run `excerpt`, never retype it")
@@ -621,10 +629,12 @@ def render_brief(ledger, key, context, ledger_dir, template_path=TEMPLATE_PATH):
         "OBLIGATIONS": context["obligations"],
         "CLAUDE_MD_PATHS": ", ".join(f"`{p}`" for p in paths),
         "ITEMS": "```json\n" + json.dumps(payload, indent=2) + "\n```",
-        "VERDICT_PATH": os.path.join(ledger_dir, "verdicts", f"{key}.txt"),
+        # Python's own paths are written with "/" as well, the form every
+        # other path here takes (`pr-review-wt.sh scratchpad` prints it).
+        "VERDICT_PATH": os.path.join(ledger_dir, "verdicts", f"{key}.txt").replace(os.sep, "/"),
         "PROBE_DIR": f"{scratch}/probes/{key}",
         "REFUTER_WT": f"{scratch}/wt-pr{n}-r{key.lower()}",
-        "WT_SCRIPT": WT_SCRIPT_PATH,
+        "WT_SCRIPT": WT_SCRIPT_PATH.replace(os.sep, "/"),
     }
     with open(template_path, encoding="utf-8") as fh:
         text = fh.read()
@@ -959,10 +969,10 @@ def render_report(ledger, ledger_path):
             f"    Report:   {os.path.join(ldir, 'report.md')}",
             f"    Worktree: {ledger.get('worktree')}",
             "", "## To post", "",
-            f"    /pr-review-post all          # on GitHub: {inline} inline + {body} in the body; "
+            f"    /pr-review:pr-review-post all          # on GitHub: {inline} inline + {body} in the body; "
             f"{len(by_v['REFUTED'])} refuted excluded",
-            "    /pr-review-post 1 3-7        # a chosen subset (ranges allowed)",
-            "    /pr-review-post all --include-refuted <id>   # also post a refuted finding",
+            "    /pr-review:pr-review-post 1 3-7        # a chosen subset (ranges allowed)",
+            "    /pr-review:pr-review-post all --include-refuted <id>   # also post a refuted finding",
             "", "Placement follows anchoring, not verdict: every selected finding on a changed "
             "line posts inline whatever its verdict; the rest go in the review body."]
     return "\n".join(out) + "\n"

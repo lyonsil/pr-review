@@ -1,5 +1,6 @@
 import unittest, importlib.util, os, sys, json, tempfile, io, contextlib
 from types import SimpleNamespace
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -265,6 +266,14 @@ class TestBrief(unittest.TestCase):
         wt = lt.WT_SCRIPT_PATH
         for verb in ("create", "link-deps", "remove"):
             self.assertIn(f'"{wt}" {verb}', text)
+
+    def test_brief_paths_from_python_use_forward_slashes_on_windows(self):
+        with mock.patch("os.sep", "\\"), \
+             mock.patch.object(lt, "WT_SCRIPT_PATH", "C:\\p\\pr-review-wt.sh"):
+            text, _ = lt.render_brief(brief_ledger(), "C1", CTX, "C:\\s\\pr-review\\pr13")
+        for verb in ("create", "link-deps", "remove"):
+            self.assertIn(f'"C:/p/pr-review-wt.sh" {verb}', text)
+        self.assertIn("`C:/s/pr-review/pr13/verdicts/C1.txt`", text)
 
     def test_an_unknown_key_cannot_batch_unrelated_items(self):
         with self.assertRaisesRegex(lt.LedgerError, "unknown refuter key"):
@@ -1165,7 +1174,7 @@ class TestReport(unittest.TestCase):
     def test_counts_and_dispatch(self):
         self.assertIn("CONFIRMED 1 / DOWNGRADED 1 / REFUTED 1 / INCONCLUSIVE 1", self.text)
         self.assertIn("3 refuters for 4 items, largest owned 2", self.text)
-        self.assertIn("/pr-review-post all", self.text)
+        self.assertIn("/pr-review:pr-review-post all", self.text)
         self.assertIn("2 inline + 1 in the body", self.text)
 
     def test_calibration_warnings(self):

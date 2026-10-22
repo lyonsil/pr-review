@@ -555,6 +555,23 @@ class TestLinesAsGitNumbersThem(unittest.TestCase):
                 errs = anchor.validate(ledger(item(1, anchor_excerpt=f"x = 1{ch}...")))
                 self.assertFalse([e for e in errs if "ellipsis" in e], errs)
 
+    def test_a_range_ending_on_a_blank_line_validates_after_excerpt(self):
+        self.write("a\n\nb\n\nc\n")
+        for line, end in ((1, 2), (1, 4), (2, 4), (3, 4)):
+            with self.subTest(range=(line, end)):
+                led = ledger(item(1, f="x.py", line=line, line_end=end))
+                anchor.lt.fill_excerpts(led, self.wt)
+                self.assertEqual(anchor.lt.excerpt_errors(led, self.wt), [])
+                self.assertEqual(anchor._resolve_anchor(led["items"][0], self.wt,
+                                                        {"x.py": {line}})[:3],
+                                 ("ok", line, end))
+
+    def test_excerpt_lines_keeps_a_trailing_blank_line(self):
+        for text, want in (("a\n", ["a", ""]), ("\n", ["", ""]), ("a\r\n", ["a", ""]),
+                           ("a", ["a"]), ("", []), (None, [])):
+            with self.subTest(text=text):
+                self.assertEqual(anchor.lt.excerpt_lines(text), want)
+
     def test_a_crlf_file_reads_without_its_carriage_returns(self):
         self.write("a\r\nb\r\n")
         self.assertEqual(anchor.lt.read_lines(self.wt, "x.py", 1, 2), ["a", "b"])
