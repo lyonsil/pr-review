@@ -1,5 +1,6 @@
 import unittest, importlib.util, os, sys, json, tempfile, io, contextlib
 from types import SimpleNamespace
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -209,7 +210,8 @@ class TestDemotionReason(unittest.TestCase):
 class TestSchema(unittest.TestCase):
     def test_schema_1_is_rejected_with_a_rerun_instruction(self):
         errs = anchor.validate({"schema": 1, "items": [], "clusters": []})
-        self.assertTrue(any("schema 1" in e and "re-run /pr-review" in e for e in errs), errs)
+        self.assertTrue(any("schema 1" in e and "re-run /pr-review:pr-review" in e for e in errs),
+                        errs)
 
     def test_missing_schema_is_rejected(self):
         errs = anchor.validate({"items": [], "clusters": []})
@@ -257,14 +259,22 @@ class TestBrief(unittest.TestCase):
         self.assertTrue(os.path.isabs(lt.WT_SCRIPT_PATH))
         self.assertEqual(lt.WT_SCRIPT_PATH, wt)
         self.assertTrue(os.path.exists(wt))
-        self.assertIn(wt, text)
+        self.assertIn(wt.replace(os.sep, "/"), text)   # the brief writes it with "/"
         self.assertNotIn("~/.claude/pr-review", text)
 
     def test_brief_quotes_the_worktree_script(self):
         text, _ = lt.render_brief(brief_ledger(), "C1", CTX, "/s/pr-review/pr13")
-        wt = lt.WT_SCRIPT_PATH
+        wt = lt.WT_SCRIPT_PATH.replace(os.sep, "/")
         for verb in ("create", "link-deps", "remove"):
             self.assertIn(f'"{wt}" {verb}', text)
+
+    def test_brief_paths_from_python_use_forward_slashes_on_windows(self):
+        with mock.patch("os.sep", "\\"), \
+             mock.patch.object(lt, "WT_SCRIPT_PATH", "C:\\p\\pr-review-wt.sh"):
+            text, _ = lt.render_brief(brief_ledger(), "C1", CTX, "C:\\s\\pr-review\\pr13")
+        for verb in ("create", "link-deps", "remove"):
+            self.assertIn(f'"C:/p/pr-review-wt.sh" {verb}', text)
+        self.assertIn("`C:/s/pr-review/pr13/verdicts/C1.txt`", text)
 
     def test_an_unknown_key_cannot_batch_unrelated_items(self):
         with self.assertRaisesRegex(lt.LedgerError, "unknown refuter key"):
@@ -726,6 +736,22 @@ class TestBriefCli(unittest.TestCase):
                                               "hash": lt.template_hash(),
                                               "run": lt.run_id(brief_ledger())})
 
+    def test_cmd_brief_prints_its_path_with_forward_slashes(self):
+        # "a\b" is two directories on Windows and one name elsewhere; with
+        # os.sep a backslash, either way it must print as "a/b".
+        d = os.path.join(tmpdir(), "a\\b")
+        os.makedirs(d)
+        ledger_path = write(os.path.join(d, "ledger.json"), json.dumps(brief_ledger()))
+        context_path = write(os.path.join(d, "context.json"), json.dumps(CTX))
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("os.sep", "\\"), contextlib.redirect_stdout(out), \
+             contextlib.redirect_stderr(err):
+            code = anchor.cmd_brief(SimpleNamespace(ledger=ledger_path, key="C1",
+                                                     context=context_path))
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(out.getvalue().strip(),
+                         os.path.join(d, "briefs", "C1.md").replace("\\", "/"))
+
 
 class TestExcerptAndChangedLines(unittest.TestCase):
     def setUp(self):
@@ -1027,9 +1053,13 @@ class TestErrorContract(unittest.TestCase):
         d, l = ingest_env(good)
         return d, write(os.path.join(d, "ledger.json"), json.dumps(l))
 
-    def readonly(self, d):
-        os.chmod(d, 0o555)
-        self.addCleanup(os.chmod, d, 0o755)
+    def unwritable(self, d):
+        # A read-only directory still takes new files on Windows, so fail the
+        # ledger write itself: its temp file is the first file it creates in d.
+        p = mock.patch.object(lt.tempfile, "mkstemp",
+                              side_effect=PermissionError(13, "Permission denied", d))
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_ingest_names_a_verdict_file_that_is_not_utf8(self):
         d, path = self.cli_ingest_env(GOOD)
@@ -1049,14 +1079,14 @@ class TestErrorContract(unittest.TestCase):
 
     def test_ingest_reports_a_ledger_it_cannot_write(self):
         d, path = self.cli_ingest_env(GOOD)
-        self.readonly(d)
+        self.unwritable(d)
         err = self.assertCleanFailure(anchor.cmd_ingest, ledger=path, inconclusive=None, reason=None)
         self.assertIn("could not write ledger file", err)
 
     def test_excerpt_reports_a_ledger_it_cannot_write(self):
         d = tmpdir(); write(os.path.join(d, "a.ts"), "l1\nl2\n")
         path = write(os.path.join(d, "ledger.json"), json.dumps(led(item(1, line=1, line_end=1))))
-        self.readonly(d)
+        self.unwritable(d)
         err = self.assertCleanFailure(anchor.cmd_excerpt, ledger=path, worktree=d)
         self.assertIn("could not write ledger file", err)
 
@@ -1064,7 +1094,7 @@ class TestErrorContract(unittest.TestCase):
         d = tmpdir(); write(os.path.join(d, "a.ts"), "l1\nl2\n")
         path = write(os.path.join(d, "ledger.json"), json.dumps(led(item(1, line=1, line_end=1))))
         diff = write(os.path.join(d, "head.diff"), "--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n+l1\n")
-        self.readonly(d)
+        self.unwritable(d)
         err = self.assertCleanFailure(anchor.cmd_changed_lines, ledger=path, diff=diff, worktree=d)
         self.assertIn("could not write ledger file", err)
 
@@ -1083,7 +1113,7 @@ class TestErrorContract(unittest.TestCase):
     def test_renumber_reports_a_ledger_it_cannot_write(self):
         d = tmpdir()
         path = write(os.path.join(d, "ledger.json"), json.dumps(led(item(1))))
-        self.readonly(d)
+        self.unwritable(d)
         err = self.assertCleanFailure(anchor.cmd_renumber, ledger=path)
         self.assertIn("could not write ledger file", err)
 
@@ -1091,7 +1121,7 @@ class TestErrorContract(unittest.TestCase):
         d = tmpdir()
         path = write(os.path.join(d, "ledger.json"), json.dumps(led(item(1))))
         text = write(os.path.join(d, "t.txt"), "new claim")
-        self.readonly(d)
+        self.unwritable(d)
         err = self.assertCleanFailure(anchor.cmd_edit, ledger=path, id="1", field="claim",
                                       text_file=text)
         self.assertIn("could not write ledger file", err)
@@ -1148,6 +1178,16 @@ class TestReport(unittest.TestCase):
     def setUp(self):
         self.text = lt.render_report(report_ledger(), "/s/pr-review/pr13/ledger.json")
 
+    def test_files_section_writes_its_paths_with_forward_slashes(self):
+        # As in the brief CLI test, "a\b" is two directories on Windows and
+        # one name elsewhere; with os.sep a backslash it prints as "a/b".
+        path = os.path.abspath(os.path.join("s", "a\\b", "ledger.json"))
+        with mock.patch("os.sep", "\\"):
+            text = lt.render_report(report_ledger(), path)
+        want = os.path.dirname(path).replace("\\", "/")
+        self.assertIn(f"Ledger:   {want}/ledger.json\n", text)
+        self.assertIn(f"Report:   {want}/report.md\n", text)
+
     def test_has_every_section(self):
         for heading in ("Triage", "Verdict summary", "Claim audit", "Fix audit", "Downgraded",
                         "Unresolved", "Refuted (not posted unless you name them)",
@@ -1165,7 +1205,7 @@ class TestReport(unittest.TestCase):
     def test_counts_and_dispatch(self):
         self.assertIn("CONFIRMED 1 / DOWNGRADED 1 / REFUTED 1 / INCONCLUSIVE 1", self.text)
         self.assertIn("3 refuters for 4 items, largest owned 2", self.text)
-        self.assertIn("/pr-review-post all", self.text)
+        self.assertIn("/pr-review:pr-review-post all", self.text)
         self.assertIn("2 inline + 1 in the body", self.text)
 
     def test_calibration_warnings(self):

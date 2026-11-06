@@ -1,4 +1,4 @@
-import unittest, importlib.util, os, json, io, contextlib, tempfile, re
+import unittest, importlib.util, os, json, io, contextlib, tempfile, re, shutil
 from types import SimpleNamespace
 spec = importlib.util.spec_from_file_location(
     "anchor", os.path.join(os.path.dirname(__file__), "pr-review-anchor.py"))
@@ -1347,13 +1347,13 @@ class TestPreviewCli(unittest.TestCase):
         pp = os.path.join(d, "payload.json")
         with open(pp, "w") as fh:
             json.dump({"body": "intro", "event": "COMMENT", "comments": []}, fh)
-        os.chmod(d, 0o500)  # read + execute only: existing files readable, no new file creatable
+        # A directory where preview.txt goes cannot be opened for writing on
+        # any OS; a read-only parent would still take new files on Windows.
+        os.mkdir(os.path.join(d, "preview.txt"))
         try:
             code, out, err = self._run(pp)
         finally:
-            os.chmod(d, 0o700)
-            os.remove(pp)
-            os.rmdir(d)
+            shutil.rmtree(d)
         self._assert_single_curated_error(code, out, err)
 
 
