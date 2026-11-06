@@ -160,7 +160,7 @@ def validate(ledger, worktree=None):
         return [f"ledger root must be a JSON object, got {type(ledger).__name__}"]
     if ledger.get("schema") != lt.SCHEMA:
         return [f"ledger schema {ledger.get('schema')!r} is not supported - this is schema "
-                f"{ledger.get('schema')} and {lt.SCHEMA} is required; re-run /pr-review"]
+                f"{ledger.get('schema')} and {lt.SCHEMA} is required; re-run /pr-review:pr-review"]
     errs = []
     items = ledger.get("items", [])
     clusters = ledger.get("clusters", [])
@@ -251,9 +251,11 @@ def validate(ledger, worktree=None):
                         "nothing to rewrite; if something true survives it is DOWNGRADED")
         if any(lt.is_ellipsis_line(l) for l in lt.excerpt_lines(it.get("anchor_excerpt"))):
             errs.append(f"item {iid!r} anchor_excerpt contains an ellipsis line - run `excerpt`")
-        for field in ("file", "claim", "anchor_excerpt"):
+        for field in ("file", "claim"):
             if not it.get(field):
                 errs.append(f"item {iid!r} is missing required field '{field}'")
+        if not isinstance(it.get("anchor_excerpt"), str):   # "" is one blank line, not missing
+            errs.append(f"item {iid!r} is missing required field 'anchor_excerpt'")
 
     int_ids = [it["id"] for it in items if isinstance(it.get("id"), int) and not isinstance(it.get("id"), bool)]
     if len(set(int_ids)) != len(int_ids):
@@ -1360,7 +1362,7 @@ def cmd_brief(args):
             json.dump(meta, fh)
     except OSError as exc:
         raise lt.LedgerError(f"could not write the brief under {bdir}: {exc}")
-    print(md)
+    print(lt.slash_path(md))
     return 0
 
 

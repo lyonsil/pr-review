@@ -595,11 +595,24 @@ than reasoned about.
   holding any of these became two: every later line was numbered one too high, a correct excerpt
   read as not verbatim, a diff hunk's counts were spent early, and a tail reading `+++ ...` was
   taken for a file header naming a file that does not exist. All of them now go through
-  `split_lines` and `read_text_lines` in `ledger_tools`, which open with `newline=""`, split on
+  `split_lines` and `read_text_lines` in `ledger_tools` (excerpts by way of `excerpt_lines`, in
+  the next entry), which open with `newline=""`, split on
   `\n` alone and drop a trailing `\r`, so a CRLF file or diff reads as before. This deliberately
   changes GitHub's output, for files and diffs holding such a character only: a finding after one
   is judged on its own line. *If wrong:* a tool that rewrites line ends to bare `\r` yields one
   unreadable line; git and `gh pr diff` never do, and the splitting is confined to `split_lines`.
+- **An excerpt keeps a trailing blank line; a file does not.** An `anchor_excerpt` is its lines
+  joined with `\n` and nothing after the last, so a trailing `\n` means the last line is blank and
+  `""` is one blank line. `split_lines` reads a trailing `\n` as a file's terminator and drops it,
+  which left a range ending on a blank line one line short and a single blank line with no lines
+  at all, so `validate` called the excerpt not verbatim however often `excerpt` ran. Excerpts go
+  through `excerpt_lines` instead, which adds the terminator a file would have before calling
+  `split_lines`; `validate`'s excerpt and ellipsis checks and `reanchor` use it, and only a
+  non-string `anchor_excerpt` counts as missing. A lone blank line matches every blank line in the
+  file, so `reanchor` takes the nearest and flags it `ambiguous:`, as it does a lone `}`.
+  *If wrong:* if blank-line anchors land on the wrong blank line too often, reject an all-blank
+  excerpt in `validate`; do not fold `excerpt_lines` back into `split_lines`, which brings the
+  range bug back.
 - **Reviewable discussions are GitHub review comments** (keyed `gh-<comment id>`), and an agent's
   comment mirrors to GitHub authored by the human with a note naming the agent, so attribution and
   the S2 read of prior feedback are unchanged. GitHub does not carry Reviewable's resolution state;

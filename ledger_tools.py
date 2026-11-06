@@ -137,8 +137,15 @@ def excerpt_lines(text):
     """The lines of an `anchor_excerpt`, which is lines joined with "\n" and
     no terminator after the last. Unlike a file, a trailing "\n" here means
     the last line is blank, so it is kept: `split_lines` would drop it and
-    leave a range ending on a blank line one line short. None or "" is no lines."""
-    return split_lines(text + "\n") if text else []
+    leave a range ending on a blank line one line short. By the same rule ""
+    is one blank line; None, or anything else not a string, is no lines."""
+    return split_lines(text + "\n") if isinstance(text, str) else []
+
+
+def slash_path(path):
+    """`path` written with "/", the form every path the tools print takes.
+    Windows accepts either separator, and `pr-review-wt.sh` prints "/"."""
+    return path.replace(os.sep, "/")
 
 
 def read_text_lines(path):
@@ -631,10 +638,10 @@ def render_brief(ledger, key, context, ledger_dir, template_path=TEMPLATE_PATH):
         "ITEMS": "```json\n" + json.dumps(payload, indent=2) + "\n```",
         # Python's own paths are written with "/" as well, the form every
         # other path here takes (`pr-review-wt.sh scratchpad` prints it).
-        "VERDICT_PATH": os.path.join(ledger_dir, "verdicts", f"{key}.txt").replace(os.sep, "/"),
+        "VERDICT_PATH": slash_path(os.path.join(ledger_dir, "verdicts", f"{key}.txt")),
         "PROBE_DIR": f"{scratch}/probes/{key}",
         "REFUTER_WT": f"{scratch}/wt-pr{n}-r{key.lower()}",
-        "WT_SCRIPT": WT_SCRIPT_PATH.replace(os.sep, "/"),
+        "WT_SCRIPT": slash_path(WT_SCRIPT_PATH),
     }
     with open(template_path, encoding="utf-8") as fh:
         text = fh.read()
@@ -965,8 +972,8 @@ def render_report(ledger, ledger_path):
     out += ["", "## Pressure-test dispatch", "",
             f"{len(real)} refuters for {n} items, largest owned {largest}",
             "", "## Files", "",
-            f"    Ledger:   {os.path.abspath(ledger_path)}",
-            f"    Report:   {os.path.join(ldir, 'report.md')}",
+            f"    Ledger:   {slash_path(os.path.abspath(ledger_path))}",
+            f"    Report:   {slash_path(os.path.join(ldir, 'report.md'))}",
             f"    Worktree: {ledger.get('worktree')}",
             "", "## To post", "",
             f"    /pr-review:pr-review-post all          # on GitHub: {inline} inline + {body} in the body; "

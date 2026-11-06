@@ -33,6 +33,27 @@ class TestPluginLayout(unittest.TestCase):
         for f in MARKDOWN:
             self.assertEqual(re.findall(r'(?<!")\$A\b', read(f)), [], f)
 
+    def test_no_command_runs_grep_with_perl_regexes(self):
+        # Git Bash's default locale makes `grep -P` fail and print nothing,
+        # which reads as a clean sweep, and macOS grep has no -P. Prose may
+        # name `grep -P`; only a command follows it with a quoted pattern.
+        cmd = re.compile(r"""\bgrep(?:\s+-[\w-]+)*?\s+(?:-[A-Za-z]*P[A-Za-z]*|--perl-regexp)\s+['"]""")
+        for f in MARKDOWN:
+            self.assertEqual(cmd.findall(read(f)), [], f)
+
+    def test_no_command_relies_on_set_e(self):
+        # `set -e` does not stop a Bash tool call at a failed step, so steps
+        # are chained with `&&`. Prose may quote it, but never at a line start.
+        for f in MARKDOWN:
+            self.assertEqual(re.findall(r"^\s*set\s+(?:-[a-z]*e|-o\s+errexit)", read(f), re.M),
+                             [], f)
+
+    def test_every_rerun_hint_names_the_plugin_command(self):
+        # A leftover ~/.claude/commands/pr-review.md shadows a plain /pr-review,
+        # and that copy cannot find its scripts (README, "Migrating from the symlink install").
+        for f in MARKDOWN + ["pr-review-anchor.py", "ledger_tools.py"]:
+            self.assertEqual(re.findall(r"re-run `?/pr-review(?![\w:-])", read(f), re.I), [], f)
+
     def test_providers_file_lives_in_plugin_data(self):
         post = read("commands/pr-review-post.md")
         self.assertFalse("expanduser" in post)

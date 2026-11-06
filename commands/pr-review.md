@@ -75,7 +75,7 @@ text, copied verbatim where it says so.
    it:
 
    ```bash
-   git fetch origin pull/<n>/head
+   git fetch origin pull/<n>/head &&
    HEAD_SHA=$(git rev-parse FETCH_HEAD)
    ```
 
@@ -84,14 +84,17 @@ text, copied verbatim where it says so.
    `BASE_REF` - never a hardcoded `origin/main`:
 
    ```bash
-   git fetch origin "$BASE_REF"
-   BASE_TIP=$(git rev-parse FETCH_HEAD)
+   git fetch origin "$BASE_REF" &&
+   BASE_TIP=$(git rev-parse FETCH_HEAD) &&
    MERGE_BASE=$(git merge-base "$HEAD_SHA" "$BASE_TIP")
    ```
 
    Capture `HEAD_SHA` (step 4) **before** this fetch: `FETCH_HEAD` is a single per-checkout ref and
-   this second fetch overwrites it. For `.`, `BASE_REF` is already a local remote-tracking branch,
-   so `BASE_TIP=$(git rev-parse "origin/$BASE_REF")` and
+   this second fetch overwrites it. Both blocks are chained with `&&` (S6 says why): after a failed
+   base fetch `FETCH_HEAD` still holds the PR head, so `MERGE_BASE` would be the head itself and
+   every diff against it empty. If either block fails, stop and report the error; nothing later
+   can run without `HEAD_SHA` and `MERGE_BASE`. For `.`, `BASE_REF` is already a local
+   remote-tracking branch, so `BASE_TIP=$(git rev-parse "origin/$BASE_REF")` and
    `MERGE_BASE=$(git merge-base HEAD "$BASE_TIP")` are enough.
 
    Store `MERGE_BASE` in the draft ledger as `merge_base` (S4). `brief` hands it to every refuter

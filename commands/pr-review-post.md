@@ -36,14 +36,14 @@ text, copied verbatim where it says so.
    line (exit 1). Do not proceed on a failing validate; if the ledger is malformed, that is a bug
    in how `/pr-review` wrote it, not something to work around here.
 
-   A `schema` error means the ledger predates this version: re-run `/pr-review`.
+   A `schema` error means the ledger predates this version: re-run `/pr-review:pr-review`.
 
    A `fix_verdict` error means the ledger was written before the fix was checked - either by an
-   older `/pr-review`, or by a run whose refuter never answered. **Re-run `/pr-review`; never hand-add
-   the field.** Writing `"fix_verdict": "SOUND"` to clear the error publishes an unchecked fix under
-   the user's account, which is precisely what the guard exists to prevent. The same goes for a
-   `hedged` error: reword the `Fix:` slot into the concrete edit or the constraint, do not delete
-   the finding to get past it.
+   older `/pr-review`, or by a run whose refuter never answered. **Re-run `/pr-review:pr-review`;
+   never hand-add the field.** Writing `"fix_verdict": "SOUND"` to clear the error publishes an
+   unchecked fix under the user's account, which is precisely what the guard exists to prevent. The
+   same goes for a `hedged` error: reword the `Fix:` slot into the concrete edit or the constraint,
+   do not delete the finding to get past it.
 5. If the ledger's `target.kind` is not `pr` (a `.` local-diff review has `target.kind` `local`),
    stop: say posting is unavailable for a local-diff review and print the selected findings for
    manual use instead.
@@ -58,7 +58,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 wt = d.get('worktree')
 if not wt:
-    sys.exit('error: ledger has no worktree field - re-run /pr-review')
+    sys.exit('error: ledger has no worktree field - re-run /pr-review:pr-review')
 print(wt)
 " <ledger>)
    NUMBER=$(python3 -c "
@@ -66,7 +66,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 n = d.get('target', {}).get('number')
 if not n:
-    sys.exit('error: ledger has no target.number - re-run /pr-review')
+    sys.exit('error: ledger has no target.number - re-run /pr-review:pr-review')
 print(n)
 " <ledger>)
    REPO=$(python3 -c "
@@ -74,7 +74,7 @@ import json, sys
 d = json.load(open(sys.argv[1]))
 r = d.get('target', {}).get('repo')
 if not r:
-    sys.exit('error: ledger has no target.repo - re-run /pr-review')
+    sys.exit('error: ledger has no target.repo - re-run /pr-review:pr-review')
 print(r)
 " <ledger>)
    ```
@@ -267,16 +267,20 @@ so `anchor_status` is set on every item before `payload` runs. Skipping this on 
 path is exactly the gap that lets a body-only or already-dead item stay selectable into step 3.
 
 ```bash
-NOW=$(GH_REPO="$REPO" gh pr view "$NUMBER" --json headRefOid --jq .headRefOid)
+NOW=$(GH_REPO="$REPO" gh pr view "$NUMBER" --json headRefOid --jq .headRefOid) &&
 if [ "$NOW" != "<ledger head_sha>" ]; then
   echo "head moved: <ledger head_sha> -> $NOW"
-fi
-git -C "$WT" fetch origin "pull/$NUMBER/head"
-git -C "$WT" checkout --detach FETCH_HEAD
-GH_REPO="$REPO" gh pr diff "$NUMBER" > "$SCRATCH/pr-review/pr$NUMBER/head.diff"
+fi &&
+git -C "$WT" fetch origin "pull/$NUMBER/head" &&
+git -C "$WT" checkout --detach FETCH_HEAD &&
+GH_REPO="$REPO" gh pr diff "$NUMBER" > "$SCRATCH/pr-review/pr$NUMBER/head.diff" &&
 python3 "${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py" reanchor <ledger> \
   --worktree "$WT" --diff "$SCRATCH/pr-review/pr$NUMBER/head.diff" --head "$NOW"
 ```
+
+The steps are chained with `&&` because `set -e` does not stop a Bash tool call at a failed step.
+Unchained, a failed fetch leaves `$WT` at the old head while `reanchor` matches against it and
+records `$NOW`, so step 4's head check passes and comments land on the wrong lines.
 
 `--head "$NOW"` records the ledger's `anchored_sha` - the head these anchors were resolved
 against, which step 4 checks after approval.
@@ -355,10 +359,13 @@ Write tool:
 
 ```bash
 A="${CLAUDE_PLUGIN_ROOT}/pr-review-anchor.py"; L=<ledger>
-python3 "$A" edit $L <id> --field detail --text-file <f>        # the reworded Fix: slot, whole detail
-python3 "$A" edit $L <id> --field fix_verdict --text-file <f>   # the file holds exactly UNVERIFIABLE
-python3 "$A" edit $L <id> --field fix_reason --text-file <f>    # or --field verdict_reason
+python3 "$A" edit $L <id> --field detail --text-file <f> &&       # the reworded Fix: slot, whole detail
+python3 "$A" edit $L <id> --field fix_verdict --text-file <f> &&  # the file holds exactly UNVERIFIABLE
+python3 "$A" edit $L <id> --field fix_reason --text-file <f>      # or --field verdict_reason
 ```
+
+Chained, a failed `detail` edit stops before `fix_verdict` is set, so a fix is never marked
+`UNVERIFIABLE` with its old wording still in place.
 
 `fix_verdict` accepts only `UNVERIFIABLE`: a stale fix can be demoted, never promoted. Do not
 silently rewrite a refuter's recorded `verdict_reason` or `fix_reason` to paper over any of this:

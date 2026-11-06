@@ -557,7 +557,7 @@ class TestLinesAsGitNumbersThem(unittest.TestCase):
 
     def test_a_range_ending_on_a_blank_line_validates_after_excerpt(self):
         self.write("a\n\nb\n\nc\n")
-        for line, end in ((1, 2), (1, 4), (2, 4), (3, 4)):
+        for line, end in ((1, 2), (1, 4), (2, 4), (3, 4), (2, 2)):
             with self.subTest(range=(line, end)):
                 led = ledger(item(1, f="x.py", line=line, line_end=end))
                 anchor.lt.fill_excerpts(led, self.wt)
@@ -568,9 +568,18 @@ class TestLinesAsGitNumbersThem(unittest.TestCase):
 
     def test_excerpt_lines_keeps_a_trailing_blank_line(self):
         for text, want in (("a\n", ["a", ""]), ("\n", ["", ""]), ("a\r\n", ["a", ""]),
-                           ("a", ["a"]), ("", []), (None, [])):
+                           ("a", ["a"]), ("", [""]), (None, [])):
             with self.subTest(text=text):
                 self.assertEqual(anchor.lt.excerpt_lines(text), want)
+
+    def test_an_empty_excerpt_is_one_blank_line_not_a_missing_one(self):
+        errs = anchor.validate(ledger(item(1, anchor_excerpt="")))
+        self.assertFalse([e for e in errs if "anchor_excerpt" in e], errs)
+        missing = item(1); del missing["anchor_excerpt"]
+        for it in (missing, item(1, anchor_excerpt=None), item(1, anchor_excerpt=0)):
+            with self.subTest(anchor_excerpt=it.get("anchor_excerpt", "absent")):
+                self.assertIn("item 1 is missing required field 'anchor_excerpt'",
+                              anchor.validate(ledger(it)))
 
     def test_a_crlf_file_reads_without_its_carriage_returns(self):
         self.write("a\r\nb\r\n")
