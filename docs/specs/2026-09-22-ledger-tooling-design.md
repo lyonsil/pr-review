@@ -292,7 +292,8 @@ before any refuter runs, while a direct write is still allowed.
   `dead` (excerpt gone). An excerpt mismatch no longer flips `on_changed_line` or emits the
   "corrected on_changed_line" notice. Range items are handled as in `changed-lines`.
   `--head SHA` records `anchored_sha`; `--dry-run` reports without writing.
-- **`payload`** - renders `{{#id}}` as `#n`; substitutes `{count}` in the body file with the number
+- **`payload`** - renders `{{#id}}` as `f<n>` (see `DECISIONS.md`, "Finding numbers publish as
+  `f<n>`"); substitutes `{count}` in the body file with the number
   of findings posted; labels demotions `off-diff` or `dead anchor` accordingly; emits the
   "carried in body by verdict" notice only under `--body-only-verdicts`.
 - **`--select`** - accepts `a-b` ranges alongside ids, clusters, commas and `all`.

@@ -307,7 +307,8 @@ Cap `detail` at about 120 words. If it needs more, you probably have two finding
    effects work is not teaching; walking the specific path through this diff is.
 4. **Keep the review process out of the prose.** The author never saw this pipeline: no verdicts,
    no refuters, no "the generator flagged", no severity revisions, no item numbers except as a
-   `{{#id}}` token, which `payload` renders as `#n`. The comment header already carries a plain-English
+   `{{#id}}` token, which `payload` renders as `f<n>` (never `#n`, which GitHub links to an issue).
+   The comment header already carries a plain-English
    status - the prose neither repeats nor explains it.
 5. **A fix must be complete under the rules the next review will apply.** Whatever the author
    writes to satisfy this finding gets reviewed in turn - by this pipeline again, or by a human

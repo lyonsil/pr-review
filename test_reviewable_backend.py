@@ -55,12 +55,12 @@ class TestOffDiffPlacement(unittest.TestCase):
         art, _ = reviewable(ledger(item(1), off(2, line=5)))
         d = by_ids(art)[(2,)]
         self.assertEqual((d["path"], d["line"]), ("a.ts", 5))
-        self.assertNotIn("**#2**", art["framing"]["markdownBody"])
+        self.assertNotIn("**f2**", art["framing"]["markdownBody"])
 
     def test_the_same_finding_stays_in_the_body_on_github(self):
         payload, _ = github(ledger(item(1), off(2, line=5)))
         self.assertEqual([c["line"] for c in payload["comments"]], [10])
-        self.assertIn("**#2**", payload["body"])
+        self.assertIn("**f2**", payload["body"])
         self.assertNotIn(NOTE, payload["body"])
 
     def test_on_changed_line_false_alone_is_off_diff(self):
@@ -71,7 +71,7 @@ class TestOffDiffPlacement(unittest.TestCase):
 
     def test_the_note_opens_an_off_diff_discussion_and_no_other(self):
         art, _ = reviewable(ledger(item(1), off(2, line=5)))
-        self.assertTrue(by_ids(art)[(2,)]["markdownBody"].startswith(NOTE + "\n\n**#2**"))
+        self.assertTrue(by_ids(art)[(2,)]["markdownBody"].startswith(NOTE + "\n\n**f2**"))
         self.assertNotIn(NOTE, by_ids(art)[(1,)]["markdownBody"])
         self.assertNotIn(NOTE, art["framing"]["markdownBody"])
 
@@ -97,7 +97,7 @@ class TestOffDiffPlacement(unittest.TestCase):
         self.assertNotIn((2,), by_ids(art))
         body = art["framing"]["markdownBody"]
         self.assertIn("## Findings that could not be attached to a line in this diff", body)
-        self.assertIn("**#2**", body)
+        self.assertIn("**f2**", body)
 
     def test_an_off_diff_finding_with_no_line_is_carried_in_the_framing_comment(self):
         art, err = reviewable(ledger(item(1), off(2, line=None)))
@@ -110,7 +110,7 @@ class TestOffDiffPlacement(unittest.TestCase):
         art, err = reviewable(ledger(item(1), off(2, f="b.ts", line=5, file_in_diff=False)))
         self.assertEqual([d["item_ids"] for d in art["discussions"]], [[1]])
         body = art["framing"]["markdownBody"]
-        self.assertIn("**#2**", body)
+        self.assertIn("**f2**", body)
         self.assertIn("_Not attached to a line: this finding is in a file the pull request does "
                       "not change, so the review has no file to attach a comment to_", body)
         self.assertIn("#2 (file not in the pull request)", err)
@@ -126,19 +126,19 @@ class TestCrossReferences(unittest.TestCase):
         led = ledger(item(1, cluster="C1"), off(2, f="b.ts", line=5, cluster="C1"),
                      clusters=[{"id": "C1", "item_ids": [1, 2]}])
         art, _ = reviewable(led)
-        self.assertIn("Similar fix as #2.", by_ids(art)[(1,)]["markdownBody"])
-        self.assertIn("Similar fix as #1.", by_ids(art)[(2,)]["markdownBody"])
+        self.assertIn("Similar fix as f2.", by_ids(art)[(1,)]["markdownBody"])
+        self.assertIn("Similar fix as f1.", by_ids(art)[(2,)]["markdownBody"])
 
     def test_an_off_diff_finding_in_the_same_file_is_named_on_reviewable(self):
         art, _ = reviewable(ledger(item(1), off(2, line=20)))
-        self.assertIn("_Other findings in this file: #2_", by_ids(art)[(1,)]["markdownBody"])
+        self.assertIn("_Other findings in this file: f2_", by_ids(art)[(1,)]["markdownBody"])
 
     def test_a_sibling_on_the_same_line_is_not_elsewhere(self):
         led = ledger(item(1, cluster="C1"), off(2, cluster="C1"),
                      item(3, f="b.ts", line=1, cluster="C1"),
                      clusters=[{"id": "C1", "item_ids": [1, 2, 3]}])
         art, _ = reviewable(led)
-        self.assertIn("Similar fix as #3.", by_ids(art)[(1,)]["markdownBody"])
+        self.assertIn("Similar fix as f3.", by_ids(art)[(1,)]["markdownBody"])
 
     def test_github_names_neither(self):
         led = ledger(item(1, cluster="C1"), off(2, line=20, cluster="C1"),
@@ -146,6 +146,48 @@ class TestCrossReferences(unittest.TestCase):
         payload, _ = github(led)
         self.assertNotIn("Similar fix", payload["comments"][0]["body"])
         self.assertNotIn("Other findings", payload["comments"][0]["body"])
+
+
+class TestFindingLabels(unittest.TestCase):
+    """GitHub links `#n` to whatever issue or pull request has that number,
+    so no provider may publish a finding number in that form."""
+
+    def led(self):
+        # Every text path plan_review renders: a merged site, a cluster across
+        # sites, the same-file line, an off-diff site, a dead anchor, a
+        # body-only verdict, and a token in claim, detail and verdict_reason,
+        # one of them inside a code span.
+        return ledger(
+            item(1, cluster="C1", claim="claim 1 like {{#3}}", detail="see `x({{#4}})`"),
+            item(2, sev="medium", cluster="C1", verdict_reason="same as {{#1}}"),
+            item(3, sev="low", f="b.ts", line=5, cluster="C1"),
+            off(4, line=30),
+            item(5, sev="low", line=40, anchor_status="dead", detail="like {{#1}}"),
+            item(6, sev="low", line=50, verdict="DOWNGRADED", detail="as {{#2}}"),
+            clusters=[{"id": "C1", "item_ids": [1, 2, 3]}])
+
+    def published(self):
+        """Each provider's published texts, keyed by provider."""
+        payload, _ = github(self.led(), body_only_verdicts=["DOWNGRADED"])
+        art, _ = reviewable(self.led(), body_only_verdicts=["DOWNGRADED"])
+        return {"github": [payload["body"]] + [c["body"] for c in payload["comments"]],
+                "reviewable": [art["framing"]["markdownBody"]]
+                              + [d["markdownBody"] for d in art["discussions"]]}
+
+    def test_no_provider_publishes_a_hash_number(self):
+        for provider, texts in self.published().items():
+            for text in texts:
+                with self.subTest(provider=provider):
+                    self.assertNotRegex(text, r"#\d", text)
+
+    def test_every_finding_is_labelled_f_and_its_number(self):
+        for provider, texts in self.published().items():
+            joined = "\n".join(texts)
+            with self.subTest(provider=provider):
+                for n in range(1, 7):
+                    self.assertIn(f"**f{n}**", joined)
+                self.assertIn("claim 1 like f3", joined)
+                self.assertIn("see `x(f4)`", joined)
 
 
 class TestDispositions(unittest.TestCase):
@@ -180,7 +222,7 @@ class TestDispositions(unittest.TestCase):
     def test_a_dead_anchor_blocker_makes_the_framing_comment_blocking(self):
         art, _ = reviewable(ledger(item(1), item(2, sev="blocker", line=5, anchor_status="dead"),
                                    item(3, sev="low", line=7, anchor_status="dead")))
-        self.assertIn("**#2**", art["framing"]["markdownBody"])
+        self.assertIn("**f2**", art["framing"]["markdownBody"])
         self.assertEqual(art["framing"]["disposition"], "blocking")
 
     def test_the_framing_comment_takes_the_strongest_finding_it_carries(self):
@@ -200,7 +242,7 @@ class TestDispositions(unittest.TestCase):
         for led, kw, want in cases:
             with self.subTest(kw=kw, want=want):
                 art, _ = reviewable(led, **kw)
-                self.assertIn("**#2**", art["framing"]["markdownBody"])
+                self.assertIn("**f2**", art["framing"]["markdownBody"])
                 self.assertEqual(art["framing"]["disposition"], want)
 
     def test_the_artifact_carries_them_end_to_end(self):
@@ -614,9 +656,11 @@ class TestCli(unittest.TestCase):
         self.assertEqual(json.loads(out)["provider"], "reviewable")
 
     def test_the_default_provider_is_github(self):
-        # The golden is master's output for a ledger that reaches every GitHub
-        # text path plan_review renders, so any change to GitHub's published
-        # text or stderr fails here. See tests/make_github_golden.py.
+        # The golden is the output of the pr-review-anchor.py it was last
+        # regenerated from (tests/make_github_golden.py), for a ledger that
+        # reaches every GitHub text path plan_review renders, so any change to
+        # GitHub's published text or stderr fails here until it is regenerated
+        # deliberately.
         with open(os.path.join(HERE, "tests", "fixtures", "github-golden.json"),
                   encoding="utf-8") as fh:
             golden = json.load(fh)

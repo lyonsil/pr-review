@@ -679,12 +679,12 @@ class TestPayload(unittest.TestCase):
         p = anchor.build_payload(self.led(), ["all"], "intro")
         same = [c for c in p["comments"] if c["path"] == "a.ts" and c["line"] == 10]
         self.assertEqual(len(same), 1)
-        self.assertIn("#1", same[0]["body"]); self.assertIn("#2", same[0]["body"])
+        self.assertIn("**f1**", same[0]["body"]); self.assertIn("**f2**", same[0]["body"])
 
     def test_cluster_spanning_two_sites_cross_references_the_other(self):
         p = anchor.build_payload(self.led(), ["all"], "intro")
         b = next(c for c in p["comments"] if c["path"] == "b.ts")["body"]
-        self.assertIn("Similar fix as #1", b)
+        self.assertIn("Similar fix as f1", b)
 
     def test_cluster_on_a_single_site_gets_no_cross_reference(self):
         led = {"schema": 2, "items": [item(1, cluster="C2")], "clusters": [{"id": "C2", "item_ids": [1]}]}
@@ -749,9 +749,9 @@ class TestPayload(unittest.TestCase):
         ], "clusters": [{"id": "C1", "item_ids": [1, 2, 3]}]}
         p = anchor.build_payload(led, ["all"], "intro")
         bodies = {c["path"]: c["body"] for c in p["comments"]}
-        self.assertIn("Similar fix as #2, #3.", bodies["a.ts"])
-        self.assertIn("Similar fix as #1, #3.", bodies["b.ts"])
-        self.assertIn("Similar fix as #1, #2.", bodies["c.ts"])
+        self.assertIn("Similar fix as f2, f3.", bodies["a.ts"])
+        self.assertIn("Similar fix as f1, f3.", bodies["b.ts"])
+        self.assertIn("Similar fix as f1, f2.", bodies["c.ts"])
 
     # --- Fix round 1 ---
 
@@ -842,7 +842,7 @@ class TestIncludeRefuted(unittest.TestCase):
         # item - that would defeat the point of refuting them. This is the
         # scenario the round's mutation check targets directly.
         p = anchor.build_payload(self.led(), ["all"], "intro", include_refuted=["1"])
-        ids_posted = {int(m) for c in p["comments"] for m in re.findall(r"#(\d+)", c["body"])}
+        ids_posted = {int(m) for c in p["comments"] for m in re.findall(r"\bf(\d+)\b", c["body"])}
         self.assertIn(1, ids_posted)
         self.assertNotIn(3, ids_posted)
 
@@ -906,7 +906,7 @@ class TestDemotedFindings(unittest.TestCase):
             p = anchor.build_payload(led, ["1"], "intro")
         self.assertEqual(p["comments"], [])
         self.assertIn("alpha", p["body"])
-        self.assertIn("#1", p["body"])
+        self.assertIn("**f1**", p["body"])
         self.assertIn("Findings that could not be attached to a line in this diff", p["body"])
         self.assertIn("anchor excerpt no longer present", p["body"])
 
@@ -925,7 +925,7 @@ class TestDemotedFindings(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             p = anchor.build_payload(led, ["1"], "intro")
         body = p["body"]
-        self.assertIn("#1", body); self.assertIn("high", body)
+        self.assertIn("**f1**", body); self.assertIn("high", body)
         self.assertIn("a.ts:42", body)
         self.assertIn("alpha claim", body); self.assertIn("alpha detail", body)
 
@@ -1751,8 +1751,8 @@ class TestBodyOnlyVerdicts(unittest.TestCase):
         ], "clusters": []}
         p = anchor.build_payload(led, ["all"], "intro")
         by_line = {c["line"]: c["body"] for c in p["comments"]}
-        self.assertIn("Other findings in this file: #2", by_line[10])
-        self.assertIn("Other findings in this file: #1", by_line[20])
+        self.assertIn("Other findings in this file: f2", by_line[10])
+        self.assertIn("Other findings in this file: f1", by_line[20])
         self.assertNotIn("Other findings in this file", by_line[30])
 
     def test_include_refuted_does_not_accept_a_downgraded_id(self):
@@ -1770,12 +1770,24 @@ class TestPayloadV2(unittest.TestCase):
     def led(self, *items):
         return {"schema": 2, "items": list(items), "clusters": []}
 
-    def test_tokens_render_as_plain_references(self):
+    def test_tokens_render_as_finding_labels(self):
         p = anchor.build_payload(self.led(item(1, detail="as in {{#2}}"),
                                           item(2, sev="low", line=20)), ["all"], "intro")
         bodies = " ".join(c["body"] for c in p["comments"])
-        self.assertIn("as in #2", bodies)
+        self.assertIn("as in f2", bodies)
         self.assertNotIn("{{#", bodies)
+
+    def test_tokens_in_the_review_body_file_render_as_finding_labels(self):
+        p = anchor.build_payload(self.led(item(1), item(2, sev="low", line=20)),
+                                 ["all"], "Start with {{#2}}.")
+        self.assertTrue(p["body"].startswith("Start with f2."), p["body"])
+
+    def test_a_body_file_token_pointing_outside_the_review_is_warned(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            anchor.build_payload(self.led(item(1), item(2, sev="low", line=20, verdict="REFUTED")),
+                                 ["all"], "See {{#2}}.")
+        self.assertIn("the review body references #2, which is not in this review", err.getvalue())
 
     def test_a_token_pointing_outside_the_review_is_warned(self):
         err = io.StringIO()
@@ -1793,9 +1805,9 @@ class TestPayloadV2(unittest.TestCase):
                           verdict_reason="as {{#1}}"))
         p = anchor.build_payload(l, ["all"], "intro", body_only_verdicts=["INCONCLUSIVE"])
         text = " ".join(c["body"] for c in p["comments"]) + p["body"]
-        self.assertIn("_How this was checked: same guard as #2_", text)
-        self.assertIn("_What could not be checked: needs #1_", text)
-        self.assertIn("_What could not be checked: as #1_", text)
+        self.assertIn("_How this was checked: same guard as f2_", text)
+        self.assertIn("_What could not be checked: needs f1_", text)
+        self.assertIn("_What could not be checked: as f1_", text)
         self.assertNotIn("{{#", text)
 
     def test_a_footer_token_pointing_outside_the_review_is_warned(self):
@@ -1836,14 +1848,14 @@ class TestPayloadV2(unittest.TestCase):
         p = anchor.build_payload(self.led(item(1, detail="as in {{#2}}", anchor_status="dead"),
                                           item(2, sev="low", line=20)),
                                  ["all"], "intro")
-        self.assertIn("as in #2", p["body"])
+        self.assertIn("as in f2", p["body"])
         self.assertNotIn("{{#", p["body"])
 
     def test_tokens_render_in_a_body_only_verdicts_section(self):
         led = self.led(item(1),
                        item(2, sev="low", verdict="DOWNGRADED", detail="as in {{#1}}"))
         p = anchor.build_payload(led, ["all"], "intro", body_only_verdicts=["DOWNGRADED"])
-        self.assertIn("as in #1", p["body"])
+        self.assertIn("as in f1", p["body"])
         self.assertNotIn("{{#", p["body"])
 
     def test_token_pointing_to_a_demoted_finding_is_not_warned(self):

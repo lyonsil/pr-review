@@ -688,8 +688,9 @@ def render_review_body(body_intro, count, demoted, secondary, tok):
 
     `demoted` is (item, reason, note) triples and `secondary` is (item,
     verdict) pairs; which findings those are is plan_review's decision, made
-    per backend. `tok` renders `{{#n}}` tokens and records any reference to a
-    finding outside the review.
+    per backend. `tok` renders `{{#n}}` tokens - the operator's framing's
+    included, passed with no item - and records any reference to a finding
+    outside the review.
 
     The attribution footer must appear exactly once and be the LAST thing
     in the body, after the demoted-findings section below. A body file the
@@ -697,7 +698,7 @@ def render_review_body(body_intro, count, demoted, secondary, tok):
     contain it - strip any existing occurrence(s) first so it is never
     duplicated or left stranded ahead of the demoted section, then
     re-append it once at the very end."""
-    body = body_intro.replace("{count}", str(count)).strip()
+    body = tok(None, body_intro.replace("{count}", str(count))).strip()
     if ATTRIBUTION in body:
         body = body.replace(ATTRIBUTION, "").rstrip()
 
@@ -707,7 +708,7 @@ def render_review_body(body_intro, count, demoted, secondary, tok):
             loc = f"{it.get('file')}:{it['line']}" if it.get("line") is not None else it.get("file", "?")
             verdict = it.get("verdict")
             label = VERDICT_LABEL.get(verdict)
-            head = f"**#{it['id']}** ({severity_text(it)}"
+            head = f"**{lt.finding_ref(it['id'])}** ({severity_text(it)}"
             head += f" · {label})" if label else ")"
             lines.append(f"{head} {loc} - {tok(it, it['claim'])}")
             detail = tok(it, (it.get("detail") or "").strip())
@@ -731,7 +732,8 @@ def render_review_body(body_intro, count, demoted, secondary, tok):
         lines = [f"## {heading} ({gloss})", ""]
         for it in sorted(group, key=lambda x: x["id"]):
             loc = f"{it.get('file')}:{it['line']}" if it.get("line") is not None else it.get("file", "?")
-            lines.append(f"**#{it['id']}** ({severity_text(it)}) {loc} - {tok(it, it['claim'])}")
+            lines.append(f"**{lt.finding_ref(it['id'])}** ({severity_text(it)}) {loc} - "
+                         f"{tok(it, it['claim'])}")
             detail = tok(it, (it.get("detail") or "").strip())
             if detail:
                 lines.append(""); lines.append(detail)
@@ -750,7 +752,7 @@ def plan_review(ledger, tokens, body_intro, include_refuted=None,
     """Decide what the selected items publish and where, and render every
     published word, as a ReviewPlan: one site per distinct (file, line), and
     the review body. A cluster whose selected items span more than one site
-    gets a 'Similar fix as #a, #b.' cross-reference at each of its sites,
+    gets a 'Similar fix as f1, f2.' cross-reference at each of its sites,
     listing every OTHER site's id(s) - never just one, however many sites the
     cluster spans.
 
@@ -789,7 +791,7 @@ def plan_review(ledger, tokens, body_intro, include_refuted=None,
 
     Every `claim`/`detail` that publishes - inline, demoted, or in a
     body-only-verdicts section - has its `{{#n}}` cross-reference tokens
-    rendered as plain `#n`; a token naming an id that does not publish
+    rendered as `f<n>` (see `lt.finding_ref`); a token naming an id that does not publish
     anywhere in this review prints a stderr warning rather than posting a
     dead link. `body_intro`'s literal `{count}` is filled with the number of
     ids that publish."""
@@ -985,8 +987,9 @@ def plan_review(ledger, tokens, body_intro, include_refuted=None,
     outside = []
 
     def tok(it, text):
+        """`it` is None for the operator's framing, which belongs to no item."""
         rendered, refs = lt.render_tokens(text)
-        outside.extend((it["id"], r) for r in sorted(refs - posted))
+        outside.extend((None if it is None else it["id"], r) for r in sorted(refs - posted))
         return rendered
 
     # Keyed by (file, line, off_diff) so an off-diff finding never merges into
@@ -1023,7 +1026,7 @@ def plan_review(ledger, tokens, body_intro, include_refuted=None,
         for it in ordered:
             verdict = it.get("verdict")
             label = VERDICT_LABEL.get(verdict)
-            head = f"**#{it['id']}** - {severity_text(it)}"
+            head = f"**{lt.finding_ref(it['id'])}** - {severity_text(it)}"
             if label:
                 head += f" · {label}"
             text = head + "\n\n" + tok(it, it["claim"])
@@ -1044,11 +1047,12 @@ def plan_review(ledger, tokens, body_intro, include_refuted=None,
                                 if o.get("cluster") == cl
                                 and (o["file"], o["line"]) != (path, line))
                 if others:
-                    text += "\n\nSimilar fix as " + ", ".join(f"#{o}" for o in others) + "."
+                    text += ("\n\nSimilar fix as "
+                             + ", ".join(lt.finding_ref(o) for o in others) + ".")
             same_file = sorted(file_sites.get(path, set()) - {it["id"]})
             if same_file:
                 text += ("\n\n_Other findings in this file: "
-                         + ", ".join(f"#{o}" for o in same_file) + "_")
+                         + ", ".join(lt.finding_ref(o) for o in same_file) + "_")
             blocks.append(text)
         site_body = "\n\n---\n\n".join(blocks)
         # Once per site, not per finding: the note is a fact about where the
@@ -1066,8 +1070,9 @@ def plan_review(ledger, tokens, body_intro, include_refuted=None,
     # A {{#n}} cross-reference to an id that never publishes anywhere in this
     # payload (REFUTED, dropped, or simply not selected) would print as a
     # link to nothing an author can find - warn rather than posting it silently.
-    for a, b in sorted(set(outside)):
-        print(f"warning: #{a} references #{b}, which is not in this review", file=sys.stderr)
+    for a, b in sorted(set(outside), key=lambda ref: (ref[0] is not None, ref[0] or 0, ref[1])):
+        who = "the review body" if a is None else f"#{a}"
+        print(f"warning: {who} references #{b}, which is not in this review", file=sys.stderr)
 
     carried = [it for it, _, _ in demoted] + [it for it, _ in secondary]
     return ReviewPlan(body=body, sites=tuple(anchored), body_findings=tuple(
