@@ -85,8 +85,8 @@ own does, answer for the defect its `claim` names, and say in `REASON` what the 
 3. **Explain the mechanism in THIS code, not the concept in general.** A paragraph on how React
    effects work is not teaching; walking the specific path through this diff is.
 4. **Keep the review process out of the prose.** The author never saw this pipeline: no verdicts,
-   no refuters, no "the generator flagged", no severity revisions, no item numbers beyond the `#n`
-   cross-references `payload` adds itself. The comment header already carries a plain-English
+   no refuters, no "the generator flagged", no severity revisions, no item numbers - name another
+   finding only with its `{{#n}}` token, which `payload` renders itself. The comment header already carries a plain-English
    status - the prose neither repeats nor explains it.
 5. **A fix must be complete under the rules the next review will apply.** Whatever the author
    writes to satisfy this finding gets reviewed in turn - by this pipeline again, or by a human
@@ -217,6 +217,11 @@ vocabulary. A `DOWNGRADED` reason does not publish at all: your reply file is ap
 findings mechanically, and whatever a `DOWNGRADED` reason means for the author is folded into that
 finding's `Why it matters:` text afterward.
 
+To point at another finding in `REASON` or anywhere else, write its `{{#n}}` token. Never type
+a finding number yourself, as `#2` or `f2`: a typed `#2` publishes as a link to GitHub issue or
+pull request 2, and a typed number is not updated when the findings are renumbered. A real pull
+request or issue is still cited as `#123`.
+
 **Do not refute on grounds that are about posting rather than truth.** Whether the anchor sits on a
 changed line is recorded in `on_changed_line` and enforced by `payload` on its own; it is never a
 reason for a verdict. Neither is "a linter or CI would catch it" - that speaks to who reports the
@@ -260,8 +265,9 @@ Rules the file is checked against:
   REWRITTEN`.
 - On `REFUTED`, omit every `CLAIM_` and `FIX_` line.
 - Never put a rewrite inside a `_REASON` line.
-- Never refer to other findings by number, and never mention this review process, refuters,
-  batches or verdicts inside `CLAIM_REWRITE` or `FIX_REWRITE` - that text goes to the author.
+- Never type another finding's number in any field - use its `{{#n}}` token. Never mention this
+  review process, refuters, batches or verdicts inside `CLAIM_REWRITE` or `FIX_REWRITE` - that
+  text goes to the author.
 
 When the file is written, your final message must be only its path: `{{VERDICT_PATH}}`. Anything
 else you write is discarded; only the file is read.

@@ -394,7 +394,9 @@ The framing is two or three sentences, written for someone opening the PR cold: 
 how many findings there are, and how to read the labels each comment carries - that the severity
 shown is the severity the reviewer settled on, that `checked and confirmed` means the finding was
 verified against the code, and that `needs a human call` means it could not be settled either way
-and the author has to judge it. State the number of findings as `{count}`; `payload` fills it in.
+and the author has to judge it. State the number of findings as `{count}`; `payload` fills it in. To name a finding, write its
+`{{#n}}` token, which `payload` renders as `f<n>`; never type `#n`, which links to the GitHub issue
+or pull request with that number.
 Do not explain the pipeline that produced any of this: no stages, no refuters, no severity
 revisions. A reader should be able to act on the review without knowing how it was made.
 

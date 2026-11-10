@@ -435,15 +435,25 @@ EDITABLE_FIELDS = ("claim", "detail", "fold_note", "verdict_reason", "fix_reason
 FIX_VERDICT_DEMOTION = "UNVERIFIABLE"
 
 
+def finding_ref(n):
+    """How a finding id reads in published text: `f` and the number, `f3`.
+
+    Never `#n`: GitHub links that to whatever issue or pull request has the
+    number, including in the comments Reviewable mirrors to GitHub. See
+    DECISIONS.md, "Finding numbers publish as `f<n>`"."""
+    return f"f{n}"
+
+
 def render_tokens(text):
-    """Read-only. Render `{{#n}}` cross-reference tokens in `text` as plain
-    `#n` references for publishing, and report every id referenced.
+    """Read-only. Render `{{#n}}` cross-reference tokens in `text` as finding
+    references for publishing (see `finding_ref`), and report every id
+    referenced.
 
     Unlike `renumber`'s `sub`, this never checks the referenced ids against a
     ledger - the caller (`plan_review`) is the one that knows which ids are
     actually posted, and warns about any that are not."""
     refs = {int(m) for m in TOKEN.findall(text or "")}
-    return TOKEN.sub(lambda m: "#" + m.group(1), text or ""), refs
+    return TOKEN.sub(lambda m: finding_ref(m.group(1)), text or ""), refs
 
 
 def renumber(ledger):

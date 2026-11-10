@@ -604,6 +604,25 @@ than reasoned about.
   comment mirrors to GitHub authored by the human with a note naming the agent, so attribution and
   the S2 read of prior feedback are unchanged. GitHub does not carry Reviewable's resolution state;
   a re-review that wants to skip settled points must read it from Reviewable.
+- **Finding numbers publish as `f<n>`, on both backends.** A bare `#n` is GitHub's issue and pull
+  request reference, so `**#3**`, "Similar fix as #3." and every rendered `{{#n}}` token linked to
+  whatever issue or PR had that number and left a "mentioned this" entry on its timeline - on
+  Reviewable too, whose comments mirror to GitHub. `finding_ref` in `ledger_tools` renders every
+  number `plan_review` publishes, so both backends share it. Alternatives, checked against GitHub's
+  renderer (`gh api markdown`, mode `gfm`): a backslash escape (`\#3`) still links; a code span
+  (`` `#3` ``) does not link on its own, but links again after a stray backtick earlier on the
+  line, merges with an adjacent span into one garbled span, and shows its backticks literally
+  inside a fenced block, and how Reviewable treats `#n` in a code span is untested; a zero-width
+  space after `#` stops the link but hides an invisible character in text people search and copy.
+  A label with no `#` gives neither backend anything to link.
+  Terminal-only text (warnings, the preview headers, the post report, `report`) keeps `#n`, as the
+  operator's numbering. The brief and the framing guidance name another finding only by its
+  `{{#n}}` token, in every field and in the review body file, which `payload` renders too. A
+  hand-typed `#3` in a claim or detail is still rejected by `validate`, but not in a published
+  `verdict_reason`, which may cite a real PR or issue that way; a hand-typed `f3` is rejected
+  nowhere, since matching `f` and digits would also hit text such as `f1` in code.
+  Unlike the four output changes above, this one changes the golden file, which is regenerated
+  with it. *If wrong:* the label is one function, `finding_ref`.
 - **Known gaps.** `report`'s "N inline + M in the body" line counts GitHub's placement, since the
   backend is chosen later, in `/pr-review-post`, and labels it so (`on GitHub:`); on Reviewable,
   off-diff findings in files the diff touches move from the second number to the first. The key
